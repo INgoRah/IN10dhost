@@ -1,0 +1,30 @@
+Source: in10dfsd
+Section: misc
+Priority: optional
+Maintainer: Your Name <you@example.com>
+Build-Depends:
+ debhelper-compat (= 13),
+ cmake,
+ pkg-config,
+ g++ (>= 10),
+ libfuse3-dev,
+ libgpiod-dev,
+ nlohmann-json3-dev,
+Standards-Version: 4.6.2
+Rules-Requires-Root: no
+
+Package: in10dfsd
+Architecture: any
+Depends:
+ nlohmann-json3-dev,
+ fuse3,
+ libfuse3,
+ libfuse3-dev,
+ libgpiod3,
+ libgpiod-dev,
+ gpiod,
+ ${shlibs:Depends},
+ ${misc:Depends},
+Description: DS2482 1-Wire daemon with GPIO interrupt handling
+ DS2482 daemon using I2C and GPIO interrupts.
+ Designed for embedded Linux systems.

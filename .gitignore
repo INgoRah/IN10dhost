@@ -1,0 +1,9 @@
+data.json
+CMakeCache.txt
+CMakeFiles/*
+Makefile
+*.cmake
+bin/*
+build-*/*
+include/nlohmann/*
+.vscode/*
