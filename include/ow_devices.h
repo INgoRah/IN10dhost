@@ -1,0 +1,110 @@
+#ifndef _OWDEVICES_H
+#define _OWDEVICES_H
+
+#include <vector>
+#include <chrono>
+#include "nlohmann/json.hpp"
+#include "ds2482.h"
+#include "ow_dev.h"
+#include "switch_handler.h"
+
+using std::string;
+using json = nlohmann::json;
+
+#ifndef MAX_BUS
+#define MAX_BUS 4
+#endif
+
+#define MAX_CFG_SIZE 26
+/** Retries for register read */
+#define REG_RETRY 20
+#define PIOSET_RETRY 20
+#define LATCH_RESET_RETRY 20
+/** Retries for activity latch reset */
+#define ACTRES_RETRY 5;
+
+using Clock = std::chrono::steady_clock;
+
+struct OwAttribute {
+    std::string value;
+    Clock::time_point timestamp;
+    std::chrono::milliseconds ttl{1000};
+};
+
+struct Bus {
+    int id;
+    int dev_count;
+    std::vector<OwDev*> devices;
+};
+
+struct Config {
+    int version;
+    int mode;
+	/* poll interval in secs or 0 for no polling */
+	int poll;
+    int bus_count;
+	int log;
+    std::vector<std::unique_ptr<OwDev>> devices;
+	std::vector<Bus> busses;
+	std::vector<_sw_tbl> switches;
+};
+
+extern Config cache;
+
+class OwDevices
+{
+	private:
+		DS2482 *ow;
+		int _mode;
+#if 0
+		uint8_t	pio_data[MAX_BUS][MAX_ADR];
+		uint8_t dev_vers[MAX_BUS][MAX_ADR];
+#endif
+		Clock::time_point last_scan_;
+		void init_busses();
+
+	public:
+		OwDevices() { _mode = 0;}
+		void begin(DS2482 *ds);
+		void init();
+		void cacheInit();
+		void load(const std::string& path);
+		void save(const std::string& path);
+		int dump(char* buf);
+
+		uint8_t search(bool mode);
+
+		void update_device(int bus, string rom);
+		void add_device(OwDev* dev);
+		void update_data();
+
+		OwDev* find(const string& rom);
+		OwDev* find(uint64_t targetCode);
+		OwDev* find(uint8_t bus, uint8_t id, uint8_t type = 0x29);
+		int bus_count() const { return MAX_BUS; }
+		int get_mode() const { return _mode; }
+		void set_mode(int mode);
+		void set_log(int level);
+		void set_poll(int poll) { cache.poll = poll; };
+		int get_poll() { return cache.poll; };
+
+		std::vector<OwDev*> list_devices(int bus);
+#if 0
+		void adrGen(uint8_t bus, uint8_t adr[8], uint8_t id);
+		uint8_t ds2408LatchReset(uint8_t* addr);
+		uint8_t ds2408ChWrite(uint8_t bus, uint8_t* addr, uint8_t* data, int cnt);
+		void toggleDs2413(uint8_t bus, uint8_t* addr);
+		uint8_t ds2408PioGet(uint8_t bus, uint8_t* addr, uint8_t force = 0);
+		uint8_t ds2408PioSet(uint8_t bus, uint8_t* addr, uint8_t pio);
+		uint8_t ds2408xPinSet(uint8_t bus, uint8_t* addr, uint8_t pio, uint8_t level, uint8_t cmd = 0xDD, uint8_t val = 0);
+		uint8_t ds2408TogglePio(uint8_t bus, uint8_t* addr, uint8_t pio, uint8_t* data = NULL);
+		void ds2408CfgWrite(uint8_t bus, uint8_t adr[8], uint8_t* d, uint8_t len);
+		int ds2408CfgRead(uint8_t bus, uint8_t adr[8], uint8_t* data);
+		int16_t adcRead(uint8_t busNr, uint8_t addr[8], uint8_t ch, uint8_t mode = 0);
+
+		uint8_t getVersion(uint8_t bus, uint8_t id);
+		void versionUpdate(uint8_t bus, uint8_t id);
+#endif
+};
+
+#endif

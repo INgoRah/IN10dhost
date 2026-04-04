@@ -1,0 +1,33 @@
+name: build
+
+on:
+  push:
+  pull_request:
+
+jobs:
+
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        cc: [""]
+        include:
+        - os: ubuntu-latest
+          cc: CC=/usr/bin/gcc-14
+          setup: sudo apt-get install -y gcc-14 fuse3
+    steps:
+    - uses: actions/checkout@v2
+    - name: setup
+      if: ${{ matrix.setup }}
+      run: ${{ matrix.setup }}
+    - name: install dependencies on Linux
+      if: runner.os == 'Linux'
+      run: sudo apt-get install -y fuse3 libfuse3-dev nlohmann-json3-dev libgtest-dev libgmock-dev
+    - name: configure
+      run: ${{ matrix.cc }} mkdir build;cmake -DUSE_GPIO=NO -DUSE_I2C=NO -DTESTING=ON -S . -B build
+    - name: make
+      run: cmake --build build -- -j$(nproc)
+    - name: check
+      run: build/bin/IN10dfsd
