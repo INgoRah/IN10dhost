@@ -76,16 +76,14 @@ int ds1820::fs_read(string& path, char* buf, size_t size, bool uncached)
 */
 int ds1820::temp_read(const uint8_t mode)
 {
-	uint8_t scratchPad[9];
+#ifdef USE_I2C
 	bool ret;
-#if 1
-	printf("%d: %02X.", bus, addr[0]);
-	for (int j = 1; j < 8; j++) {
-		printf("%02X", addr[j]);
-	}
-	printf("\n");
 #endif
+	uint8_t scratchPad[9];
+	(void)mode;
+
 	std::lock_guard<std::mutex> m(ow->mtx);
+#ifdef USE_I2C
 	ret = ow->selectChannel(bus);
 	if (!ret) {
 		return -1;
@@ -120,20 +118,16 @@ int ds1820::temp_read(const uint8_t mode)
 	// byte 7: DS18S20: COUNT_PER_C
 	//         DS18B20 & DS1822: store for crc
 	// byte 8: SCRATCHPAD_CRC
-#if 0
-	printf((" "));
-	for (uint8_t i = 0; i < 9; i++) {
-		scratchPad[i] = ow->read();
-		printf("%0X", scratchPad[i]);
-		printf((" "));
-	}
-	printf("\n");
-#else
 	for (uint8_t i = 0; i < 9; i++)
 		scratchPad[i] = ow->read();
 	if (scratchPad[1] == 0xff)
 		return -2;
-#endif
+#else
+	// dummy data for testing
+	scratchPad[0] = 0x50; // LSB
+	scratchPad[1] = 0x05; // MSB -> 85.00 °C
+	scratchPad[5] = 60; // humidity
+#endif // USE_I2C
 	int16_t raw = (scratchPad[1] << 8) | scratchPad[0];
 #if 0
 #define cfg  (scratchPad[4] & 0x60)

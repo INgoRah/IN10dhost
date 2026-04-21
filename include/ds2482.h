@@ -78,11 +78,11 @@ enum DS2482_ERR {
 class DS2482
 {
 public:
-    DS2482() { fd = -1; };
-    DS2482(const std::string& i2c_dev, int address);
-    ~DS2482();
+	DS2482() { fd = -1; };
+	DS2482(const std::string& i2c_dev, int address);
+	~DS2482();
 
-    std::mutex mtx;
+	std::mutex mtx;
 	uint8_t last_err;
 	bool init();
 	bool configureDev(uint8_t config);
@@ -95,21 +95,22 @@ public:
 	uint8_t read();
 	void read(uint8_t *buf, uint16_t count);
 	void write(const uint8_t *buf, uint16_t count, uint8_t power/* = 0 */);
-    // Issue a 1-Wire rom select command, you do the reset first.
-    void select(const  uint8_t rom[8]);
+	// Issue a 1-Wire rom select command, you do the reset first.
+	void select(const  uint8_t rom[8]);
 	// Issue skip rom
 	void skip();
 
 	// Clear the search state so that if will start from the beginning again.
-    void reset_search();
+	void reset_search();
+	void target_search(uint8_t family_code);
 
-    // Look for the next device. Returns 1 if a new address has been
-    // returned. A zero might mean that the bus is shorted, there are
-    // no devices, or you have already retrieved all of them.  It
-    // might be a good idea to check the CRC to make sure you didn't
-    // get garbage.  The order is deterministic. You will always get
-    // the same devices in the same order.
-    bool search(uint8_t *newAddr, bool search_mode = true);
+	// Look for the next device. Returns 1 if a new address has been
+	// returned. A zero might mean that the bus is shorted, there are
+	// no devices, or you have already retrieved all of them.  It
+	// might be a good idea to check the CRC to make sure you didn't
+	// get garbage.  The order is deterministic. You will always get
+	// the same devices in the same order.
+	bool search(uint8_t *newAddr, bool search_mode = true);
 	uint16_t crc16(const uint8_t* input, uint16_t len, uint16_t crc);
 	bool check_crc16(const uint8_t* input, uint16_t len, const uint8_t* inverted_crc, uint16_t crc);
 
@@ -119,6 +120,7 @@ private:
 	uint8_t ch;
 	uint8_t _read_ptr;
 	uint8_t searchLastDisrepancy;
+	uint8_t searchLastFamilyDiscrepancy;
 	uint8_t searchAddress[8];
 	uint8_t searchExhausted;
 

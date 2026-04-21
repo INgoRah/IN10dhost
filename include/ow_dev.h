@@ -34,6 +34,7 @@ class OwDev : IFs {
 			return rom == other.rom;
 		};
 		virtual void set_mode(int mode);
+		// FS entries
 		std::vector<string> fs_dir(string& path) const override;
 		int fs_attr(string& path) const override;
 		int fs_open(string& path) const override;

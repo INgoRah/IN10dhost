@@ -65,6 +65,7 @@ endif()
 if(TESTING)
     find_package(GTest REQUIRED)
     include(GoogleTest)
+    add_compile_definitions(TESTING)
 endif()
 
 # ----------------------------

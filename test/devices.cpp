@@ -10,13 +10,24 @@
 #include "ow_devices.h"
 #include "ds2408.h"
 
-extern DS2482 ds;
 extern OwDevices ow;
+extern DS2482 ds;
+
+#if 0
+class MockDS2482 : public DS2482 {
+public:
+    // MOCK_METHOD(Return, Name, (Arguments), (Qualifiers))
+    MOCK_METHOD(bool, search, (uint8_t *newAddr, bool search_mode), ());
+};
+
+MockDS2482 mds;
+#endif
 
 class DevTest : public ::testing::Test {
 protected:
     void SetUp() override {
         ow.init();
+		ow.begin(&ds);
     }
 };
 
@@ -96,16 +107,4 @@ TEST_F(DevTest, add_devices)
 	ow.update_data();
 	devs = ow.list_devices(0);
 	EXPECT_EQ(devs.size(), 1);
-}
-
-void find_device()
-{
-	ds2408* dev = (ds2408*)ow.find("29.0701F8FE6677F4");
-	dev->val = 0xaa;
-	//dev = (OwDev*) new ds2408("29.FF3C2A160416");
-	dev = (ds2408*)ow.find("29.0701F8FE6677F4");
-	if (dev)
-		printf("dev %02X\n", dev->val);
-	else
-		printf("no dev\n");
 }

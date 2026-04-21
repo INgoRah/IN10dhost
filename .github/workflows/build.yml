@@ -24,10 +24,17 @@ jobs:
       run: ${{ matrix.setup }}
     - name: install dependencies on Linux
       if: runner.os == 'Linux'
-      run: sudo apt-get install -y fuse3 libfuse3-dev nlohmann-json3-dev libgtest-dev libgmock-dev
+      run: sudo apt-get install -y fuse3 libfuse3-dev nlohmann-json3-dev libgtest-dev libgmock-dev lcov
     - name: configure
       run: ${{ matrix.cc }} mkdir build;cmake -DUSE_GPIO=NO -DUSE_I2C=NO -DTESTING=ON -S . -B build
     - name: make
       run: cmake --build build -- -j$(nproc)
     - name: check
       run: build/bin/IN10dfsd
+    - name: Gen Coverage Report
+      run: lcov --capture -q --directory build/ --include "src" --ignore-errors inconsistent,inconsistent  --output-file coverage.info
+    - name: Check Coverage Threshold
+      uses: tluijken/code-coverage-threshold@v1
+      with:
+        coverage-file: coverage.info # Path to your LCOV file
+        minimum-coverage: 80              # Fails if below 80%

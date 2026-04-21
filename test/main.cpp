@@ -30,23 +30,6 @@ Ard_i2c arduino;
 extern int test_devices();
 extern int test_fs();
 
-void log_time()
-{
-
-}
-
-void load_json()
-{
-	string f = std::filesystem::current_path();
-	f = f + "/test/data.json";
-	try {
-		ow.load(f.c_str());
-	}
-	catch (const std::exception& e) {
-		printf("loading failed %s\n" , e.what());
-	}
-}
-
 void segfault_handler(int signal)
 {
 	std::cerr << "Caught segmentation fault (signal " << signal << ")\n";
@@ -55,30 +38,56 @@ void segfault_handler(int signal)
 
 TEST(main, LoadJson)
 {
+	bool ok = false;
 	string f = std::filesystem::current_path();
+	LogLevel lvl = logger.get_level();
+	ow.begin(&ds);
+	ow.set_mode(0x10);
+	try {
+		ow.load("invalid.json");
+	}
+	catch (const std::exception& e) {
+		// loading failed as expected
+		ok = true;
+	}
+	EXPECT_EQ(ok, true);
+
 	f = f + "/test/data.json";
 	try {
 		ow.load(f.c_str());
-		EXPECT_EQ(0, 0);
-		// set log level back if changed by test
-		logger.set_level(LogLevel::WARN);
+		ok = true;
 	}
 	catch (const std::exception& e) {
-		printf("loading failed %s\n" , e.what());
+		logger.error(std::format("loading failed %s\n", e.what()));
+		ok = false;
 	}
+	EXPECT_EQ(ok, true);
+	// set log level back if changed by test
+	logger.set_level(lvl);
 	ow.save(f);
+	// todo check if file exists
 	EXPECT_EQ(0, 0);
 	ow.init();
+}
+
+TEST(main, Logging)
+{
+	LogLevel lvl = logger.get_level();
+	// full coverage in logger
+	logger.set_level(LogLevel::VERBOSE);
+	logger.error("test error meesage");
+	logger.warn("test warn meesage");
+	logger.debug("test debug message");
+	logger.info("test info message");
+	logger.verbose("test verbose message");
+	logger.log(LogLevel::NONE, "test unkown meesage");
+	logger.set_level(lvl);
 }
 
 int main(int argc, char* argv[])
 {
 	std::signal(SIGSEGV, segfault_handler);
-	ow.begin(&ds);
-	ow.set_mode(0x10);
 	logger.set_level(LogLevel::WARN);
-	logger.log( LogLevel::INFO, "Daemon started successfully.");
-	logger.log( LogLevel::VERBOSE, "verbose mode.");
 	::testing::InitGoogleTest(&argc, argv);
 	return RUN_ALL_TESTS(); // This one line finds and runs every TEST() in the binary
 }

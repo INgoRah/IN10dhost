@@ -44,6 +44,7 @@ Ard_i2c::Ard_i2c()
 	this->power = 0;
 }
 
+#ifdef USE_I2C
 int i2c_write(int fd, uint8_t cmd)
 {
 	struct i2c_msg msg = {
@@ -116,6 +117,7 @@ int i2c_write_data(int fd, uint8_t* buf, uint16_t size)
 	};
 	return ioctl(fd, I2C_RDWR, &rdwr);
 }
+#endif
 
 int Ard_i2c::begin(OwDevices* ow)
 {
@@ -150,16 +152,22 @@ void Ard_i2c::set_mode(int mode)
 	}
 	uint8_t buf[] = { 0x69, (uint8_t)(mode & 0xff) };
 	i2c_write_data(fd, buf, 2);
+	buf[0] = 0xE1;
+	i2c_write_data(fd, buf, 1);
 	close(fd);
+	logger.verbose(std::format("set mode AD={:#x}", mode));
 #endif
 }
 
+#ifdef USE_I2C
 // Helper to mimic JS delay(ms)
 void delay_ms(int ms) {
 	usleep(ms * 1000);
 }
+#endif
 
 void Ard_i2c::interrupt() {
+#ifdef USE_I2C
 	int fd = open("/dev/i2c-0", ARD_I2C_ADDR);
 
 	if (fd <= 0) {
@@ -167,18 +175,17 @@ void Ard_i2c::interrupt() {
 		return;
 	}
 	if (mode == 0x10) {
-		// read status and channel
-		uint8_t st = i2c_read(fd);
+		// read status which clears the gpio ("interrupts")
+		i2c_read(fd);
 		close(fd);
-		logger.verbose(std::format("AD={:#x}", st));
-
 		// call switch handler
-		for (int bus = 0; bus < MAX_BUS;bus++)
+		for (int bus = 0; bus < MAX_BUS; bus++)
 			swHdl.alarmHandler(bus);
 		return;
 	}
 	events(fd);
 	close(fd);
+#endif
 }
 
 void Ard_i2c::events(int fd)
@@ -333,7 +340,6 @@ int Ard_i2c::fs_attr(std::string& path) const
 {
 	for (const auto& s : ArdI2c) {
 		if (path.find(s.name) != std::string::npos) {
-			printf("attr %s = %d\n", s.name, s.suglen);
 			return s.suglen;
 		}
 	}
@@ -349,9 +355,12 @@ int Ard_i2c::fs_read(string& path, char* buf, size_t size, bool uncached)
 		std::sprintf(buf, "%d", mode);
 		goto out;
 	}
+	if (path.find("power") != string::npos) {
+		std::sprintf(buf, "%d", power);
+		goto out;
+	}
 	return OwDev::fs_read(path, buf, size, uncached);
 out:
-	logger.log(LogLevel::DEBUG, "reading " + path + " = " + std::to_string(mode) + " -> " + std::string(buf) + "...");
 	return std::strlen(buf);
 }
 

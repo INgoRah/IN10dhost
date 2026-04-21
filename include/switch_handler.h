@@ -1,6 +1,11 @@
 #ifndef _SWITCHHANDLER_H
 #define _SWITCHHANDLER_H
-#include <ds2482.h>
+#include <gtest/gtest_prod.h>
+#include "ds2482.h"
+#include "ds2408.h"
+#include "fs.h"
+
+using std::string;
 
 /* config */
 #ifdef AVRSIM
@@ -107,44 +112,28 @@ struct _sw_tim_tbl {
 	union pio dst;
 };
 
-struct _dim_tbl {
-	union pio dst;
-	uint8_t level;
-};
-
-enum _pio_mode {
-	ON,
-	OFF,
-	TOGGLE
-};
-
 extern struct _sw_tbl sw_tbl[MAX_SWITCHES];
 extern struct _sw_tim_tbl timed_tbl[MAX_TIMED_SWITCH];
-extern struct _dim_tbl dim_tbl[MAX_DIMMER];
 
 class OwDevices;
-class SwitchHandler
-{
+class SwitchHandler : IFs {
 	private:
 		OwDevices* ow;
 		DS2482 *ds;
 		uint8_t data[10];
 		// current latch data to be hanled
 		uint8_t cur_latch;
-		uint16_t srcData(uint8_t busNr, uint8_t adr1);
+  		uint16_t srcData(uint8_t busNr, uint8_t adr1);
 		uint8_t dataRead(union pio dst, uint8_t adr[8]);
 		uint8_t dimStage(uint8_t dim);
 		uint8_t getType(union pio dst);
 		uint8_t bitnumber();
 		bool timerUpdate(union d_adr_8 dst, uint8_t typ);
-#ifdef SOFTOFF_SUPPORT
-		uint8_t dimDown(struct _timer_item* tmr);
-#endif
 		uint8_t dimLevel(union pio dst, uint8_t* id);
 		uint8_t dimLevel(union d_adr_8 dst, uint8_t* id);
-		bool setPio(union pio dst, uint8_t adr[8], uint8_t d, enum _pio_mode state);
-		bool setLevel(union pio dst, uint8_t adr[8], uint8_t id, uint8_t level);
 		uint16_t getLen(uint8_t max, uint16_t elSize);
+		// GTest testing support
+		FRIEND_TEST(LLSwTest, ll_funcs);
 	public:
 		uint8_t mode;
 		uint8_t light_thr;
@@ -153,16 +142,21 @@ class SwitchHandler
 		SwitchHandler();
 		SwitchHandler(OwDevices* devs);
 		void status();
-		bool actorHandle(union d_adr_8 dst, enum _pio_mode state);
+		bool actor_handle(union pio dst, enum _pio_mode state);
 		void begin(DS2482 *ow);
 		void loop();
 		void initSwTable();
-		void saveSwTable(uint8_t vers_force);
 		bool dev_alarm(uint8_t bus, uint8_t adr[8]);
 		bool alarmHandler(uint8_t busNr);
 		bool switchHandle(uint8_t busNr, uint8_t adr1);
 		bool switchHandle(uint8_t busNr, uint8_t adr1, uint8_t latch);
 		bool switchLevel(union pio dst, uint8_t level);
 		bool initialStates();
+		// FS entries
+		std::vector<string> fs_dir(string& path) const override;
+		int fs_attr(string& path) const override;
+		int fs_open(string& path) const override;
+		int fs_read(string& path, char* buf, size_t size, bool uncached = false) override;
+		int fs_write(string& path, const char* buf, size_t size) override;
 };
 #endif

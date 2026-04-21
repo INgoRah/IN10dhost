@@ -119,6 +119,7 @@ void from_json(const json& j, Config& c) {
 
 void OwDevices::init()
 {
+	cache.version = 1;
 	for (size_t i = 0; i < dev_list.size(); ++i) {
 		dev_list[i].romCode = 0;
 		dev_list[i].dev = nullptr;
@@ -154,10 +155,7 @@ void OwDevices::load(const std::string& path) {
 	json j;
 	std::ifstream file(path);
 	if (!file) {
-		printf ("Cannot open config file: %s\n", path.c_str());
-		cache.version = 1;
-		init_busses();
-		printf ("created config: version %d, busses %d\n", cache.version, (unsigned int)cache.busses.size());
+		throw std::runtime_error("Cannot open config file: " + path);
 	} else {
 		file >> j;
 		cache = j.get<Config>();
@@ -345,7 +343,6 @@ uint8_t OwDevices::search(bool mode)
 {
 	char buf[18];
 	int pos;
-#ifdef USE_I2C
 	uint8_t adr[8], bus, res;
 
 	res = 0;
@@ -365,11 +362,13 @@ uint8_t OwDevices::search(bool mode)
 				assert (pos < (int)sizeof(buf));
 				update_device(bus, buf);
 		}
+#ifdef USE_I2C
+#endif
 	}
-#else
+#ifndef USE_I2C
 	(void)mode;
-	uint8_t  adr[8] = { 0x28, 0x5, 0x1, 0xFA, 0xFE, 0x66, 0x77, 0xC6};
-	sprintf(buf, "%02X.", adr[0]);
+	uint8_t  adrt[8] = { 0x28, 0x5, 0x1, 0xFA, 0xFE, 0x66, 0x77, 0xC6};
+	sprintf(buf, "%02X.", adrt[0]);
 	pos = 2;
 	for (int j = 1; j < 8; j++) {
 		sprintf(&buf[pos], "%02X", adr[j]);

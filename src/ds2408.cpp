@@ -41,7 +41,6 @@ std::vector<std::string> ds2408::fs_dir(string& path) const
 			std::vector<std::string> dir;
 			dir.push_back("name");
 			dir.push_back("func");
-			dir.push_back("auto_switch");
 			return dir;
 		}
 	}
@@ -52,17 +51,14 @@ std::vector<std::string> ds2408::fs_dir(string& path) const
 		if (pos != std::string::npos) {
 			for (int i = 0; i < 8; i++) {
 				if (sname.find("PIO") != string::npos) {
-					if (cfg[9 + i] & 0x20) {
+					if (cfg[CFG_PIN_ID + i] & 0x20) {
 						sname.replace(pos + 1, 1, std::to_string(i));
 						dir.push_back(sname.c_str());
-					}
-					if (cfg[9 + i] == 0x23) {
-						dir.push_back("level");
 					}
 					continue;
 				}
 				if (sname.find("sensed") != string::npos) {
-					if (cfg[9 + i] & 0x10) {
+					if (cfg[CFG_PIN_ID + i] & 0x10) {
 						sname.replace(pos + 1, 1, std::to_string(i));
 						dir.push_back(sname.c_str());
 					}
@@ -86,11 +82,13 @@ int ds2408::fs_attr(std::string& path) const
 		if (pos != std::string::npos) {
 			for (int i = 0; i < 8; i++) {
 				sname.replace(pos + 1, 1, std::to_string(i));
-				if (path.find(sname) != string::npos)
-					return s.suglen;
-				if (path.find("pin." + std::to_string(i) + "/func") != string::npos)
+				if (path.find("PIO." + std::to_string(i)) != string::npos)
+					return 1;
+				if (path.find("sensed." + std::to_string(i)) != string::npos)
+					return 1;
+				if (path.find("pin." + std::to_string(i) + "/name") != string::npos)
 					return 20;
-				if (path.find("pin." + std::to_string(i) + "/auto_switch") != string::npos)
+				if (path.find("pin." + std::to_string(i) + "/func") != string::npos)
 					return 20;
 				if (path.find("pin." + std::to_string(i)) != string::npos) {
 					return 0;
@@ -101,8 +99,6 @@ int ds2408::fs_attr(std::string& path) const
 				return s.suglen;
 		}
 	}
-	if (path.find("level") != std::string::npos)
-		return 3;
 
 	// add standards
 	return OwDev::fs_attr(path);
@@ -134,7 +130,7 @@ int ds2408::fs_read(string& path, char* buf, size_t size, bool uncached)
 				sname.replace(pos + 1, 1, std::to_string(i));
 				if (path.find(sname) != std::string::npos) {
 					if (path.find(std::format("pin.{}/func", i)) != string::npos) {
-						std::sprintf(buf, "%X", cfg[9 + i]);
+						std::sprintf(buf, "%X", cfg[CFG_PIN_ID + i]);
 						goto out;
 					}
 					if (path.find(std::format("pin.{}/name", i)) != string::npos) {
@@ -143,7 +139,10 @@ int ds2408::fs_read(string& path, char* buf, size_t size, bool uncached)
 					}
 					// read at 1 << i;
 					if (path.find("PIO") != string::npos) {
-						std::sprintf(buf, "%d", (data[PIO_OUT] & (0x1 << i)) ? 1 : 0);
+						if (cfg[CFG_PIN_ID + i] == CFG_OUT_PWM)
+							std::sprintf(buf, "%d", level);
+						else
+							std::sprintf(buf, "%d", (data[PIO_OUT] & (0x1 << i)) ? 1 : 0);
 						goto out;
 					}
 					if (path.find("sensed") != string::npos) {
@@ -151,7 +150,7 @@ int ds2408::fs_read(string& path, char* buf, size_t size, bool uncached)
 						std::sprintf(buf, "%d", (data[PIO_LS] & (0x1 << i)) ? 1 : 0);
 						goto out;
 					}
-					if (path.find("latch") != string::npos) {
+					if (path.find("latched") != string::npos) {
 						/* read activity latch from register 0x8A */
 						std::sprintf(buf, "%d", (data[PIO_LATCH] & (0x1 << i)) ? 1 : 0);
 						goto out;
@@ -175,29 +174,36 @@ int ds2408::fs_write(string& path, const char* buf, size_t size)
 		pio_set(tmp);
 		return size;
 	}
-	for (int i = 0; i < 8; i++) {
-		s = "PIO." + std::to_string(i);
-		if (path.find(s) != string::npos) {
-			uint8_t tmp = (uint8_t)(std::stoi(buf) & 0xff);
-			if (mode != 0x10)
-				ard_set(i, tmp);
-			else {
-				// TODO guard data struct
-				logger.verbose(std::format("set PIO.{} = {}", i, tmp));
-				if (tmp)
-					tmp = data[PIO_OUT] | (0x01 << i);
-				else
-					tmp = data[PIO_OUT] & ~(0x01 << i);
-				pio_set(tmp);
+	for (const auto& s : DS2408) {
+		string sname = s.name;
+		size_t pos = sname.find(".*");
+		if (pos != std::string::npos) {
+			for (int i = 0; i < 8; i++) {
+				sname.replace(pos + 1, 1, std::to_string(i));
+				if (path.find(sname) != std::string::npos) {
+					if (path.find(std::format("pin.{}/func", i)) != string::npos) {
+						uint8_t tmp = (uint8_t)(std::stoi(buf) & 0xff);
+						cfg[CFG_PIN_ID + i] = tmp;
+						return size;
+					}
+					if (path.find("PIO") != string::npos) {
+						uint8_t tmp = (uint8_t)(std::stoi(buf) & 0xff);
+						if (mode != 0x10)
+							ard_set(i, tmp);
+						else {
+							logger.verbose(std::format("set PIO.{} = {}", i, tmp));
+							pin_switch(i, (tmp == 0 ? OFF : ON), tmp);
+						}
+						return size;
+					}
+					if (path.find(sname) != string::npos) {
+						std::lock_guard<std::mutex> lock(ow->mtx);
+						// reset the latches
+						latch_reset();
+						data[PIO_LATCH] = 0;
+					}
+				}
 			}
-			return size;
-		}
-		s = "latch." + std::to_string(i);
-		if (path.find(s) != string::npos) {
-			std::lock_guard<std::mutex> lock(ow->mtx);
-			// reset the latches
-			latch_reset();
-			data[PIO_LATCH] = 0;
 		}
 	}
 
@@ -214,6 +220,10 @@ void ds2408::update(uint8_t pio, uint8_t ff1)
 
 uint8_t ds2408::ard_set(uint8_t pio, uint8_t val)
 {
+#ifndef USE_I2C
+	(void)pio;
+	(void)val;
+#else
 	uint8_t buf[5];
 	uint8_t ret;
 	int to = 100;
@@ -249,6 +259,7 @@ uint8_t ds2408::ard_set(uint8_t pio, uint8_t val)
 
 	data[0] = pio;
 	// set ack to pending which will be set by the event handler
+#endif
 	return 0xAA;
 }
 
@@ -284,7 +295,6 @@ uint8_t ds2408::latch_reset()
 	} while (--retry > 0);
 #ifdef DEBUG
 	if ((err && retry == 0) || (err && debug > 0)) {
-		log_time();
 		Serial.print (F("latch reset err="));
 		Serial.print (err);
 		if (retry == 0)
@@ -301,6 +311,36 @@ uint8_t ds2408::latch_reset()
 	return tmp;
 }
 
+uint8_t ds2408::pin_switch(uint8_t pio, enum _pio_mode state, uint8_t lvl)
+{
+	logger.log(LogLevel::DEBUG, "PIO cfg=" + std::to_string(cfg[CFG_PIN_ID + pio]));
+	// check whether this is a level or simple IO
+	if (cfg[CFG_PIN_ID + pio] == CFG_OUT_PWM) {
+		// TODO Toggle leads to dim stages
+		if (level_set(pio, lvl) != 0xAA)
+			return -1;
+		// store current level in data for readback until the next write
+		level = lvl;
+	} else {
+		uint8_t tmp;
+
+		// TODO guard data struct
+		if (state == TOGGLE) {
+			if (data[PIO_OUT] & (0x1 << pio))
+				tmp = data[PIO_OUT] & ~(0x01 << pio);
+			else
+				tmp = data[PIO_OUT] | (0x01 << pio);
+		} else {
+			if (state == ON)
+				tmp = data[PIO_OUT] | (0x01 << pio);
+			if (state == OFF)
+				tmp = data[PIO_OUT] & ~(0x01 << pio);
+		}
+		pio_set(tmp);
+	}
+	return 0;
+}
+
 uint8_t ds2408::pio_set(uint8_t pio)
 {
 #ifdef USE_I2C
@@ -308,8 +348,8 @@ uint8_t ds2408::pio_set(uint8_t pio)
 	bool ret;
 #endif
 
-	logger.log(LogLevel::DEBUG, "set PIO " + std::to_string(pio) + " in mode " + std::to_string(mode));
 	std::lock_guard<std::mutex> lock(ow->mtx);
+	logger.log(LogLevel::DEBUG, "set PIO " + std::to_string(pio) + " in mode " + std::to_string(mode));
 #ifdef USE_I2C
 	retry = PIOSET_RETRY - 1;
 	do {
@@ -394,19 +434,15 @@ uint8_t ds2408::reg_read(bool latch_reset)
 		// on the slave
 		// if (ow->last_err == 0)
 		ow->read (data, 10);
-#else
-		data[PIO_LS] = 0xde;
-		data[PIO_LATCH] = 0x04;
-		data[STAT] = 0x00;
-		data[6] = 0xff;
-		tmp = 0xaa;
-#endif
-			/* check for valid status register */
+		/* check for valid status register */
 		if (data[STAT] != 0xff)
 			break;
 		tmp = 0x55;
 		if (err == 0)
 			err = ow->last_err;
+#else
+		tmp = 0xaa;
+#endif
 		// if we got here, there is an issue and we
 		// will try again
 		//delay(5);
@@ -424,7 +460,10 @@ uint8_t ds2408::reg_read(bool latch_reset)
 
 int ds2408::cfg_read()
 {
-	int i, len = MAX_CFG_SIZE;
+	int len = MAX_CFG_SIZE;
+
+#ifdef USE_I2C
+	int i;
 
 	ow->selectChannel(bus);
 	ow->reset();
@@ -433,20 +472,25 @@ int ds2408::cfg_read()
 
 	for (i = 0; i < CFG_SIZE - 1; i++)
 		cfg[i] = ow->read ();
-
+#endif
 	return len;
 }
 
-uint8_t ds2408::xpin_set(uint8_t pio, uint8_t level, uint8_t cmd, uint8_t val)
+uint8_t ds2408::level_set(uint8_t pio, uint8_t level, uint8_t cmd, uint8_t val)
 {
 	uint8_t data[5] = { 0xC5, cmd, pio, val, level };
 	uint16_t crc;
 	bool ret;
 
+	logger.log(LogLevel::DEBUG, "set PIO level=" + std::to_string(level) + " for PIO " + std::to_string(pio) + " in mode " + std::to_string(mode));
+
 	/* if setting any level, a level 0 means stop */
 	if (level == 0 && cmd == 0xDD)
 		/* dim down */
-		data[1] = 0xEB;
+		data[1] = TMR_TYPE_STOP_DIM;
+#ifndef USE_I2C
+	return 0xaa;
+#endif
 	ret = ow->selectChannel(bus);
 	if (ret)
 		ret = ow->reset();
@@ -463,20 +507,9 @@ uint8_t ds2408::xpin_set(uint8_t pio, uint8_t level, uint8_t cmd, uint8_t val)
 	crc = ow->read();
 	crc |= ow->read() << 8;
 	uint16_t crc16 = ow->crc16(data, 5, 0);
-#if 0
-	if (debug > 2) {
-		for (int i = 0; i < 5; i++) {
-			Serial.print(F(" "));
-			Serial.print(data[i], HEX);
-			Serial.print(F(" "));
-		}
-	}
-#endif
 	if (crc == static_cast<uint16_t>(~crc16))
 		return 0xAA;
 
-	//Serial.print(F("CRC mismatch calc="));
-	//Serial.println(~crc16, HEX);
 
 	return 0xff;
 }
