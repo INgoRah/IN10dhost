@@ -1,9 +1,18 @@
-# Requirements
+# Introduction
+
+## Features
+
+## Limitations
+
+# Building and running
+
+## Requirements
 apt install fuse3 libfuse3 libfuse3-dev nlohmann-json3-dev
 if using gpio:
 apt install libgpiod3 libgpiod-dev
 sudo apt install libgtest-dev libgmock-dev
-# native build
+
+## native build
 mkdir build-native
 cmake -DUSE_GPIO=NO -DUSE_I2C=NO -S . -B build-native
 cmake --build build-native
@@ -32,7 +41,7 @@ optional with -chroot=trixie-armhf
 sbuild-shell trixie-armhf
 apt-cache search libgpiod
 
-# or copy
+## or copy
 cmake --build build-arm && scp build-arm/bin/IN10dfsd root@192.168.178.79:/opt
 cmake --build build-arm && scp build-arm/bin/IN10dfsd root@192.168.178.37:/data/home/ingo
 

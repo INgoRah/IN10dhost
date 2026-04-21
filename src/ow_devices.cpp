@@ -44,8 +44,8 @@ void from_json(const json& j, Bus& b) {
 }
 
 void to_json(json& j, const Config& c) {
-	j = json{
-		{"version", 2},
+	j = json {
+		{"version", 1},
 		{"mode", c.mode},
 		{"poll", c.poll},
 		{"log", c.log},
@@ -92,33 +92,22 @@ void from_json(const json& j, Config& c) {
 	c.version = j.at("version").get<int>();
 	c.bus_count = j.at("bus_count").get<int>();
 	j.at("busses").get_to(c.busses);
-	try {
-		if (j.contains("switches"))
-			j.at("switches").get_to(c.switches);
-	}
-	catch (const std::exception& e) {
-		// setup c.switches?
-	}
+	if (j.contains("switches"))
+		j.at("switches").get_to(c.switches);
 	c.devices.clear();
 
 	for (const auto& jdev : j.at("devices")) {
 		c.devices.push_back(make_device_from_json(jdev));
 	}
-	try {
-		c.mode = j.at("mode").get<int>();
-		c.log = j.at("log").get<int>();
-		if (j.contains("poll"))
-			c.poll = j.at("poll").get<int>();
-	}
-	catch (const std::exception& e) {
-		c.mode = 14;
-		c.log = 7;
-		c.poll = 5;
-	}
+	c.mode = j.at("mode").get<int>();
+	c.log = j.at("log").get<int>();
+	if (j.contains("poll"))
+		c.poll = j.at("poll").get<int>();
 }
 
 void OwDevices::init()
 {
+	cache.version = 1;
 	for (size_t i = 0; i < dev_list.size(); ++i) {
 		dev_list[i].romCode = 0;
 		dev_list[i].dev = nullptr;
@@ -154,10 +143,7 @@ void OwDevices::load(const std::string& path) {
 	json j;
 	std::ifstream file(path);
 	if (!file) {
-		printf ("Cannot open config file: %s\n", path.c_str());
-		cache.version = 1;
-		init_busses();
-		printf ("created config: version %d, busses %d\n", cache.version, (unsigned int)cache.busses.size());
+		throw std::runtime_error("Cannot open config file: " + path);
 	} else {
 		file >> j;
 		cache = j.get<Config>();
@@ -176,20 +162,12 @@ void OwDevices::load(const std::string& path) {
 
 void OwDevices::save(const std::string& path) {
 	std::ofstream file(path);
-	if (!file) {
-		throw std::runtime_error("Cannot write config file: " + path);
-	}
 	cache.version = 1;
 	// this is just for information and not used in the system
 	for (auto& b : cache.busses)
 		b.dev_count = b.devices.size();
-	try {
-		json j = cache;
-		file << j.dump(4); // pretty-print with 4-space indentation
-	}
-	catch (const std::exception& e) {
-		printf("%s", e.what());
-	}
+	json j = cache;
+	file << j.dump(4); // pretty-print with 4-space indentation
 }
 
 void OwDevices::add_device(OwDev* dev)
@@ -345,15 +323,17 @@ uint8_t OwDevices::search(bool mode)
 {
 	char buf[18];
 	int pos;
+	uint8_t adr[8], bus;
 #ifdef USE_I2C
-	uint8_t adr[8], bus, res;
+	uint8_t  res = 0;
+#endif
 
-	res = 0;
 	for (bus = 0; bus < 4; bus++) {
 		std::lock_guard<std::mutex> lock(ow->mtx);
 		ow->selectChannel(bus);
 		ow->reset();
 		ow->reset_search();
+#ifdef USE_I2C
 		while (ow->search(adr, mode)) {
 				res++;
 				sprintf(buf, "%02X.", adr[0]);
@@ -365,11 +345,12 @@ uint8_t OwDevices::search(bool mode)
 				assert (pos < (int)sizeof(buf));
 				update_device(bus, buf);
 		}
+#endif
 	}
-#else
+#ifndef USE_I2C
 	(void)mode;
-	uint8_t  adr[8] = { 0x28, 0x5, 0x1, 0xFA, 0xFE, 0x66, 0x77, 0xC6};
-	sprintf(buf, "%02X.", adr[0]);
+	uint8_t  adrt[8] = { 0x28, 0x5, 0x1, 0xFA, 0xFE, 0x66, 0x77, 0xC6};
+	sprintf(buf, "%02X.", adrt[0]);
 	pos = 2;
 	for (int j = 1; j < 8; j++) {
 		sprintf(&buf[pos], "%02X", adr[j]);
@@ -387,7 +368,6 @@ uint8_t OwDevices::search(bool mode)
 
 	return 1;
 }
-
 
 
 void OwDevices::begin(DS2482 *ds) {

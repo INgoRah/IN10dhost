@@ -3,8 +3,6 @@
 #include <unistd.h> // for isatty
 #include "logger.h"
 
-int debug = 5;
-
 static LogLevel _level = LogLevel::INFO;
 
 void Logger::set_level(LogLevel level) {

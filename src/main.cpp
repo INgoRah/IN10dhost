@@ -43,10 +43,6 @@ SwitchHandler swHdl (&ow);
 
 using HrClock = std::chrono::high_resolution_clock;
 
-void log_time()
-{
-}
-
 void segfault_handler(int signal)
 {
 	std::cerr << "Caught segmentation fault (signal " << signal << ")\n";
@@ -62,10 +58,10 @@ void background_worker()
 #if USE_GPIO
 	struct pollfd fds[2];
 	int state;
+	int ret;
 #else
 	struct pollfd fds[1];
 #endif
-	int ret;
 	int timeout = ow.get_poll();
 	Ard_i2c* arduino;
 	HrClock::time_point tp;
@@ -97,10 +93,12 @@ void background_worker()
 			ret = poll(fds, 2, timeout);
 			tp = HrClock::now();
 		}
-		logger.verbose("Poll " + std::to_string(ret) + " handled, GPIO state=" + std::to_string(state));
+		//logger.verbose("Poll " + std::to_string(ret) + " handled, GPIO state=" + std::to_string(state));
 		arduino->interrupt();
-		auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(HrClock::now() - tp);
-		logger.info(std::format("used {} ", duration));
+		if (state == 1) {
+			auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(HrClock::now() - tp);
+			logger.info(std::format("used {} ", duration));
+		}
 		if (ret > 0 && (fds[1].revents & POLLIN))
 			// READ THE EVENTS to clear the poll status
 			gpiod_line_request_read_edge_events(line, event_buffer, 16);
@@ -207,7 +205,11 @@ int main(int argc, char* argv[])
 	gpiod_line_request_release(line);
 	gpiod_chip_close(chip);
 #endif
-	ow.save(f.c_str());
+	try {
+		ow.save(f.c_str());
+	} catch (const std::exception& e) {
+		printf("Failed to save config: %s\n", e.what());
+	}
 
 	return ret;
 }

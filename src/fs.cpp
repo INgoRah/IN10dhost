@@ -16,7 +16,6 @@ static struct filetype root_dir[] = {
 	{ "uncached", 0 },
 	{ "settings", 0 },
 	{ "switches", 0 },
-	{ "dev_codes", 1024 },
 };
 
 static struct filetype settings[] = {
@@ -37,6 +36,8 @@ static struct fuse* g_fuse = nullptr;
 
 class OwDevices;
 extern OwDevices ow;
+class SwitchHandler;
+extern SwitchHandler swHdl;
 
 #include <string>
 #include <cctype>
@@ -203,6 +204,20 @@ static int fs_getattr(const char* path, struct stat* st, struct fuse_file_info*)
 	for (int bus = 0; bus < ow.bus_count(); bus++)
 		if (fs_attr_rom(bus, spath, st) == 0)
 			return 0;
+	int res = swHdl.fs_attr(spath);
+	if (res > 0) {
+		st->st_mode = S_IFREG | 0666;
+		st->st_size = res;
+		st->st_nlink = 1;
+		return 0;
+	}
+	if (res == 0) {
+		st->st_mode = S_IFDIR | 0777;
+		st->st_nlink = 2;
+		st->st_size = 0;
+		return 0;
+	}
+
 	return -ENOENT;
 }
 
@@ -238,9 +253,7 @@ static int fs_readdir(const char* path, void* buf, fuse_fill_dir_t filler,
 	ret = extract_subpath(spath, "alarm");
 	if (ret) {
 		logger.info("alarm search ... ");
-
-		//arduino.interrupt();
-		//ow.search(false);
+		ow.search(false);
 		fs_dir_devs(filler, buf, true);
 		return 0;
 	}
@@ -259,6 +272,17 @@ static int fs_readdir(const char* path, void* buf, fuse_fill_dir_t filler,
 	if (strcmp(path, "/settings") == 0) {
 		for (const auto& s : settings)
 			filler(buf, s.name, nullptr, 0, static_cast<fuse_fill_dir_flags>(0));
+		return 0;
+	}
+	if (strcmp(path, "/switches") == 0) {
+		std::vector<string> ls = swHdl.fs_dir(spath);
+
+		for (const auto& s : ls) {
+			filler(buf, s.c_str(), nullptr, 0,
+				static_cast<fuse_fill_dir_flags>(0));
+		}
+		filler(buf, ".", nullptr, 0, static_cast<fuse_fill_dir_flags>(0));
+		filler(buf, "..", nullptr, 0, static_cast<fuse_fill_dir_flags>(0));
 		return 0;
 	}
 	int bus;
@@ -300,8 +324,6 @@ static int fs_open(const char* path, struct fuse_file_info*)
 	string spath(path);
 	spath.erase(0, 1);
 
-	if (strcmp(path, "/dev_codes") == 0)
-		return 0;
 	if (strcmp(path, "/settings/log") == 0)
 		return 0;
 	if (strcmp(path, "/settings/mode") == 0)
@@ -321,7 +343,8 @@ static int fs_open(const char* path, struct fuse_file_info*)
 			return dev->fs_open(spath);
 		}
 	}
-
+	if (swHdl.fs_open(spath) == 0)
+		return 0;
 	return -ENOENT;
 }
 
@@ -346,6 +369,8 @@ static int fs_read(const char* path, char* buf, size_t size, off_t offset,
 		std::sprintf(buf, "%d", ow.get_poll());
 		return std::strlen(buf);
 	}
+	if (extract_subpath(spath, "switches"))
+		return swHdl.fs_read(spath, buf, size);
 	int bus;
 	string rom;
 	bool uncached = false;
@@ -390,7 +415,6 @@ static int fs_write(const char* path, const char* buf, size_t size,
 	int bus;
 	extractBusNumber(spath, bus);
 	string rom;
-	extractBusNumber(spath, bus);
 	int ret = extractRom(spath, rom);
 	if (ret) {
 		OwDev* dev = ow.find(rom);
@@ -399,6 +423,9 @@ static int fs_write(const char* path, const char* buf, size_t size,
 			return ret;
 		}
 	}
+	if (extract_subpath(spath, "switches"))
+		return swHdl.fs_write(spath, buf, size);
+
 	return size;
 }
 

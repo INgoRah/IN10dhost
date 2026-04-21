@@ -52,18 +52,19 @@
 #define DS2482_CMD_1WIRE_TRIPLET	0x78
 
 DS2482::DS2482(const std::string& i2c_dev, int address)
-    : fd(-1), addr(address)
+	: fd(-1), addr(address)
 {
-    fd = open(i2c_dev.c_str(), O_RDWR);
+#ifdef USE_I2C
+	fd = open(i2c_dev.c_str(), O_RDWR);
+#endif
 	ch = 0xff;
 	_read_ptr = 0;
-	mtx.unlock();
 }
 
 DS2482::~DS2482()
 {
-    if (fd >= 0)
-        close(fd);
+	if (fd >= 0)
+		close(fd);
 }
 
 // The 1-Wire CRC scheme is described in Maxim Application Note 27:
@@ -71,51 +72,53 @@ DS2482::~DS2482()
 //
 bool DS2482::check_crc16(const uint8_t* input, uint16_t len, const uint8_t* inverted_crc, uint16_t crc)
 {
-    crc = ~crc16(input, len, crc);
-    return (crc & 0xFF) == inverted_crc[0] && (crc >> 8) == inverted_crc[1];
+	crc = ~crc16(input, len, crc);
+	return (crc & 0xFF) == inverted_crc[0] && (crc >> 8) == inverted_crc[1];
 }
 
 uint16_t DS2482::crc16(const uint8_t* input, uint16_t len, uint16_t crc)
 {
-    static const uint8_t oddparity[16] =
-        { 0, 1, 1, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 1, 1, 0 };
+	static const uint8_t oddparity[16] =
+		{ 0, 1, 1, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 1, 1, 0 };
 
-    for (uint16_t i = 0 ; i < len ; i++) {
-      // Even though we're just copying a byte from the input,
-      // we'll be doing 16-bit computation with it.
-      uint16_t cdata = input[i];
-      cdata = (cdata ^ crc) & 0xff;
-      crc >>= 8;
+	for (uint16_t i = 0 ; i < len ; i++) {
+	  // Even though we're just copying a byte from the input,
+	  // we'll be doing 16-bit computation with it.
+	  uint16_t cdata = input[i];
+	  cdata = (cdata ^ crc) & 0xff;
+	  crc >>= 8;
 
-      if (oddparity[cdata & 0x0F] ^ oddparity[cdata >> 4])
-          crc ^= 0xC001;
+	  if (oddparity[cdata & 0x0F] ^ oddparity[cdata >> 4])
+		  crc ^= 0xC001;
 
-      cdata <<= 6;
-      crc ^= cdata;
-      cdata <<= 1;
-      crc ^= cdata;
-    }
-    return crc;
+	  cdata <<= 6;
+	  crc ^= cdata;
+	  cdata <<= 1;
+	  crc ^= cdata;
+	}
+	return crc;
 }
 
 bool DS2482::init()
 {
 	last_err = 0;
+#ifdef USE_I2C
 	if (fd < 0) {
 		printf("Failed to open I2C device %s\n", strerror(errno));
 		return false;
-    }
+	}
 
-    if (ioctl(fd, I2C_SLAVE, addr) < 0) {
+	if (ioctl(fd, I2C_SLAVE, addr) < 0) {
 		printf("Failed to open I2C device\n");
 		close(fd);
 		return false;
-    }
-    if (ioctl(fd, I2C_TIMEOUT, 5) < 0) {
+	}
+	if (ioctl(fd, I2C_TIMEOUT, 5) < 0) {
 		printf("Failed to set I2C timeout\n");
 		close(fd);
 		return false;
-    }
+	}
+#endif
 
 	return true;
 }
@@ -142,6 +145,7 @@ void DS2482::set_error(int err_code, int def)
 /* I2C write one byte */
 void DS2482::_write(uint8_t b)
 {
+#ifdef USE_I2C
 	int ret;
 	struct i2c_msg msg = {
 		.addr = addr,
@@ -159,10 +163,12 @@ void DS2482::_write(uint8_t b)
 		set_error(ret, ERR_WRITE);
 	}
 	_read_ptr = DS2482_PTR_CODE_STATUS;
+#endif
 }
 
 void DS2482::_write_cmd(uint8_t cmd, uint8_t data)
 {
+#ifdef USE_I2C
 	uint8_t buf[2] = {cmd, data};
 
 	struct i2c_msg msg = {
@@ -180,6 +186,7 @@ void DS2482::_write_cmd(uint8_t cmd, uint8_t data)
 		_read_ptr = 0;
 		set_error(ret, ERR_WRITE);
 	}
+#endif
 	/* default all cmds leave in STATUS, except those */
 	switch (cmd) {
 		case DS2482_CMD_WRITE_CONFIG:
@@ -234,31 +241,34 @@ void DS2482::setReadPtr(uint8_t readPtr)
 /* i2c read one byte */
 uint8_t DS2482::_read()
 {
+#ifdef USE_I2C
 	uint8_t d;
 	int ret;
 
 	/* this can result in a timeout (ret == 0) */
-    struct i2c_msg msgs[1] = {
-        {
+	struct i2c_msg msgs[1] = {
+		{
 			.addr = 0,
-            .flags = I2C_M_RD,
-            .len = 1,
-            .buf = &d
-        }
-    };
+			.flags = I2C_M_RD,
+			.len = 1,
+			.buf = &d
+		}
+	};
 
 	msgs[0].addr = addr;
-    struct i2c_rdwr_ioctl_data rdwr = {
-        .msgs = msgs,
-        .nmsgs = 1,
-    };
+	struct i2c_rdwr_ioctl_data rdwr = {
+		.msgs = msgs,
+		.nmsgs = 1,
+	};
 	ret = ioctl(fd, I2C_RDWR, &rdwr);
 	if (ret < 0) {
 		set_error(ret, ERR_READ);
 		return 0xff;
 	}
-
 	return d;
+#else
+	return 0;
+#endif
 }
 
 
@@ -469,6 +479,20 @@ void DS2482::select(const uint8_t rom[8])
 	}
 }
 
+void DS2482::target_search(uint8_t family_code)
+{
+	// Reset the search state
+	reset_search();
+
+	// Set the family code in the address buffer
+	searchAddress[0] = family_code;
+
+	// Force the search to follow these 8 bits without looking for discrepancies
+	// 64 is a marker often used to indicate "pre-filled" or "limit"
+	searchLastDisrepancy = 64;
+	searchLastFamilyDiscrepancy = 0;
+}
+
 void DS2482::reset_search()
 {
 	searchExhausted = 0;
@@ -483,33 +507,35 @@ bool DS2482::search(uint8_t *newAddr, bool search_mode)
 {
 	uint8_t i;
 	uint8_t direction;
-	uint8_t last_zero=0;
+	uint8_t last_zero = 0;
 	uint8_t stat;
 
 	if (searchExhausted)
 		return false;
 
 	reset();
-	if (search_mode == true) {
-		// NORMAL SEARCH
-		write(OW_SEARCH_ROM);
-	}
-	else {
-		// CONDITIONAL SEARCH
-		write(OW_COND_SEARC_ROM);
-	}
+	write(search_mode ? OW_SEARCH_ROM : OW_COND_SEARC_ROM);
+
 	if (last_err != ERR_NONE) {
 		last_err += ERR_SRCH2;
 		return false;
 	}
+#ifndef USE_I2C
+	return false;
+#endif
 	for(i = 1; i < 65; i++) {
-		uint8_t romByte = (i-1)>>3;
-		uint8_t romBit = 1<<((i-1)&7);
+		uint8_t romByte = (i - 1) >> 3;
+		uint8_t romBit = 1 << ((i - 1) & 7);
 
-		if (i < searchLastDisrepancy)
-			direction = searchAddress[romByte] & romBit;
-		else
+		if (i < searchLastDisrepancy) {
+			// Follow the path of the previous search
+			direction = (searchAddress[romByte] & romBit) ? 1 : 0;
+		} else {
+			/* If i == searchLastDisrepancy, we take the '1' path to
+				find the next device */
+			// If i > searchLastDisrepancy, we take the '0' path (default start)
 			direction = (i == searchLastDisrepancy);
+		}
 
 		busyWait();
 		if (last_err != ERR_NONE) {
@@ -517,23 +543,29 @@ bool DS2482::search(uint8_t *newAddr, bool search_mode)
 		}
 		_write_cmd(DS2482_CMD_1WIRE_TRIPLET, direction ? 0x80 : 0);
 		stat = busyWait();
-		if (last_err != ERR_NONE) {
+
+		if (last_err != ERR_NONE)
 			return false;
-		}
+
 		uint8_t id = stat & DS2482_STATUS_SBR;
 		uint8_t comp_id = stat & DS2482_STATUS_TSB;
-		direction = stat & DS2482_STATUS_DIR;
+		direction = stat & DS2482_STATUS_DIR; // The DS2482 tells us which way it actually went
 
-		//printf("srch %d %02X %d\n", i, stat, last_err);
 		if (id != 0 && comp_id != 0) {
 			// no devices on 1-wire
 			return false;
-		}
-		else {
-			if (id == 0 && comp_id == 0 && direction == 0)
+		} else {
+			// If both paths were available (0 and 1), and we took the 0 path,
+			// record this as a discrepancy for the next search iteration.
+			if (id == 0 && comp_id == 0 && direction == 0) {
 				last_zero = i;
+				// Track the last discrepancy within the family code (first 8 bits)
+				if (last_zero < 9)
+					searchLastFamilyDiscrepancy = last_zero;
+			}
 		}
 
+		// Update the address buffer with the actual bit found
 		if (direction)
 			searchAddress[romByte] |= romBit;
 		else
@@ -542,12 +574,12 @@ bool DS2482::search(uint8_t *newAddr, bool search_mode)
 
 	searchLastDisrepancy = last_zero;
 
-	if (last_zero == 0)
+	// If no more branches exist, or we've finished the targeted family
+	if (searchLastDisrepancy == 0)
 		searchExhausted = 1;
 
-	for (i=0;i<8;i++)
+	for (i = 0; i < 8; i++)
 		newAddr[i] = searchAddress[i];
-
 	return true;
 }
 

@@ -46,7 +46,7 @@ struct Config {
 	int log;
     std::vector<std::unique_ptr<OwDev>> devices;
 	std::vector<Bus> busses;
-	std::vector<_sw_tbl> switches;
+	std::vector<struct _sw_tbl> switches;
 };
 
 extern Config cache;
@@ -90,18 +90,6 @@ class OwDevices
 
 		std::vector<OwDev*> list_devices(int bus);
 #if 0
-		void adrGen(uint8_t bus, uint8_t adr[8], uint8_t id);
-		uint8_t ds2408LatchReset(uint8_t* addr);
-		uint8_t ds2408ChWrite(uint8_t bus, uint8_t* addr, uint8_t* data, int cnt);
-		void toggleDs2413(uint8_t bus, uint8_t* addr);
-		uint8_t ds2408PioGet(uint8_t bus, uint8_t* addr, uint8_t force = 0);
-		uint8_t ds2408PioSet(uint8_t bus, uint8_t* addr, uint8_t pio);
-		uint8_t ds2408xPinSet(uint8_t bus, uint8_t* addr, uint8_t pio, uint8_t level, uint8_t cmd = 0xDD, uint8_t val = 0);
-		uint8_t ds2408TogglePio(uint8_t bus, uint8_t* addr, uint8_t pio, uint8_t* data = NULL);
-		void ds2408CfgWrite(uint8_t bus, uint8_t adr[8], uint8_t* d, uint8_t len);
-		int ds2408CfgRead(uint8_t bus, uint8_t adr[8], uint8_t* data);
-		int16_t adcRead(uint8_t busNr, uint8_t addr[8], uint8_t ch, uint8_t mode = 0);
-
 		uint8_t getVersion(uint8_t bus, uint8_t id);
 		void versionUpdate(uint8_t bus, uint8_t id);
 #endif

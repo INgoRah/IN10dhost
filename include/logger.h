@@ -8,7 +8,8 @@ enum class LogLevel {
     DEBUG = 7,
     INFO = 6,
     WARN = 4,
-    ERROR = 3
+    ERROR = 3,
+    NONE = 0
 };
 
 class Logger {
