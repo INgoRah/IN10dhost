@@ -322,8 +322,6 @@ TEST_F(FsTest, WriteReadDevPio) {
 	ow.update_data();
 
 	ds2408* dev = (ds2408*)ow.find(0x290701F8FE6677F4);
-	LogLevel lvl = logger.get_level();
-	logger.set_level(LogLevel::VERBOSE);
 	// read all pios
 	for (int i = 0; i < 8; i++) {
 		std::string fpath = "/29.0701F8FE6677F4/pin." + std::to_string(i) + "/func";
@@ -345,7 +343,6 @@ TEST_F(FsTest, WriteReadDevPio) {
 		EXPECT_EQ(res, 1);
 		EXPECT_STREQ(buf, "0");
 	}
-	logger.set_level(lvl);
 
 	buf[0] = '3';
 	buf[1] = '\0';

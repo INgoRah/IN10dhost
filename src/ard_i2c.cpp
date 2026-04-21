@@ -305,7 +305,9 @@ void Ard_i2c::events(int fd)
 				case SRC_CHANGE:
 				case DST_CHANGE:
 					if (dev->addr[0] == 0x29) {
-						((ds2408*)dev)->update(rbuf[3], rbuf[4]);
+						((ds2408*)dev)->data[PIO_LS] = rbuf[3];
+						((ds2408*)dev)->data[PIO_TIME] = rbuf[4];
+					}
 					break;
 				default:
 					printf("event type: %02x found device\n", type);

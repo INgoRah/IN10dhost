@@ -24,13 +24,8 @@ json ds2408::to_json() const {
 
 void ds2408::from_json(const json& j) {
 	OwDev::from_json(j); // Delegate common fields to base
-	try {
-		if (j.contains("cfg"))
-			j.at("cfg").get_to(cfg);
-	}
-	catch (const std::exception& e) {
-		printf("ds2408 cfg issue\n");
-	}
+	if (j.contains("cfg"))
+		j.at("cfg").get_to(cfg);
 }
 
 std::vector<std::string> ds2408::fs_dir(string& path) const
@@ -209,13 +204,6 @@ int ds2408::fs_write(string& path, const char* buf, size_t size)
 
 	// add standards
 	return OwDev::fs_write(path, buf, size);
-}
-
-void ds2408::update(uint8_t pio, uint8_t ff1)
-{
-	data[PIO_LS] = pio;
-	data[6] = ff1;
-	logger.verbose("update PIO = " + std::to_string(pio));
 }
 
 uint8_t ds2408::ard_set(uint8_t pio, uint8_t val)

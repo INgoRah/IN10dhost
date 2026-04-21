@@ -205,7 +205,11 @@ int main(int argc, char* argv[])
 	gpiod_line_request_release(line);
 	gpiod_chip_close(chip);
 #endif
-	ow.save(f.c_str());
+	try {
+		ow.save(f.c_str());
+	} catch (const std::exception& e) {
+		printf("Failed to save config: %s\n", e.what());
+	}
 
 	return ret;
 }

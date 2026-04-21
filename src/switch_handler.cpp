@@ -33,32 +33,27 @@ void to_json(json& j, const _sw_tbl& b) {
 }
 
 void from_json(const json& j, _sw_tbl& b) {
-	try {
-		int d;
+	int d;
 
-		if (j.contains("src_adr")) {
-			j.at("src_bus").get_to<int>(d);
-			b.src.sa.bus = d;
-			j.at("src_adr").get_to(d);
-			b.src.sa.adr = d;
-			j.at("src_latch").get_to(d);
-			b.src.sa.latch = d;
-			j.at("src_press").get_to(d);
-			b.src.sa.press = d;
-			j.at("dst_bus").get_to(d);
-			b.dst.da.bus = d;
-			j.at("dst_adr").get_to(d);
-			b.dst.da.adr = d;
-			j.at("dst_pio").get_to(d);
-			b.dst.da.pio = d;
-		}
-		if (j.contains("dst_type")) {
-			j.at("dst_type").get_to(d);
-			b.dst.da.type = d;
-		}
+	if (j.contains("src_adr")) {
+		j.at("src_bus").get_to<int>(d);
+		b.src.sa.bus = d;
+		j.at("src_adr").get_to(d);
+		b.src.sa.adr = d;
+		j.at("src_latch").get_to(d);
+		b.src.sa.latch = d;
+		j.at("src_press").get_to(d);
+		b.src.sa.press = d;
+		j.at("dst_bus").get_to(d);
+		b.dst.da.bus = d;
+		j.at("dst_adr").get_to(d);
+		b.dst.da.adr = d;
+		j.at("dst_pio").get_to(d);
+		b.dst.da.pio = d;
 	}
-	catch (const std::exception& e) {
-		// setup c.switches?
+	if (j.contains("dst_type")) {
+		j.at("dst_type").get_to(d);
+		b.dst.da.type = d;
 	}
 }
 
@@ -262,7 +257,7 @@ bool SwitchHandler::dev_alarm(uint8_t bus, uint8_t adr[8])
 				return false;
 			}
 			while (cur_latch != 0 && to > 0) {
-				data[6] = dev->data[6];
+				data[6] = dev->data[PIO_TIME];
 				switchHandle(bus, adr[1]);
 				to--;
 			}
@@ -273,6 +268,7 @@ bool SwitchHandler::dev_alarm(uint8_t bus, uint8_t adr[8])
 
 bool SwitchHandler::alarmHandler(uint8_t busNr)
 {
+#ifdef USE_I2C
 	uint8_t adr[8];
 	uint8_t j = 0;
 	uint8_t cnt = 10;
@@ -304,6 +300,10 @@ bool SwitchHandler::alarmHandler(uint8_t busNr)
 	}
 
 	return j > 0 ? true : false;
+#else
+	(void)busNr;
+	return false;
+#endif
 }
 
 // FS entries

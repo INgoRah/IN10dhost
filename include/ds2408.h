@@ -127,7 +127,6 @@ class ds2408 : public OwDev {
 		virtual void from_json(const json& j);
 
 		// ds2408 functions
-		void update(uint8_t pio, uint8_t ff1);
 		uint8_t pio_set(uint8_t pio);
 		uint8_t reg_read(bool latch_reset);
 		uint8_t latch_reset();

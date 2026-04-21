@@ -79,7 +79,6 @@ TEST_F(SwTest, switching)
 	buf[0] = '0';
 	buf[1] = 0;
 	res = fs_ops.write("/29.0202abbd6677d4/PIO.0", buf, 2, 0, nullptr);
-	//logger.set_level(LogLevel::VERBOSE);
 	strcpy(buf, "1 2 3 2 2 0");
 	buf [strlen(buf)] = 0;
 	res = fs_ops.write("/switches/add", buf, strlen(buf) + 1, 0, nullptr);
@@ -107,12 +106,22 @@ TEST_F(SwTest, switching)
 	dev->data[PIO_LATCH] = 0xff;
 	ret = swHdl.dev_alarm(1, adr);
 	EXPECT_EQ(ret, false);
+	// check different time values
+	dev->data[PIO_LATCH] = 0x02;
+	dev->data[PIO_TIME] = 0x05;
+	ret = swHdl.dev_alarm(1, adr);
+	EXPECT_EQ(ret, true);
+	dev->data[PIO_TIME] = 0x0;
+	ret = swHdl.dev_alarm(1, adr);
+	EXPECT_EQ(ret, true);
+	dev->data[PIO_TIME] = 0x25;
+	ret = swHdl.dev_alarm(1, adr);
+	EXPECT_EQ(ret, true);
 
 	// check dev alarm with no sw entry
 	adr[1] = 0x03;
 	ret = swHdl.dev_alarm(1, adr);
 	EXPECT_EQ(ret, false);
-	logger.set_level(lvl);
 }
 
 TEST_F(SwTest, FsSwitches)
@@ -127,7 +136,6 @@ TEST_F(SwTest, FsSwitches)
 	res = fs_ops.getattr("/switches", &st, nullptr);
 	EXPECT_EQ(res, 0);
 	EXPECT_TRUE(S_ISDIR(st.st_mode));
-	//logger.set_level(LogLevel::VERBOSE);
 	// error checking, missing number
 	strcpy(buf, "1 2 3 1 2");
 	buf [strlen(buf)] = 0;
@@ -147,6 +155,8 @@ TEST_F(SwTest, FsSwitches)
 	res = fs_ops.write("/switches/del", buf, strlen(buf) + 1, 0, nullptr);
 	logger.verbose(std::format("{} returned from del", res));
 	EXPECT_EQ(res, strlen(buf) + 1);
+	res = fs_ops.write("/switches/del", buf, strlen(buf) + 1, 0, nullptr);
+	EXPECT_EQ(res, 0);
 
 	res = fs_ops.getattr("/switches/list", &st, nullptr);
 	EXPECT_EQ(res, 0);
