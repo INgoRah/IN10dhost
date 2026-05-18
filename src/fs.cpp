@@ -2,12 +2,16 @@
 #include <string>
 #include <cerrno>
 #include <unistd.h>
+#include <fuse3/fuse.h>
 #include "main.h"
 #include "fs.h"
 #include "ow_devices.h"
+#include "plugins.h"
+#include "switch_handler.h"
 #include "ard_i2c.h"
 
 using std::string;
+extern Plugins plugins;
 
 static struct filetype root_dir[] = {
 	{ ".", 0 },
@@ -24,6 +28,7 @@ static struct filetype settings[] = {
 	{ "log", 1 },
 	{ "mode", 3 },
 	{ "poll", 3 },
+	{ "plugins", 1024 },
 };
 
 static void fs_dir_devs(fuse_fill_dir_t filler, void *buf, bool alarm = false);
@@ -388,6 +393,7 @@ static int fs_read(const char* path, char* buf, size_t size, off_t offset,
 	return -ENOENT;
 }
 
+
 static int fs_write(const char* path, const char* buf, size_t size,
 					off_t offset, struct fuse_file_info*)
 {
@@ -409,6 +415,10 @@ static int fs_write(const char* path, const char* buf, size_t size,
 		uint8_t tmp = (uint8_t)(std::stoi(buf));
 		ow.set_poll(tmp);
 		return size;
+	}
+	if (strcmp(path, "/settings/plugins") == 0) {
+		plugins.reload();
+		plugins.action(2, 0); // initialized
 	}
 	string spath(path);
 	spath.erase(0, 1);

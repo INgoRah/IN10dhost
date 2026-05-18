@@ -7,6 +7,7 @@
 #include "ds2482.h"
 #include "ow_dev.h"
 #include "switch_handler.h"
+#include "interface/devices.h"
 
 using std::string;
 using json = nlohmann::json;
@@ -14,14 +15,6 @@ using json = nlohmann::json;
 #ifndef MAX_BUS
 #define MAX_BUS 4
 #endif
-
-#define MAX_CFG_SIZE 26
-/** Retries for register read */
-#define REG_RETRY 20
-#define PIOSET_RETRY 20
-#define LATCH_RESET_RETRY 20
-/** Retries for activity latch reset */
-#define ACTRES_RETRY 5;
 
 using Clock = std::chrono::steady_clock;
 
@@ -46,12 +39,15 @@ struct Config {
 	int log;
     std::vector<std::unique_ptr<OwDev>> devices;
 	std::vector<Bus> busses;
+	// TODO move to switch handler
+	// to avoid declarating this struct here
+	// use plugin for switch handling and store the config there
 	std::vector<struct _sw_tbl> switches;
 };
 
 extern Config cache;
 
-class OwDevices
+class OwDevices : public IDevices
 {
 	private:
 		DS2482 *ow;
@@ -65,6 +61,7 @@ class OwDevices
 
 	public:
 		OwDevices() { _mode = 0;}
+		~OwDevices();
 		void begin(DS2482 *ds);
 		void init();
 		void cacheInit();
@@ -80,6 +77,7 @@ class OwDevices
 
 		OwDev* find(const string& rom);
 		OwDev* find(uint64_t targetCode);
+		IDev* get_dev(uint64_t targetCode);
 		OwDev* find(uint8_t bus, uint8_t id, uint8_t type = 0x29);
 		int bus_count() const { return MAX_BUS; }
 		int get_mode() const { return _mode; }

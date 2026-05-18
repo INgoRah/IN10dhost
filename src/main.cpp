@@ -28,6 +28,8 @@
 #include "switch_handler.h"
 #include "ard_i2c.h"
 
+Logger logger;
+
 #define GPIO_LINE 6  // Arduino Interrupt
 struct gpiod_chip *chip;
 #ifdef GPIOD_V2
@@ -36,6 +38,9 @@ struct gpiod_line_request *line;
 #else
 struct gpiod_line *line;
 #endif
+
+extern void fs_init(fuse_operations* fs_ops);
+
 struct fuse_operations fs_ops = {};
 DS2482 ds("/dev/i2c-0", 0x18);
 OwDevices ow;
@@ -172,12 +177,15 @@ void enable_rt(void)
 	}
 }
 
+extern int plugins_action(int action, int val);
+
 int main(int argc, char* argv[])
 {
 	int ret;
 
 	std::signal(SIGSEGV, segfault_handler);
 	string f = std::filesystem::current_path();
+	logger.set_level(LogLevel::INFO);
 	f = f + "/data.json";
 	fs_init(&fs_ops);
 	try {

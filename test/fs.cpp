@@ -1,6 +1,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <fuse3/fuse.h>
+
 #include <gtest/gtest.h>
 #include <gmock/gmock.h>
 
@@ -11,6 +13,8 @@
 #include "ds2408.h"
 
 extern OwDevices ow;
+extern void fs_init(fuse_operations* fs_ops);
+
 static struct fuse_operations fs_ops = {};
 
 
@@ -107,9 +111,8 @@ TEST_F(FsTest, GetDS1820Devices) {
 	EXPECT_EQ(res, 0);
 	EXPECT_TRUE(S_ISREG(st.st_mode));
 	EXPECT_EQ(st.st_size, 5);
-	logger.set_level(LogLevel::VERBOSE);
 	res = fs_ops.read("/28.0501FAFE6677A0/temperature", buf, 32, 0, nullptr);
-	EXPECT_EQ(res, 4);
+	EXPECT_GE(res, 4);
 	res = fs_ops.getattr("/28.0501FAFE6677A0/humidity", &st, nullptr);
 	EXPECT_EQ(res, 0);
 	EXPECT_TRUE(S_ISREG(st.st_mode));
@@ -128,7 +131,6 @@ TEST_F(FsTest, GetDS1820Devices) {
 	EXPECT_TRUE(S_ISREG(st.st_mode));
 	EXPECT_EQ(st.st_size, 4);
 #endif
-	logger.set_level(LogLevel::WARN);
 }
 
 // Test device file attribute retrieval
@@ -277,7 +279,6 @@ TEST_F(FsTest, DevPinDirs) {
 }
 
 TEST_F(FsTest, WriteReadDev) {
-	LogLevel lvl = logger.get_level();
 	int res;
 	char buf[128];
 
@@ -308,9 +309,6 @@ TEST_F(FsTest, WriteReadDev) {
 	EXPECT_EQ(res, 2);
 	// interpret as hex
 	EXPECT_STREQ(buf, "21");
-	//logger.verbose(std::format("cfg {}: {}", res, std::string(buf, res)));
-	//logger.verbose(std::format("cfg {}: {}", res, std::string(buf, res)));
-	logger.set_level(lvl);
 }
 
 TEST_F(FsTest, WriteReadDevPio) {

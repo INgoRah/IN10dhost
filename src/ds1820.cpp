@@ -1,7 +1,9 @@
 #include <fstream>
 #include <iostream>
 #include <string>
+#include <fuse3/fuse.h>
 #include "main.h"
+#include "fs.h"
 #include "ow_devices.h"
 #include "ds1820.h"
 
@@ -74,7 +76,7 @@ int ds1820::fs_read(string& path, char* buf, size_t size, bool uncached)
  * No retry handling because the data might not so important as next cycle
  * will come
 */
-int ds1820::temp_read(const uint8_t mode)
+float ds1820::temp_read(const uint8_t mode)
 {
 #ifdef USE_I2C
 	bool ret;
@@ -141,5 +143,5 @@ int ds1820::temp_read(const uint8_t mode)
 	hum = scratchPad[5];
 	temp = (float)raw / 16.0;
 
-	return 0;
+	return temp;
 }

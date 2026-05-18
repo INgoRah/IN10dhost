@@ -10,10 +10,13 @@
 #include <iostream>
 #include <cstdint>
 
+#include <fuse3/fuse.h>
 #include "main.h"
+#include "fs.h"
 #include "ard_i2c.h"
 #include "ds2408.h"
 #include "ds1820.h"
+#include "switch_handler.h"
 
 #define ARD_I2C_ADDR 0x2f
 
@@ -312,7 +315,6 @@ void Ard_i2c::events(int fd)
 				default:
 					printf("event type: %02x found device\n", type);
 					printf("found device %s\n", dev->type.c_str());
-					}
 					if (dev->addr[0] == 0x28 && type == 2) {
 						//dev->update(d);
 					}

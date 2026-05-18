@@ -56,6 +56,9 @@ DS2482::DS2482(const std::string& i2c_dev, int address)
 {
 #ifdef USE_I2C
 	fd = open(i2c_dev.c_str(), O_RDWR);
+#else
+	(void)i2c_dev;
+	(void)address;
 #endif
 	ch = 0xff;
 	_read_ptr = 0;
@@ -125,6 +128,7 @@ bool DS2482::init()
 
 void DS2482::set_error(int err_code, int def)
 {
+#ifdef USE_I2C
 	switch (err_code) {
 		case ETIMEDOUT:
 			last_err = ERR_WIRE_TO;
@@ -140,6 +144,10 @@ void DS2482::set_error(int err_code, int def)
 			last_err = def;
 			break;
 	}
+#else
+	(void)err_code;
+	(void)def;
+#endif
 }
 
 /* I2C write one byte */
@@ -163,6 +171,8 @@ void DS2482::_write(uint8_t b)
 		set_error(ret, ERR_WRITE);
 	}
 	_read_ptr = DS2482_PTR_CODE_STATUS;
+#else
+	(void)b;
 #endif
 }
 
@@ -570,6 +580,11 @@ bool DS2482::search(uint8_t *newAddr, bool search_mode)
 			searchAddress[romByte] |= romBit;
 		else
 			searchAddress[romByte] &= (uint8_t)~romBit;
+		/* if only interested in max 2 bytes we can stop here
+		   could save 50 ms
+		if (!search_mode && i == 16)
+			break;
+		*/
 	}
 
 	searchLastDisrepancy = last_zero;
