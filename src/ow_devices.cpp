@@ -2,16 +2,20 @@
 #include <iostream>
 #include <string>
 #include <algorithm>
+#include <fuse3/fuse.h>
 #include "main.h"
+#include "fs.h"
 #include "ow_devices.h"
 #include "ds1820.h"
 #include "ds2408.h"
 #include "ard_i2c.h"
+#include "plugins.h"
 
 #include "nlohmann/json.hpp"
 
 using json = nlohmann::json;
 
+Plugins plugins;
 Config cache;
 
 struct Device {
@@ -100,9 +104,15 @@ void from_json(const json& j, Config& c) {
 		c.devices.push_back(make_device_from_json(jdev));
 	}
 	c.mode = j.at("mode").get<int>();
-	c.log = j.at("log").get<int>();
+	if (j.contains("log"))
+		c.log = j.at("log").get<int>();
 	if (j.contains("poll"))
 		c.poll = j.at("poll").get<int>();
+}
+
+OwDevices::~OwDevices() {
+	logger.info("Cleaning up OwDevices...");
+	plugins.cleanup();
 }
 
 void OwDevices::init()
@@ -149,15 +159,19 @@ void OwDevices::load(const std::string& path) {
 		cache = j.get<Config>();
 		if (cache.bus_count != MAX_BUS)
 			init_busses();
-		printf ("Loaded config: version %d, devices %d\n",
+		if (j.contains("plugins")) {
+			plugins.load(j["plugins"]);
+		}
+		logger.info(std::format("Loaded config: version {}, devices {}",
 			cache.version,
-			(unsigned int)cache.devices.size());
+			(unsigned int)cache.devices.size()));
 	}
 	logger.set_level((LogLevel)cache.log);
 	for (auto& dev : cache.devices) {
 		dev->update();
 	}
 	update_data();
+	plugins.action(2, 0); // loaded
 }
 
 void OwDevices::save(const std::string& path) {
@@ -167,6 +181,13 @@ void OwDevices::save(const std::string& path) {
 	for (auto& b : cache.busses)
 		b.dev_count = b.devices.size();
 	json j = cache;
+	try {
+		json j_plugins = plugins.save();
+		j["plugins"] = j_plugins;
+	}
+	catch (const std::exception& e) {
+		logger.error("Cannot save plugins");
+	}
 	file << j.dump(4); // pretty-print with 4-space indentation
 }
 
@@ -235,6 +256,13 @@ OwDev* OwDevices::find(uint8_t bus, uint8_t id, uint8_t type)
 		}
 	}
 	return nullptr;
+}
+
+IDev* OwDevices::get_dev(uint64_t targetCode)
+{
+	OwDev* dev = find(targetCode);
+	logger.info(std::format("get_dev for code {:012X} found dev {}", targetCode, dev ? dev->rom : "null"));
+	return static_cast<IDev*>(dev);
 }
 
 // called after scan or load to

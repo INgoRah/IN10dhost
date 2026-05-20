@@ -108,3 +108,11 @@ TEST_F(DevTest, add_devices)
 	devs = ow.list_devices(0);
 	EXPECT_EQ(devs.size(), 1);
 }
+
+TEST_F(DevTest, ds2482)
+{
+	uint16_t crc = ds.crc16((const uint8_t*)"123456789", 9, 0);
+	ds.check_crc16((const uint8_t*)"123456789", 9, (const uint8_t*)"\xB8\x66", 0);
+	logger.error(std::format("crc: {}", crc));
+	//47933
+}

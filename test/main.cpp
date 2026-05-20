@@ -86,8 +86,10 @@ TEST(main, Logging)
 
 int main(int argc, char* argv[])
 {
+	int ret;
 	std::signal(SIGSEGV, segfault_handler);
 	logger.set_level(LogLevel::ERROR);
 	::testing::InitGoogleTest(&argc, argv);
-	return RUN_ALL_TESTS(); // This one line finds and runs every TEST() in the binary
+	ret = RUN_ALL_TESTS(); // This one line finds and runs every TEST() in the binary
+	return ret;
 }

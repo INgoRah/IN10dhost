@@ -1,6 +1,7 @@
 #include "ow_devices.h"
+#include "interface/ds1820.h"
 
-class ds1820 : public OwDev {
+class ds1820 : public OwDev, public IDS1820 {
 	private:
 		float temp;
 		uint8_t hum;
@@ -24,5 +25,5 @@ class ds1820 : public OwDev {
 			};
 		};
 
-		int temp_read(const uint8_t mode);
+		float temp_read(const uint8_t mode);
 };

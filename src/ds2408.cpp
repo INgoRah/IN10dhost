@@ -1,10 +1,19 @@
 #include <fstream>
 #include <iostream>
 #include <string>
+#include <fuse3/fuse.h>
 #include "main.h"
+#include "fs.h"
 #include "ow_devices.h"
 #include "ard_i2c.h"
 #include "ds2408.h"
+
+#define LATCH_RESET_RETRY 20
+/** Retries for activity latch reset */
+#define ACTRES_RETRY 5;
+/** Retries for register read */
+#define REG_RETRY 20
+#define PIOSET_RETRY 20
 
 static struct filetype DS2408[] = {
 	{ "BYTE", 3 },
@@ -24,8 +33,9 @@ json ds2408::to_json() const {
 
 void ds2408::from_json(const json& j) {
 	OwDev::from_json(j); // Delegate common fields to base
-	if (j.contains("cfg"))
+	if (j.contains("cfg")) {
 		j.at("cfg").get_to(cfg);
+	}
 }
 
 std::vector<std::string> ds2408::fs_dir(string& path) const
@@ -282,7 +292,7 @@ uint8_t ds2408::latch_reset()
 		delay(LATCH_RESET_RETRY - retry);
 	} while (--retry > 0);
 #ifdef DEBUG
-	if ((err && retry == 0) || (err && debug > 0)) {
+	if ((err && retry == 0) || (err)) {
 		Serial.print (F("latch reset err="));
 		Serial.print (err);
 		if (retry == 0)
@@ -310,7 +320,7 @@ uint8_t ds2408::pin_switch(uint8_t pio, enum _pio_mode state, uint8_t lvl)
 		// store current level in data for readback until the next write
 		level = lvl;
 	} else {
-		uint8_t tmp;
+		uint8_t tmp = 0;
 
 		// TODO guard data struct
 		if (state == TOGGLE) {
@@ -335,10 +345,9 @@ uint8_t ds2408::pio_set(uint8_t pio)
 	uint8_t r, retry, err = 0;
 	bool ret;
 #endif
-
-	std::lock_guard<std::mutex> lock(ow->mtx);
 	logger.log(LogLevel::DEBUG, "set PIO " + std::to_string(pio) + " in mode " + std::to_string(mode));
 #ifdef USE_I2C
+	std::lock_guard<std::mutex> lock(ow->mtx);
 	retry = PIOSET_RETRY - 1;
 	do {
 		r = 0xff;
@@ -405,10 +414,10 @@ uint8_t ds2408::reg_read(bool latch_reset)
 	buf[2] = 0x00;	// MSB address
 #endif
 	do {
-		std::lock_guard<std::mutex> lock(ow->mtx);
 		//wdt_reset(); ??
 		/* read latch */
 #ifdef USE_I2C
+		std::lock_guard<std::mutex> lock(ow->mtx);
 		ret = ow->selectChannel(bus);
 		if (ow->last_err == 0)
 			ret = ow->reset();
@@ -448,10 +457,11 @@ uint8_t ds2408::reg_read(bool latch_reset)
 
 int ds2408::cfg_read()
 {
-	int len = MAX_CFG_SIZE;
+	int len = CFG_SIZE;
 
 #ifdef USE_I2C
 	int i;
+	std::lock_guard<std::mutex> lock(ow->mtx);
 
 	ow->selectChannel(bus);
 	ow->reset();
@@ -479,6 +489,7 @@ uint8_t ds2408::level_set(uint8_t pio, uint8_t level, uint8_t cmd, uint8_t val)
 #ifndef USE_I2C
 	return 0xaa;
 #endif
+	std::lock_guard<std::mutex> lock(ow->mtx);
 	ret = ow->selectChannel(bus);
 	if (ret)
 		ret = ow->reset();

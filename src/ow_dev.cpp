@@ -2,7 +2,9 @@
 #include <fstream>
 #include <iostream>
 #include <string>
+#include <fuse3/fuse.h>
 #include "main.h"
+#include "fs.h"
 #include "ow_devices.h"
 #include "ow_dev.h"
 
@@ -79,6 +81,7 @@ void OwDev::update()
 		pos += 2;
 	}
 	addr[7] = crc8 (addr, 7);
+
 	rom = std::format("{}{:02X}", rom, addr[7]);
 	string s = rom;
 	s.erase(2, 1);

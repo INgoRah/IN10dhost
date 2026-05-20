@@ -2,7 +2,7 @@
     "bus_count": 3,
     "busses": [
         {
-            "dev_count": 0,
+            "dev_count": 1,
             "id": 0
         },
         {
@@ -14,16 +14,26 @@
             "id": 2
         }
     ],
-    "devices": [],
-    "log": 0,
-    "mode": 16,
+    "devices": [
+        {
+            "bus": 0,
+            "id": 2,
+            "name": "",
+            "rom": "29.0200FDFF6677F8",
+            "type": "ds2408"
+        }
+   ],
+    "mode": 0,
     "plugins": {
         "example": {
             "enabled": true,
             "port": 8081
-        }
+        },
+        "invalid" : {},
+        "notfound" : {}
     },
     "poll": 0,
-    "switches": [],
+    "switches": [
+    ],
     "version": 1
 }

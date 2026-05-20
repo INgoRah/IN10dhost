@@ -5,8 +5,10 @@
 #include <charconv>
 #include <string_view>
 #include <vector>
+#include "nlohmann/json.hpp"
 
 #include "main.h"
+#include "fs.h"
 #include "switch_handler.h"
 #include "ow_devices.h"
 #include "ds2408.h"
@@ -165,17 +167,15 @@ uint16_t SwitchHandler::srcData(uint8_t busNr, uint8_t adr1)
 	}
 	logger.verbose(std::format("src {}.{}.{}.{}", (int)src.sa.bus, (int)src.sa.adr, (int)src.sa.latch, (int)src.sa.press));
 #if 0
-	if (debug > 1) {
-		printf("%d.%d.", src.sa.bus, src.sa.adr);
-		if (src.sa.press)
-			printf("%d ", 10 * src.sa.press + src.sa.latch);
-		else
-			printf("%d ", src.sa.latch);
-		if (data[6] != 0xff) {
-			printf(" time=%d", data[6] * 32);
-		}
-		printf("\n");
+	printf("%d.%d.", src.sa.bus, src.sa.adr);
+	if (src.sa.press)
+		printf("%d ", 10 * src.sa.press + src.sa.latch);
+	else
+		printf("%d ", src.sa.latch);
+	if (data[6] != 0xff) {
+		printf(" time=%d", data[6] * 32);
 	}
+	printf("\n");
 #endif
 
 	return src.data;
@@ -277,6 +277,8 @@ bool SwitchHandler::alarmHandler(uint8_t busNr)
 	if (!ds)
 		return false;
 	//ds = bus[busNr];
+	std::unique_lock<std::mutex> lock(ds->mtx);
+
 	ret = ds->selectChannel(busNr);
 	if (!ret)
 		// this could be a timeout or other issue
@@ -288,15 +290,15 @@ bool SwitchHandler::alarmHandler(uint8_t busNr)
 	// at the second byte and the remaining according a
 	// defined scheme, we could stop even after one byte search
 	while (ds->search(adr, false)) {
+		lock.unlock();
 		j++;
-		logger.debug(std::format("Alarm {}.{}", busNr, adr[1]));
+		logger.debug(std::format("Alarm {}.{} {}", busNr, adr[1], adr[2]));
 		dev_alarm(busNr, adr);
 		cnt--;
-		if (ds->last_err || cnt == 0) {
 #ifdef USE_DEBUG
+		if (ds->last_err || cnt == 0)
 			printf("Error searching = %d\n", ds->last_err);
 #endif
-		}
 	}
 
 	return j > 0 ? true : false;

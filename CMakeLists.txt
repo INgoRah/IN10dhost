@@ -31,6 +31,8 @@ find_package(nlohmann_json 3.10.5 REQUIRED)
 # Build options for dependencies
 # ----------------------------
 option(TESTING "Build Testing" OFF)
+option(NO_TERM "No terminal available" OFF)
+option(SANITIZE "Build with sanitizer" OFF)
 
 option(USE_GPIO "Build with libgpiod support" ON)
 
@@ -62,10 +64,20 @@ if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     add_compile_options(-g)
 endif()
 
+# Include the library subdirectory
+if(TESTING)
+    file(COPY test/plugin/invalid_symbol.cpp DESTINATION plugin)
+endif()
+add_subdirectory(plugin)
+
 if(TESTING)
     find_package(GTest REQUIRED)
     include(GoogleTest)
     add_compile_definitions(TESTING)
+endif()
+if(NO_TERM)
+    # used for github action
+    add_compile_definitions(NO_TERM)
 endif()
 
 # ----------------------------
@@ -79,6 +91,15 @@ add_compile_options(
     -Wno-psabi
     -DFUSE_USE_VERSION=30
 )
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    add_compile_definitions(USE_DEBUG)
+    if(SANITIZE)
+        add_compile_options(
+            -fsanitize=address
+            -fno-omit-frame-pointer)
+    endif()
+endif()
+
 if(TESTING)
     add_compile_options(
         --coverage
@@ -98,6 +119,7 @@ add_executable(IN10dfsd
     src/ds2408.cpp
     src/ds1820.cpp
     src/ow_devices.cpp
+    src/plugins.cpp
     src/switch_handler.cpp
 )
 if(TESTING)
@@ -108,6 +130,7 @@ if(TESTING)
         test/fs.cpp
         test/devices.cpp
         test/switches.cpp
+        test/plugins.cpp
     )
     set(test GTest::gtest_main)
 
@@ -148,7 +171,6 @@ if(TESTING)
         PRIVATE
             -static-libstdc++
             -static-libgcc
-            -static
             --coverage -g -O0
     )
 else()
@@ -159,6 +181,12 @@ else()
             -static
     )
 endif()
+if(SANITIZE)
+    target_link_options(IN10dfsd
+        PRIVATE
+       -fsanitize=address
+    )
+endif()
 
 # ----------------------------
 # Install (optional)
@@ -166,3 +194,5 @@ endif()
 install(TARGETS IN10dfsd
    RUNTIME DESTINATION /usr/bin
 )
+
+

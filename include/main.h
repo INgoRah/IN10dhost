@@ -19,7 +19,6 @@ extern void printDst(union pio dst);
 extern void printSrc(union s_adr src);
 extern void dumpCfg();
 
-extern byte debug;
 extern uint8_t min;
 extern uint8_t hour;
 extern uint8_t light;

@@ -1,6 +1,4 @@
 #pragma once
-#include <fuse3/fuse.h>
-
 using std::string;
 
 struct filetype {
@@ -17,7 +15,3 @@ class IFs {
 		virtual int fs_open(string& path) const = 0;
 		virtual int fs_write(string& path, const char* buf, size_t size) = 0;
 };
-
-void fs_init(fuse_operations* fs_ops);
-
-extern struct fuse_operations simple_fs_ops;

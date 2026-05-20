@@ -1,6 +1,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <fuse3/fuse.h>
+
 #include <gtest/gtest.h>
 #include <gmock/gmock.h>
 
@@ -14,6 +16,7 @@ extern DS2482 ds;
 extern OwDevices ow;
 extern SwitchHandler swHdl;
 
+extern void fs_init(fuse_operations* fs_ops);
 static struct fuse_operations fs_ops = {};
 
 static int filler(void *buf, const char *name,
@@ -70,7 +73,6 @@ TEST_F(SwTest, switching)
 
 	uint8_t adr[] = { 0x29, 0x02, 0x01, 0xab, 0xbd, 0x66, 0x77, 0x9a };
 	tp = HrClock::now();
-	LogLevel lvl = logger.get_level();
 	buf[0] = '3';
 	buf[1] = '3';
 	buf[2] = '\0';
@@ -129,7 +131,6 @@ TEST_F(SwTest, FsSwitches)
 	char buf[1024];
 	int res;
 	struct stat st;
-	LogLevel lvl = logger.get_level();
 
 	res = fs_ops.readdir("/switches", buf, filler, 0, nullptr, (enum fuse_readdir_flags)0);
 	EXPECT_EQ(res, 0);
@@ -165,7 +166,13 @@ TEST_F(SwTest, FsSwitches)
 	EXPECT_GT(res, 0);
 	res = fs_ops.getattr("/switches/na", &st, nullptr);
 	EXPECT_NE(res, 0);
+}
 
+TEST_F(SwTest, SwitchesConfig)
+{
+	LogLevel lvl = logger.get_level();
+	ow.save("test_switches.json");
+	ow.load("test_switches.json");
 	logger.set_level(lvl);
 }
 
