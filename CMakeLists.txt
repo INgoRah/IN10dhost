@@ -117,6 +117,7 @@ add_executable(IN10dfsd
     src/ds2482.cpp
     src/ow_dev.cpp
     src/ds2408.cpp
+    src/ds2450.cpp
     src/ds1820.cpp
     src/ow_devices.cpp
     src/plugins.cpp
