@@ -8,6 +8,7 @@
 #include "ow_devices.h"
 #include "ds1820.h"
 #include "ds2408.h"
+#include "ds2450.h"
 #include "ard_i2c.h"
 #include "plugins.h"
 
@@ -67,28 +68,24 @@ void to_json(json& j, const Config& c) {
    Factory (polymorphic creation)
    ========================= */
 
+#define RETURN_DEVICE(type_str, dev_type) \
+	do { \
+		if (type == (type_str)) { \
+			auto dev = std::make_unique<dev_type>(); \
+			if (dev) \
+				dev->from_json(j); \
+			return dev; \
+		} \
+	} while (0)
+
 std::unique_ptr<OwDev> make_device_from_json(const json& j) {
 	const std::string type = j.at("type").get<std::string>();
 
-	if (type == "ds2408") {
-		auto dev = std::make_unique<ds2408>();
-		if (dev)
-			dev->from_json(j); // Polymorphic call
-		return dev;
-	}
-	if (type == "ds1820") {
-		auto dev = std::make_unique<ds1820>();
-		if (dev)
-			dev->from_json(j); // Polymorphic call
-		return dev;
-	}
-	if (type == "ard_i2c") {
-		auto dev = std::make_unique<Ard_i2c>();
-		if (dev)
-			dev->from_json(j); // Polymorphic call
-		return dev;
-	}
-
+	RETURN_DEVICE("ds2408", ds2408);
+	RETURN_DEVICE("ds1820", ds1820);
+	RETURN_DEVICE("ds2450", ds2450);
+	RETURN_DEVICE("ard_i2c", Ard_i2c);
+	// coming here means that the device is not supported
 	throw std::runtime_error("Unknown device type: " + type);
 }
 
