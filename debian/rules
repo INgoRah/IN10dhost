@@ -4,4 +4,4 @@
 	dh $@ --buildsystem=cmake
 
 override_dh_auto_configure:
-	dh_auto_configure -- -DUSE_I2C=ON
+	dh_auto_configure -- -DUSE_I2C=ON -DUSE_GPIO=ON -DTESTING=OFF -DSANITIZE=OFF -DCMAKE_BUILD_TYPE=Release

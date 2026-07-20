@@ -87,6 +87,8 @@ add_compile_options(
     -Wall
     -Wextra
     -Wpedantic
+    -Wunused-variable
+    -Wunused-result
     -std=c++20
     -Wno-psabi
     -DFUSE_USE_VERSION=30

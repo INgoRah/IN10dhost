@@ -33,9 +33,11 @@ sudo build-arm/bin/IN10dfsd -f -o allow_other /mnt/1wire
 ## Sbuild debian package
 
 sudo sbuild-apt trixie-armhf apt-get install gpiod libgpiod-dev fuse3 libfuse3-dev
+
 '''
 sbuild --dist=trixie --arch=armhf --no-run-lintian --no-clean-source
 '''
+
 optional with -chroot=trixie-armhf
 
 sbuild-shell trixie-armhf

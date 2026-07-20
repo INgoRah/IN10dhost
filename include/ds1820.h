@@ -10,8 +10,8 @@ class ds1820 : public OwDev, public IDS1820 {
 	public:
 		using OwDev::OwDev;
 		using OwDev::type;
-		ds1820() { this->temp = 21.5f; };
-		ds1820(std::string rom) : OwDev(rom) { type = "ds1820"; };
+		ds1820() { temp = 21.5f; hum = 50; type = "ds1820"; };
+		ds1820(std::string rom) : OwDev(rom) { temp = 21.5f; hum = 50;type = "ds1820"; };
 		int poll();
 
 		std::vector<string> fs_dir(string& path) const override;

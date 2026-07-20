@@ -21,6 +21,7 @@ OwDev::OwDev(std::string rom)
 {
 	this->rom = rom;
 	poll_interval = 0;
+	id = 0;
 	update();
 }
 
@@ -100,6 +101,7 @@ void OwDev::update()
 void OwDev::begin(DS2482 *ds)
 {
 	update();
+	std::lock_guard<std::mutex> lock(ds->mtx);
 	ow = ds;
 	logger.verbose(std::format("Device id={} type={}, rom={}  ({})  initialized ", id, type, rom, rom_code));
 };

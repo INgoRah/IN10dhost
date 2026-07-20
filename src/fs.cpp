@@ -424,7 +424,6 @@ static int fs_write(const char* path, const char* buf, size_t size,
 		uint8_t tmp = (uint8_t)(std::stoi(buf));
 		if (tmp > 8)
 			tmp = 8;
-		ow.set_log(tmp);
 		logger.set_level((LogLevel)tmp);
 		return size;
 	}

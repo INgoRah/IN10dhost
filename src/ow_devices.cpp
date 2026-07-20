@@ -53,7 +53,6 @@ void to_json(json& j, const Config& c) {
 		{"version", 1},
 		{"mode", c.mode},
 		{"poll", c.poll},
-		{"log", c.log},
 		{"bus_count", c.bus_count},
 		{"busses", c.busses},
 		{"switches", c.switches}
@@ -101,8 +100,6 @@ void from_json(const json& j, Config& c) {
 		c.devices.push_back(make_device_from_json(jdev));
 	}
 	c.mode = j.at("mode").get<int>();
-	if (j.contains("log"))
-		c.log = j.at("log").get<int>();
 	if (j.contains("poll"))
 		c.poll = j.at("poll").get<int>();
 }
@@ -158,11 +155,6 @@ void OwDevices::set_mode(int mode)
 		dev->set_mode(mode);
 }
 
-void OwDevices::set_log(int level)
-{
-	cache.log = level;
-}
-
 int OwDevices::log_dump(char* buf, size_t size)
 {
 	return ow->log_dump(buf, size);
@@ -185,7 +177,11 @@ void OwDevices::load(const std::string& path) {
 			cache.version,
 			(unsigned int)cache.devices.size()));
 	}
-	logger.set_level((LogLevel)cache.log);
+	if (j.contains("log")) {
+		int log;
+		log = j.at("log").get<int>();
+		logger.set_level((LogLevel)log);
+	}
 	for (auto& dev : cache.devices) {
 		dev->begin(ow);
 		dev->update();
@@ -201,6 +197,7 @@ void OwDevices::save(const std::string& path) {
 	for (auto& b : cache.busses)
 		b.dev_count = b.devices.size();
 	json j = cache;
+	j["log"] = (int)logger.get_level();
 	try {
 		json j_plugins = plugins.save();
 		j["plugins"] = j_plugins;
@@ -389,7 +386,7 @@ uint8_t OwDevices::search(bool mode)
 	uint8_t  adrt[8] = { 0x28, 0x5, 0x1, 0xFA, 0xFE, 0x66, 0x77, 0xC6};
 	sprintf(buf, "%02X.", adrt[0]);
 	pos = 2;
-	for (int j = 1; j < 8; j++) {
+	for (int j = 1; j < 7; j++) {
 		sprintf(&buf[pos], "%02X", adr[j]);
 		pos += 2;
 	}

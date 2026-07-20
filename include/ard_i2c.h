@@ -19,8 +19,8 @@ class Ard_i2c : public OwDev{
 	public:
 		using OwDev::OwDev;
 		using OwDev::type;
-		Ard_i2c(std::string rom) : OwDev(rom) { type = "ard_i2c"; };
 		Ard_i2c();
+		Ard_i2c(std::string rom);
 		void set_mode(int mode) override;
 		std::vector<string> fs_dir(string& path) const override;
 		int fs_attr(string& path) const override;

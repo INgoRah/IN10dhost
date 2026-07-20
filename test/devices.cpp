@@ -141,7 +141,6 @@ TEST_F(DevTest, Polling)
 	// let the device poll in between the seconds
 	// @500 ms
 	ow.poll();
-	logger.set_level(LogLevel::VERBOSE);
 	res = ow.poll_time();
 	EXPECT_LE(res, 500);
 	usleep(250*1000);
@@ -180,6 +179,7 @@ TEST_F(DevTest, ds2482)
 {
 	uint16_t crc = ds.crc16((const uint8_t*)"123456789", 9, 0);
 	ds.check_crc16((const uint8_t*)"123456789", 9, (const uint8_t*)"\xB8\x66", 0);
-	logger.error(std::format("crc: {}", crc));
-	//47933
+	// printout for value
+	//logger.error(std::format("crc: {}", crc));
+	EXPECT_EQ(crc, 47933);
 }

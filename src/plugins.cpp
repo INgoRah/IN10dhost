@@ -38,7 +38,12 @@ Plugin* Plugins::plugin_init(string name)
 	std::filesystem::path lib_path;
 
 	f = exec_path / std::filesystem::path(std::string("lib") + name + ".so");
-
+	if (!fs::exists(f)) {
+		f = "/opt/lib/IN10dhost" / std::filesystem::path(std::string("lib") + name + ".so");
+		if (!fs::exists(f)) {
+			return nullptr;
+		}
+	}
 	std::string timestamp = std::to_string(std::chrono::duration_cast<std::chrono::microseconds>(
     std::chrono::high_resolution_clock::now().time_since_epoch()).count());
 	std::string shadow_path = "/tmp/lib" + name + "." + timestamp + ".so";
@@ -48,13 +53,14 @@ Plugin* Plugins::plugin_init(string name)
 			name,
 			f.string(),
 			shadow_path));
-    	// Duplicate the newly compiled binary file to the shadow path
-    	fs::copy_file(f, shadow_path, fs::copy_options::overwrite_existing);
+		// Duplicate the newly compiled binary file to the shadow path
+		fs::copy_file(f, shadow_path, fs::copy_options::overwrite_existing);
 
-    	// 4. Load the unique shadow file instead of the original path
-    	handle = dlopen(shadow_path.c_str(), RTLD_LAZY | RTLD_LOCAL);
+		// 4. Load the unique shadow file instead of the original path
+		handle = dlopen(shadow_path.c_str(), RTLD_LAZY | RTLD_LOCAL);
 		if (!handle) {
-			std::cerr << "Cannot load library: " << dlerror() << std::endl;
+			//std::cerr << "Cannot load library: " << dlerror() << std::endl;
+			logger.error(std::format("Cannot load library {}: {}", name, dlerror()));
 			return nullptr;
 		}
 		// Load the symbols (the factory functions)
@@ -62,7 +68,8 @@ Plugin* Plugins::plugin_init(string name)
 		destroy_t destroy_plugin = (destroy_t) dlsym(handle, "destroy_plugin");
 
 		if (!create_plugin || !destroy_plugin) {
-			std::cerr << "Cannot load symbols: " << dlerror() << std::endl;
+			logger.error(std::format("Cannot load symbols for plugin {}: {}", name, dlerror()));
+			dlclose(handle);
 			return nullptr;
 		}
 		instance = create_plugin();
@@ -73,7 +80,7 @@ Plugin* Plugins::plugin_init(string name)
 		instance->init(&logger, static_cast<IDevices*>(&ow));
 	}
 	catch (const std::exception& e) {
-		printf("loading failed %s\n" , e.what());
+		logger.error(std::format("Failed to load plugin {}: {}", name, e.what()));
 		return nullptr;
 	}
 	logger.info(std::format("loaded plugin {}...", instance->name));

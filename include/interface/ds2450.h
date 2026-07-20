@@ -10,4 +10,6 @@ class IDS2450 {
 		 *   - 2: read cached value
 		 */
 		virtual int16_t adc_read(uint8_t ch, uint8_t flag) = 0;
+		virtual float adc_get(uint8_t ch) = 0;
+
 };

@@ -107,14 +107,13 @@ int16_t ds2450::adc_read(uint8_t ch, uint8_t flag)
 		return -1;
 	if (flag == 2)
 		return dat[ch];
-	bool ret;
 	uint16_t crc;
 
 	std::lock_guard<std::mutex> lock(ow->mtx);
-	ret = ow->selectChannel(bus);
-	if (!ret)
+	if (!ow->selectChannel(bus))
 		return -1;
-	ow->reset();
+	if (!ow->reset())
+		return -1;
 	ow->select(addr);
 	if (flag == 0) {
 		ow->write(0x3c);
@@ -136,6 +135,17 @@ int16_t ds2450::adc_read(uint8_t ch, uint8_t flag)
 	crc |= ow->read() << 8;
 
 	return dat[ch];
+}
+
+float ds2450::adc_get(uint8_t ch)
+{
+	switch (ch) {
+		case 0: return volt_a;
+		case 1: return volt_b;
+		case 2: return volt_c;
+		case 3: return volt_d;
+		default: return -1;
+	}
 }
 
 int ds2450::poll()

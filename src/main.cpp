@@ -2,7 +2,9 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <cstring>
+#ifdef GPIOD_V2
 #include <gpiod.h>
+#endif
 #include <poll.h>
 #include <time.h>
 #include <sched.h>

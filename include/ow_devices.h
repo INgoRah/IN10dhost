@@ -30,7 +30,6 @@ struct Config {
 	/* poll interval in secs or 0 for no polling */
 	int poll;
     int bus_count;
-	int log;
     std::vector<std::unique_ptr<OwDev>> devices;
 	std::vector<Bus> busses;
 	// TODO move to switch handler
@@ -54,7 +53,7 @@ class OwDevices : public IDevices
 		void init_busses();
 
 	public:
-		OwDevices() { _mode = 0;}
+		OwDevices() { _mode = 0; ow = nullptr; }
 		~OwDevices();
 		void begin(DS2482 *ds);
 		void init();
@@ -83,7 +82,6 @@ class OwDevices : public IDevices
 		int bus_count() const { return MAX_BUS; }
 		int get_mode() const { return _mode; }
 		void set_mode(int mode);
-		void set_log(int level);
 		void set_poll(int poll) { cache.poll = poll; };
 		int get_poll() { return cache.poll; };
 

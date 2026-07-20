@@ -47,6 +47,14 @@ Ard_i2c::Ard_i2c()
 	this->power = 0;
 }
 
+Ard_i2c::Ard_i2c(std::string rom) : OwDev(rom)
+{
+	// initialize members (can't delegate to default when also initializing base OwDev)
+	lastSeq = 0xff;
+	this->type = "ard_i2c";
+	this->power = 0;
+}
+
 #ifdef USE_I2C
 int i2c_write(int fd, uint8_t cmd)
 {

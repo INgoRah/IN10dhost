@@ -22,8 +22,11 @@ class ds2408 : public OwDev, public IDS2408 {
 		uint8_t data[10];
 		using OwDev::OwDev;
 		using OwDev::type;
-		ds2408() { this->level = 0; this->mode = 0; };
-		ds2408(std::string rom) : OwDev(rom) { type = "ds2408"; };
+		ds2408() { this->level = 0; this->mode = 0; type = "ds2408"; };
+		ds2408(std::string rom) : OwDev(rom) {
+			this->level = 0;
+			this->mode = 0;
+			type = "ds2408"; };
 		// each custom device may have one PWM output enabled and
 		// can set one dedicated pin to any level
 		// the level is set with a specail custom command

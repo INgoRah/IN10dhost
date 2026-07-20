@@ -38,7 +38,7 @@ public:
 	     returns 0 for ok and no action
 			< 0 for error
 			> 0 for more action needed (e.g. updating)
-			6 - on alarm (after default handling), val = bus number
+		6 - on alarm (after default handling), val = bus number
 		 returns:
 			1 - for error, no further action, abort
 			0 - ok, nothing done and continue processing alarms (default)

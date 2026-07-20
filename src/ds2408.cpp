@@ -124,7 +124,8 @@ int ds2408::fs_read(string& path, char* buf, size_t size, bool uncached)
 	}
 	if (path.find("cfg") != string::npos) {
 		if (uncached)
-			cfg_read();
+			if (cfg_read() == -1)
+				return -EAGAIN;
 		//   |CRC |  RES    |SW   1    2    3    4    5    6    7   | CFG  1    2    3    4    5    6    7  |FEA |OFF |MAJ |MIN |TYP |   OFF   |   FACT  |S   |IO  |TH  |TL  |TYP |THR |DIMD|DIMU|DIF |TM1 |TM2 |SWA0|SWA1|SWA2|SWA3|SWA4|SWA5|SWA6.
 		for (int i = 0; i < CFG_SIZE && (size_t)(i * 3) < size - 1; i++) {
 			std::sprintf(buf + i * 3, "%02X ", cfg[i]);
@@ -281,8 +282,8 @@ uint8_t ds2408::latch_reset()
 		if (ow->last_err == 0)
 			tmp = ow->read();
 #ifndef USE_I2C
-		tmp = 0xaa;
-#endif
+		return 0xaa;
+#else
 		if (tmp == 0xAA)
 			break;
 		if (ow->last_err != 0) {
@@ -291,6 +292,7 @@ uint8_t ds2408::latch_reset()
 		if (err == 0)
 			err = ow->last_err;
 		delay(LATCH_RESET_RETRY - retry);
+#endif
 	} while (--retry > 0);
 
 	if (retry == 0)
@@ -449,7 +451,8 @@ int ds2408::cfg_read()
 	int i;
 	std::lock_guard<std::mutex> lock(ow->mtx);
 
-	ow->selectChannel(bus);
+	if (!ow->selectChannel(bus))
+		return -1;
 	ow->reset();
 	ow->select(addr);
 	ow->write (0x85);
@@ -462,45 +465,47 @@ int ds2408::cfg_read()
 
 int ds2408::cfg_write(int len)
 {
+	int i;
+
 	if (len > CFG_SIZE)
 		len = CFG_SIZE;
 
-#ifdef USE_I2C
-	int i;
 	std::lock_guard<std::mutex> lock(ow->mtx);
 
-	ow->selectChannel(bus);
+	if (!ow->selectChannel(bus))
+		return -1;
 	ow->reset();
 	ow->select(addr);
 	ow->write (0x86);
 
 	for (i = 0; i < len - 1; i++)
 		ow->write(cfg[i]);
-#endif
+
 	return len;
 }
 
 uint8_t ds2408::level_set(uint8_t pio, uint8_t level, uint8_t cmd, uint8_t val)
 {
+#ifdef USE_I2C
 	uint8_t data[5] = { 0xC5, cmd, pio, val, level };
 	uint16_t crc;
-	bool ret;
-
+#endif
 	logger.log(LogLevel::DEBUG, "set PIO level=" + std::to_string(level) + " for PIO " + std::to_string(pio) + " in mode " + std::to_string(mode));
 
+#ifndef USE_I2C
+	return 0xaa;
+#else
 	/* if setting any level, a level 0 means stop */
 	if (level == 0 && cmd == 0xDD)
 		/* dim down */
 		data[1] = TMR_TYPE_STOP_DIM;
-#ifndef USE_I2C
-	return 0xaa;
-#endif
 	std::lock_guard<std::mutex> lock(ow->mtx);
-	ret = ow->selectChannel(bus);
-	if (ret)
-		ret = ow->reset();
-	if (ret)
-		ow->select(addr);
+	if (!ow->selectChannel(bus))
+		return 0xff;
+	if (!ow->reset())
+		return 0xff;
+
+	ow->select(addr);
 	for (int i = 0; i < 5; i++) {
 		ow->write(data[i]);
 		if (ow->last_err != 0)
@@ -517,4 +522,5 @@ uint8_t ds2408::level_set(uint8_t pio, uint8_t level, uint8_t cmd, uint8_t val)
 
 
 	return 0xff;
+#endif
 }

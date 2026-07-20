@@ -96,7 +96,7 @@ bool parse_buf(std::string_view buf, struct _sw_tbl& sw)
 SwitchHandler::SwitchHandler()
 {
 	cur_latch = 0;
-	this->ds = NULL;
+	this->ds = nullptr;
 }
 
 SwitchHandler::SwitchHandler(OwDevices* devs)  : SwitchHandler()
@@ -200,7 +200,7 @@ bool SwitchHandler::actor_handle(union pio p, enum _pio_mode state)
 bool SwitchHandler::switchHandle(uint8_t busNr, uint8_t adr1)
 {
 	union s_adr src;
-	uint8_t i;
+	size_t i;
 
 	src.data = srcData(busNr, adr1);
 	logger.debug(std::format("switch handling {}.{}", (int)src.sa.bus, (int)src.sa.adr));
@@ -269,23 +269,23 @@ bool SwitchHandler::alarmHandler(uint8_t busNr)
 	uint8_t cnt = 10;
 	bool ret, srch;
 
-	if (!ds)
+	if (ds == nullptr)
 		return false;
-	//ds = bus[busNr];
-	std::unique_lock<std::mutex> lock(ds->mtx);
+	{
+		std::lock_guard<std::mutex> lock(ds->mtx);
 
-	ret = ds->selectChannel(busNr);
-	if (!ret)
-		// this could be a timeout or other issue
-		// must be repeated
-		return false;
-	ds->target_search(0x29);
-	// improve time by 1 ms with a familiy search for 0x29 only
-	// with custom addresses using one byte ID only
-	// at the second byte and the remaining according a
-	// defined scheme, we could stop even after one byte search
-	srch = ds->search(adr, false);
-	lock.unlock();
+		ret = ds->selectChannel(busNr);
+		if (!ret)
+			// this could be a timeout or other issue
+			// must be repeated
+			return false;
+		ds->target_search(0x29);
+		// improve time by 1 ms with a familiy search for 0x29 only
+		// with custom addresses using one byte ID only
+		// at the second byte and the remaining according a
+		// defined scheme, we could stop even after one byte search
+		srch = ds->search(adr, false);
+	}
 	while (srch && cnt > 0) {
 		j++;
 		logger.debug(std::format("Alarm {}.{} {}", busNr, adr[1], adr[2]));
@@ -301,9 +301,10 @@ bool SwitchHandler::alarmHandler(uint8_t busNr)
 		if (ds->last_err || cnt == 0)
 			printf("Error searching = %d\n", ds->last_err);
 #endif
-		lock.lock();
-		srch = ds->search(adr, false);
-		lock.unlock();
+		{
+			std::lock_guard<std::mutex> lock(ds->mtx);
+			srch = ds->search(adr, false);
+		}
 	}
 
 	return j > 0 ? true : false;

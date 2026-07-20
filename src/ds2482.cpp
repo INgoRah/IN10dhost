@@ -36,6 +36,7 @@
 #include <cstring>
 #include <cerrno>
 #include <format>
+#include <cinttypes>
 
 // for data logger
 #include <iostream>
@@ -131,7 +132,11 @@ int DS2482::log_dump(char* buf, size_t size)
 		if (remaining_size <= 1) return;
 
 		// Safely format the dynamic string into the buffer
-		int res = snprintf(current_ptr, remaining_size, format, args...);
+		int res;
+		if constexpr (sizeof...(args) == 0)
+			res = snprintf(current_ptr, remaining_size, "%s", format);
+		else
+			res = snprintf(current_ptr, remaining_size, format, args...);
 		if (res > 0) {
 			size_t actual_written = static_cast<size_t>(res);
 			if (actual_written >= remaining_size) {
@@ -167,7 +172,7 @@ int DS2482::log_dump(char* buf, size_t size)
 			add = 0;
 		}
 		old_ts = l.ts;
-		snprintf(buf, 32, "%lu", l.ts);
+		snprintf(buf, 32, "%" PRIu64, l.ts);
 		append_to_buf("#%s\n", buf); // The timestamp
 		byte_to_binary_str(l.state, (char *)buf);
 		append_to_buf("b%s a\n", buf);
@@ -432,6 +437,7 @@ uint8_t DS2482::busyWait()
 		return DS2482_STATUS_INVAL;
 	}
 	while(res & DS2482_STATUS_BUSY) {
+		// coverity[SLEEP] - Intentional block
 		usleep(10);
 		res = _read();
 		if (last_err == ERR_READ) {
@@ -535,6 +541,7 @@ bool DS2482::reset()
 	}
 	log_event(STATE_RESET, 0);
 #ifdef USE_I2C
+	// coverity[SLEEP] - Intentional block
 	usleep(400);
 #else
 	// simultate presence pulse if testing
@@ -652,11 +659,14 @@ void DS2482::reset_search()
 
 bool DS2482::search(uint8_t *newAddr, bool search_mode)
 {
+#ifdef USE_I2C
 	uint8_t i;
 	uint8_t direction;
 	uint8_t last_zero = 0;
 	uint8_t stat;
-
+#else
+	(void)newAddr;
+#endif
 	if (searchExhausted)
 		return false;
 
@@ -669,7 +679,7 @@ bool DS2482::search(uint8_t *newAddr, bool search_mode)
 	}
 #ifndef USE_I2C
 	return false;
-#endif
+#else
 	for(i = 1; i < 65; i++) {
 		uint8_t romByte = (i - 1) >> 3;
 		uint8_t romBit = 1 << ((i - 1) & 7);
@@ -735,6 +745,7 @@ bool DS2482::search(uint8_t *newAddr, bool search_mode)
 		log_event(STATE_SEARCH, searchAddress[i]);
 	}
 	return true;
+#endif
 }
 
 void DS2482::write(const uint8_t *buf, uint16_t count, uint8_t power/* = 0 */)

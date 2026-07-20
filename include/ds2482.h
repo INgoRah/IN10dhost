@@ -83,7 +83,7 @@ private:
 	uint64_t start_time;
 	uint64_t get_now_us();
 public:
-	DS2482() { fd = -1; };
+	DS2482() { searchExhausted = 0; ch = 0xff;; fd = -1; };
 	DS2482(const std::string& i2c_dev, int address);
 	~DS2482();
 
