@@ -124,6 +124,25 @@ void OwDevices::init()
 	last_sec = HrClock::now();;
 }
 
+void OwDevices::begin(DS2482 *ds)
+{
+	ow = ds;
+
+	for (auto& dev : cache.devices) {
+		dev->begin(ds);
+	}
+    if (!ow->init()) {
+        printf("Failed to initialize DS2482\n");
+		return;
+	} else {
+		printf("Initialized DS2482\n");
+	}
+#ifdef USE_I2C_EXCLUSIVE
+	ow->resetDev();
+	ow->configureDev(DS2482_CONFIG_APU);
+#endif
+}
+
 void OwDevices::init_busses()
 {
 	cache.busses.clear();
@@ -146,6 +165,11 @@ void OwDevices::set_log(int level)
 	cache.log = level;
 }
 
+int OwDevices::log_dump(char* buf, size_t size)
+{
+	return ow->log_dump(buf, size);
+}
+
 void OwDevices::load(const std::string& path) {
 	json j;
 	std::ifstream file(path);
@@ -165,10 +189,11 @@ void OwDevices::load(const std::string& path) {
 	}
 	logger.set_level((LogLevel)cache.log);
 	for (auto& dev : cache.devices) {
+		dev->begin(ow);
 		dev->update();
 	}
 	update_data();
-	plugins.action(2, 0); // loaded
+	plugins.action(INITIALIZED, 0); // loaded
 }
 
 void OwDevices::save(const std::string& path) {
@@ -381,28 +406,6 @@ uint8_t OwDevices::search(bool mode)
 	update_data();
 
 	return 1;
-}
-
-void OwDevices::begin(DS2482 *ds)
-{
-	ow = ds;
-	ow->log_init("ds2482.vcd");
-
-	for (auto& dev : cache.devices) {
-		dev->begin(ds);
-	}
-#ifdef USE_I2C
-    if (!ow->init()) {
-        printf("Failed to initialize DS2482\n");
-		return;
-	} else {
-		printf("Initialized DS2482\n");
-	}
-#endif
-#ifdef USE_I2C_EXCLUSIVE
-	ow->resetDev();
-	ow->configureDev(DS2482_CONFIG_APU);
-#endif
 }
 
 int OwDevices::poll_time()

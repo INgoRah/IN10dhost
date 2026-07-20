@@ -20,6 +20,7 @@ static struct filetype root_dir[] = {
 	{ "uncached", 0 },
 	{ "settings", 0 },
 	{ "switches", 0 },
+	{ "log", 0 },
 };
 
 static struct filetype settings[] = {
@@ -191,6 +192,19 @@ static int fs_getattr(const char* path, struct stat* st, struct fuse_file_info*)
 			if (check_path(spath, s, st))
 				return 0;
 	}
+	if (strcmp(path, "/log") == 0) {
+		st->st_mode = S_IFDIR | 0755;
+		st->st_nlink = 2;
+		return 0;
+	}
+	if (strcmp(path, "/log/1wire.vcd") == 0) {
+		st->st_mode = S_IFREG | 0666;
+		// TODO query real size ow.log_size()
+		st->st_size = 218 + (1024 * 30);
+		st->st_nlink = 1;
+		return 0;
+	}
+
 	int bus;
 	if (extractBusNumber(spath, bus)) {
 		if (spath.length() > 0) {
@@ -279,6 +293,12 @@ static int fs_readdir(const char* path, void* buf, fuse_fill_dir_t filler,
 			filler(buf, s.name, nullptr, 0, static_cast<fuse_fill_dir_flags>(0));
 		return 0;
 	}
+	if (strcmp(path, "/log") == 0) {
+		filler(buf, "1wire.vcd", nullptr, 0, static_cast<fuse_fill_dir_flags>(0));
+		filler(buf, ".", nullptr, 0, static_cast<fuse_fill_dir_flags>(0));
+		filler(buf, "..", nullptr, 0, static_cast<fuse_fill_dir_flags>(0));
+		return 0;
+	}
 	if (strcmp(path, "/switches") == 0) {
 		std::vector<string> ls = swHdl.fs_dir(spath);
 
@@ -335,6 +355,8 @@ static int fs_open(const char* path, struct fuse_file_info*)
 		return 0;
 	if (strcmp(path, "/settings/poll") == 0)
 		return 0;
+	if (strcmp(path, "/log/1wire.vcd") == 0)
+		return 0;
 
 	int bus;
 	bool ret = extractBusNumber(spath, bus);
@@ -370,6 +392,9 @@ static int fs_read(const char* path, char* buf, size_t size, off_t offset,
 	if (strcmp(path, "/settings/poll") == 0) {
 		std::sprintf(buf, "%d", ow.get_poll());
 		return std::strlen(buf);
+	}
+	if (strcmp(path, "/log/1wire.vcd") == 0) {
+		return ow.log_dump(buf, size);
 	}
 	if (extract_subpath(spath, "switches"))
 		return swHdl.fs_read(spath, buf, size);
@@ -415,7 +440,7 @@ static int fs_write(const char* path, const char* buf, size_t size,
 	}
 	if (strcmp(path, "/settings/plugins") == 0) {
 		plugins.reload();
-		plugins.action(2, 0); // initialized
+		plugins.action(INITIALIZED, 0); // initialized
 	}
 	string spath(path);
 	spath.erase(0, 1);

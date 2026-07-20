@@ -3,6 +3,7 @@
 
 class ds1820 : public OwDev, public IDS1820 {
 	private:
+		uint8_t scratchPad[9];
 		float temp;
 		uint8_t hum;
 
@@ -28,5 +29,5 @@ class ds1820 : public OwDev, public IDS1820 {
 		};
 
 		// IDS1820
-		float temp_read(const uint8_t mode);
+		float temp_read(const uint8_t flag);
 };

@@ -152,6 +152,7 @@ target_include_directories(IN10dfsd
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${GPIOD_INCLUDE_DIRS}
+        ${CMAKE_CURRENT_SOURCE_DIR}/lib
 )
 
 # ----------------------------

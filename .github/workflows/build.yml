@@ -27,6 +27,12 @@ jobs:
       run: sudo apt-get install -y fuse3 libfuse3-dev nlohmann-json3-dev libgtest-dev libgmock-dev lcov
     - name: configure
       run: ${{ matrix.cc }} mkdir build;cmake -DUSE_GPIO=NO -DUSE_I2C=NO -DTESTING=ON -DNO_TERM=ON -DCMAKE_BUILD_TYPE=Debug -S . -B build
+    - name: Run Coverity Scan
+      uses: vapier/coverity-scan-action@v1
+      with:
+        email: ${{ secrets.COVERITY_SCAN_EMAIL }}
+        token: ${{ secrets.COVERITY_TOKEN }}
+        command: 'cmake --build build'
     - name: make
       run: cmake --build build -- -j$(nproc)
     - name: check
@@ -47,9 +53,3 @@ jobs:
       with:
         coverage-file: coverage.info # Path to your LCOV file
         minimum-coverage: 80              # Fails if below 80%
-    - name: Run Coverity Scan
-      uses: vapier/coverity-scan-action@v1
-      with:
-        email: ${{ secrets.COVERITY_SCAN_EMAIL }}
-        token: ${{ secrets.COVERITY_TOKEN }}
-        command: 'cmake --build build'

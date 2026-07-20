@@ -116,14 +116,13 @@ int16_t ds2450::adc_read(uint8_t ch, uint8_t flag)
 		return -1;
 	ow->reset();
 	ow->select(addr);
-	if (mode == 0) {
+	if (flag == 0) {
 		ow->write(0x3c);
 		ow->write(ch+1);
 		// clear all
 		ow->write(0x55);
 		crc = ow->read();
 		crc |= ow->read() << 8;
-		logger.verbose(std::format("DS2450 reading crc(1)={}", crc));
 		return 0;
 	}
 	ow->write(0xAA);
@@ -135,7 +134,6 @@ int16_t ds2450::adc_read(uint8_t ch, uint8_t flag)
 	}
 	crc = ow->read();
 	crc |= ow->read() << 8;
-	logger.verbose(std::format("DS2450 reading crc(2)={}", crc));
 
 	return dat[ch];
 }
@@ -144,7 +142,6 @@ int ds2450::poll()
 {
 	int poll = OwDev::poll();
 	if (poll == 1) {
-		logger.verbose("DS2450 polling");
 		if (adc_read(0, 0) != 0)
 			return EAGAIN;
 		volt_a = adc_read(0, 1);

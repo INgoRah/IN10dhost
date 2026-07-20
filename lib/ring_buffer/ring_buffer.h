@@ -4,8 +4,8 @@
  Copyright (c) 2026 INgo Rah.
 
  This program is free software: you can redistribute it and/or modify
- it under the terms of the GNU Lesser General Public License as 
- published by the Free Software Foundation, either version 3 of the 
+ it under the terms of the GNU Lesser General Public License as
+ published by the Free Software Foundation, either version 3 of the
  License, or (at your option) any later version.
 
  This program is distributed in the hope that it will be useful,
@@ -66,7 +66,7 @@ public:
 	/**
 	 * @brief Create an empty circular buffer.
 	 */
-	constexpr RingBuffer();
+	constexpr RingBuffer() : head(buffer), tail(buffer), count(0) {}
 
 	// disable the copy constructor
 	/** @private */
@@ -85,14 +85,38 @@ public:
 	 *
 	 * @return `false` iff the addition caused overwriting to an existing element.
 	 */
-	bool push(T value);
+	bool push(T value) {
+		if (++tail == buffer + capacity) {
+			tail = buffer;
+		}
+		*tail = value;
+		if (count == capacity) {
+			if (++head == buffer + capacity) {
+				head = buffer;
+			}
+			return false;
+		} else {
+			if (count++ == 0) {
+				head = tail;
+			}
+			return true;
+		}
+	}
 
 	/**
 	 * @brief Removes an element from the end of the buffer.
 	 *
 	 * @warning Calling this operation on an empty buffer has an unpredictable behaviour.
 	 */
-	T pop();
+	T pop() {
+		if (count == 0) return *tail;
+		T result = *tail--;
+		if (tail < buffer) {
+			tail = buffer + capacity - 1;
+		}
+		count--;
+		return result;
+	}
 
 	/**
 	 * @brief Array-like access to buffer.
@@ -101,14 +125,17 @@ public:
 	 *
 	 * @warning Calling this operation on an empty buffer has an unpredictable behaviour.
 	 */
-	T operator [] (IT index) const;
+	T operator [] (IT index) const {
+		if (index >= count) return *tail;
+		return *(buffer + ((head - buffer + index) % capacity));
+	}
 
 	/**
 	 * @brief Returns how many elements are actually stored in the buffer.
 	 *
 	 * @return The number of elements stored in the buffer.
 	 */
-	IT inline size() const;
+	inline IT size() const { return count; }
 
 	/**
 	 * @brief Resets the buffer to a clean status, making all buffer positions available.
@@ -116,7 +143,7 @@ public:
 	 * @note This does not clean up any dynamically allocated memory stored in the buffer.
 	 * Clearing a buffer that points to heap-allocated memory may cause a memory leak, if it's not properly cleaned up.
 	 */
-	void inline clear();
+	inline void clear() { head = tail = buffer; count = 0; }
 
 private:
 	T buffer[S];

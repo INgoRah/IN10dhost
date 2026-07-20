@@ -80,7 +80,8 @@ enum DS2482_ERR {
 class DS2482
 {
 private:
-	std::ofstream vcd_file;
+	uint64_t start_time;
+	uint64_t get_now_us();
 public:
 	DS2482() { fd = -1; };
 	DS2482(const std::string& i2c_dev, int address);
@@ -89,7 +90,7 @@ public:
 	std::mutex mtx;
 	uint8_t last_err;
 	bool init();
-	bool log_init(const std::string& path);
+	int log_dump(char* buf, size_t size);
 	bool configureDev(uint8_t config);
 	void resetDev();
 
@@ -102,8 +103,6 @@ public:
 	void write(const uint8_t *buf, uint16_t count, uint8_t power/* = 0 */);
 	// Issue a 1-Wire rom select command, you do the reset first.
 	void select(const  uint8_t rom[8]);
-	// Issue skip rom
-	void skip();
 
 	// Clear the search state so that if will start from the beginning again.
 	void reset_search();
@@ -137,5 +136,6 @@ private:
 	void setReadPtr(uint8_t readPtr);
 
 	uint8_t busyWait(); //blocks until
+	bool log_init();
 	void log_event(uint8_t state, uint8_t data);
 };

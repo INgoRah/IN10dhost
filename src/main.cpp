@@ -104,14 +104,18 @@ void background_worker()
 				tm = std::min(ow.poll_time(), timeout);
 
 			ret = poll(fds, 2, tm);
+#if 0
 			tp = HrClock::now();
+#endif
 		}
 		//logger.verbose("Poll " + std::to_string(ret) + " handled, GPIO state=" + std::to_string(state));
 		arduino->interrupt();
+#if 0
 		if (state == 1) {
 			auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(HrClock::now() - tp);
 			logger.info(std::format("used {} ", duration));
 		}
+#endif
 		if (ret > 0 && (fds[1].revents & POLLIN))
 			// READ THE EVENTS to clear the poll status
 			gpiod_line_request_read_edge_events(line, event_buffer, 16);
@@ -192,6 +196,9 @@ int main(int argc, char* argv[])
 	int ret;
 
 	std::signal(SIGSEGV, segfault_handler);
+	enable_rt();
+	setup();
+
 	string f = std::filesystem::current_path();
 	logger.set_level(LogLevel::INFO);
 	f = f + "/data.json";
@@ -202,8 +209,6 @@ int main(int argc, char* argv[])
 	catch (const std::exception& e) {
 		printf("loading failed %s\n" , e.what());
 	}
-	enable_rt();
-	setup();
 	std::thread worker(background_worker);
 	ret = fuse_main(argc, argv, &fs_ops, nullptr);
 	printf("fuse ended with %d\n", ret);

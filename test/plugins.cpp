@@ -50,6 +50,8 @@ TEST(plugins, PluginSave)
 	// set log level back if changed by test
 	// check plugin actually saved config
 	ow.save(f);
+	logger.set_level(LogLevel::VERBOSE);
 	ow.begin(&ds);
 	plugins.action(2, 0); // initialized
+	logger.set_level(LogLevel::ERROR);
 }

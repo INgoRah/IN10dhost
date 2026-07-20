@@ -88,6 +88,8 @@ class OwDevices : public IDevices
 		int get_poll() { return cache.poll; };
 
 		std::vector<OwDev*> list_devices(int bus);
+
+		int log_dump(char* buf, size_t size);
 #if 0
 		uint8_t getVersion(uint8_t bus, uint8_t id);
 		void versionUpdate(uint8_t bus, uint8_t id);

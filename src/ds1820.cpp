@@ -76,11 +76,9 @@ int ds1820::fs_read(string& path, char* buf, size_t size, bool uncached)
  * No retry handling because the data might not so important as next cycle
  * will come
 */
-float ds1820::temp_read(const uint8_t mode)
+float ds1820::temp_read(const uint8_t flag)
 {
 	bool ret;
-	uint8_t scratchPad[9];
-	(void)mode;
 
 	std::lock_guard<std::mutex> m(ow->mtx);
 	ret = ow->selectChannel(bus);
@@ -89,7 +87,7 @@ float ds1820::temp_read(const uint8_t mode)
 	}
 	ow->reset();
 	ow->select(addr);
-	switch (mode) {
+	switch (flag) {
 	case 0:
 		ow->write(STARTCONVO);
 		return 0;
