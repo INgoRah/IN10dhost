@@ -16,13 +16,7 @@ using json = nlohmann::json;
 #define MAX_BUS 4
 #endif
 
-using Clock = std::chrono::steady_clock;
-
-struct OwAttribute {
-    std::string value;
-    Clock::time_point timestamp;
-    std::chrono::milliseconds ttl{1000};
-};
+using HrClock = std::chrono::high_resolution_clock;
 
 struct Bus {
     int id;
@@ -36,7 +30,6 @@ struct Config {
 	/* poll interval in secs or 0 for no polling */
 	int poll;
     int bus_count;
-	int log;
     std::vector<std::unique_ptr<OwDev>> devices;
 	std::vector<Bus> busses;
 	// TODO move to switch handler
@@ -56,24 +49,31 @@ class OwDevices : public IDevices
 		uint8_t	pio_data[MAX_BUS][MAX_ADR];
 		uint8_t dev_vers[MAX_BUS][MAX_ADR];
 #endif
-		Clock::time_point last_scan_;
+		HrClock::time_point last_sec;
 		void init_busses();
 
 	public:
-		OwDevices() { _mode = 0;}
+		OwDevices() { _mode = 0; ow = nullptr; }
 		~OwDevices();
 		void begin(DS2482 *ds);
 		void init();
 		void cacheInit();
 		void load(const std::string& path);
 		void save(const std::string& path);
-		int dump(char* buf);
 
 		uint8_t search(bool mode);
 
 		void update_device(int bus, string rom);
 		void add_device(OwDev* dev);
 		void update_data();
+		/** Returns the minimun time in ms for the next poll action
+		 *  @return
+		 *   time in ms for the next poll action, or
+		 *   0 for poll now or
+		 *  -1 for no polling
+		 */
+		int poll_time();
+		int poll();
 
 		OwDev* find(const string& rom);
 		OwDev* find(uint64_t targetCode);
@@ -82,11 +82,12 @@ class OwDevices : public IDevices
 		int bus_count() const { return MAX_BUS; }
 		int get_mode() const { return _mode; }
 		void set_mode(int mode);
-		void set_log(int level);
 		void set_poll(int poll) { cache.poll = poll; };
 		int get_poll() { return cache.poll; };
 
 		std::vector<OwDev*> list_devices(int bus);
+
+		int log_dump(char* buf, size_t size);
 #if 0
 		uint8_t getVersion(uint8_t bus, uint8_t id);
 		void versionUpdate(uint8_t bus, uint8_t id);

@@ -1,3 +1,9 @@
+in10dfsd (0.1.1) trixie; urgency=medium
+
+  * DS2450 support
+
+ -- INgo Rah <INgo.Rah@gmx.net>  Wed, 22 Jul 2026 12:00:00 +0000
+
 in10dfsd (0.1.0) trixie; urgency=medium
 
   * Initial release

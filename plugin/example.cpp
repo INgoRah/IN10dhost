@@ -8,6 +8,8 @@ private:
 	ILogger* logger;
 	IDevices *devices;
 public:
+	Example() : logger(nullptr), devices(nullptr) {}
+
 	void info() override {
 		std::cout << "Example Version 1.0" << std::endl;
 	}
@@ -71,5 +73,4 @@ extern "C" Plugin* create_plugin() {
 
 extern "C" void destroy_plugin(Plugin* p) {
 	delete p;
-	std::cout << "Example plugin deleted" << std::endl;
 }

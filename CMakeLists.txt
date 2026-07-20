@@ -87,6 +87,8 @@ add_compile_options(
     -Wall
     -Wextra
     -Wpedantic
+    -Wunused-variable
+    -Wunused-result
     -std=c++20
     -Wno-psabi
     -DFUSE_USE_VERSION=30
@@ -152,6 +154,7 @@ target_include_directories(IN10dfsd
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${GPIOD_INCLUDE_DIRS}
+        ${CMAKE_CURRENT_SOURCE_DIR}/lib
 )
 
 # ----------------------------

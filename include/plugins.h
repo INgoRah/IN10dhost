@@ -19,5 +19,5 @@ class Plugins {
 		int remove(string name);
 		int load(json j);
 		json save();
-		int action(int action, int val);
+		int action(int action, int val = 0);
 };

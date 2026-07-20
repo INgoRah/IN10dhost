@@ -30,7 +30,8 @@
             "port": 8081
         },
         "invalid" : {},
-        "notfound" : {}
+        "notfound" : {},
+        "invalid_symbol" : {}
     },
     "poll": 0,
     "switches": [
