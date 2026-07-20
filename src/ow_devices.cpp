@@ -134,8 +134,6 @@ void OwDevices::begin(DS2482 *ds)
     if (!ow->init()) {
         printf("Failed to initialize DS2482\n");
 		return;
-	} else {
-		printf("Initialized DS2482\n");
 	}
 #ifdef USE_I2C_EXCLUSIVE
 	ow->resetDev();

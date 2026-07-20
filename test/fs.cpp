@@ -401,7 +401,6 @@ TEST_F(FsTest, WriteReadDevPio) {
 	EXPECT_EQ(buf[0], '1');
 	fs_ops.read("/29.0701F8FE6677F4/PIO.1", buf, 2, 0, nullptr);
 	EXPECT_EQ(buf[0], '1');
-	logger.set_level(LogLevel::VERBOSE);
 
 	buf[0] = '0';
 	fs_ops.write("/29.0701F8FE6677F4/PIO.0", buf, 2, 0, nullptr);

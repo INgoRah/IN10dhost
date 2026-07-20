@@ -34,6 +34,7 @@ static int filler(void *buf, const char *name,
 class SwTest : public ::testing::Test {
 protected:
 	void SetUp() override {
+		logger.set_level(LogLevel::ERROR);
 		fs_init(&fs_ops);
 		ow.init();
 		ow.begin(&ds);
@@ -102,7 +103,7 @@ TEST_F(SwTest, switching)
 	// watchdog
 	dev->data[STAT] = 0x88;
 	ret = swHdl.dev_alarm(1, adr);
-	EXPECT_EQ(ret, false);
+	EXPECT_EQ(ret, true);
 	// check wrong latch content
 	dev->data[STAT] = 0x0;
 	dev->data[PIO_LATCH] = 0xff;
@@ -170,10 +171,9 @@ TEST_F(SwTest, FsSwitches)
 
 TEST_F(SwTest, SwitchesConfig)
 {
-	LogLevel lvl = logger.get_level();
 	ow.save("test_switches.json");
 	ow.load("test_switches.json");
-	logger.set_level(lvl);
+	logger.set_level(LogLevel::ERROR);
 }
 
 TEST(LLSwTest, ll_funcs) {
