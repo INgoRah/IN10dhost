@@ -1,7 +1,7 @@
 #include <fstream>
 #include <iostream>
 #include <string>
-#include <algorithm>
+#include <algorithm> // for std::max,min...
 #include <fuse3/fuse.h>
 #include "main.h"
 #include "fs.h"
@@ -108,7 +108,6 @@ void from_json(const json& j, Config& c) {
 }
 
 OwDevices::~OwDevices() {
-	logger.info("Cleaning up OwDevices...");
 	plugins.cleanup();
 }
 
@@ -122,6 +121,7 @@ void OwDevices::init()
 	deviceCount = 0;
 	cache.devices.clear();
 	init_busses();
+	last_sec = HrClock::now();;
 }
 
 void OwDevices::init_busses()
@@ -306,6 +306,10 @@ void OwDevices::update_device(int bus, string rom) {
 		auto& p = cache.devices.emplace_back(std::make_unique<ds1820>(rom));
 		dev = p.get();
 	}
+	if (rom.substr(0, 2) == "20") {
+		auto& p = cache.devices.emplace_back(std::make_unique<ds2450>(rom));
+		dev = p.get();
+	}
 	if (rom.substr(0, 2) == "AD") {
 		auto& p = cache.devices.emplace_back(std::make_unique<Ard_i2c>(rom));
 		dev = p.get();
@@ -322,25 +326,11 @@ void OwDevices::update_device(int bus, string rom) {
 		// TODO create generic device to at least show it in the list
 		// issue ...
 	}
-	last_scan_ = Clock::now();
 }
 
 std::vector<OwDev*> OwDevices::list_devices(int bus)
 {
 	return cache.busses[bus].devices;
-}
-
-int OwDevices::dump(char* buf)
-{
-	char* ptr = &buf[0];
-	int written = 0;
-
-	for (size_t i = 0; i < deviceCount; ++i) {
-		 written = std::sprintf(ptr, "%012llX\n",
-			dev_list[i].romCode);
-		ptr += written;
-	}
-	return strlen(buf);
 }
 
 // search devs
@@ -356,7 +346,6 @@ uint8_t OwDevices::search(bool mode)
 	for (bus = 0; bus < 4; bus++) {
 		std::lock_guard<std::mutex> lock(ow->mtx);
 		ow->selectChannel(bus);
-		ow->reset();
 		ow->reset_search();
 #ifdef USE_I2C
 		while (ow->search(adr, mode)) {
@@ -394,9 +383,10 @@ uint8_t OwDevices::search(bool mode)
 	return 1;
 }
 
-
-void OwDevices::begin(DS2482 *ds) {
+void OwDevices::begin(DS2482 *ds)
+{
 	ow = ds;
+	ow->log_init("ds2482.vcd");
 
 	for (auto& dev : cache.devices) {
 		dev->begin(ds);
@@ -413,4 +403,54 @@ void OwDevices::begin(DS2482 *ds) {
 	ow->resetDev();
 	ow->configureDev(DS2482_CONFIG_APU);
 #endif
+}
+
+int OwDevices::poll_time()
+{
+	int next_timeout = 60 * 1000; // 60 seconds
+	auto now = HrClock::now();
+	auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_sec).count();
+	if (elapsed >= 1000) {
+		// time to poll now
+		return 0;
+	}
+	// return remaining time in ms for the second timer
+	int sec = (int)(1000 - elapsed);
+	// check all devices for polling
+#if 1
+	for (auto& dev : cache.devices) {
+		int next = dev->poll_next();
+		if (next == 0)
+			return 0; // time to poll now
+		if (next > 0 && next < next_timeout)
+	        next_timeout = std::min(next_timeout, next);
+    }
+#endif
+	if (next_timeout == 60 * 1000)
+		// no device needs polling, return the seconds
+		return sec;
+	return std::min(next_timeout, sec);
+}
+
+int OwDevices::poll()
+{
+	int ret = -1;
+	int cnt = 0;
+	// check if seconds timer is up
+	auto now = HrClock::now();
+	auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_sec).count();
+	if (elapsed >= 1000) {
+		last_sec = now;
+		cnt = plugins.action(PERIODIC_SECOND);
+	}
+    for (auto& dev : cache.devices) {
+		int poll = dev->poll();
+		if (poll == 1)
+			cnt++; // at least one device polled
+		else if (poll == 0)
+			ret = std::max(ret, 0);
+	}
+	if (cnt == 0)
+		return ret; // no device needs polling
+	return cnt;
 }

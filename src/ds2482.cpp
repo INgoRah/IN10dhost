@@ -35,6 +35,12 @@
 #include <linux/i2c.h>
 #include <cstring>
 #include <cerrno>
+// for data logger
+#include <iostream>
+#include <fstream> // Required for std::ofstream
+#include <time.h>
+#include <bitset>
+#include "logger.h"
 
 /* Values for DS2482_CMD_SET_READ_PTR */
 #define DS2482_PTR_CODE_STATUS		0xF0
@@ -51,6 +57,17 @@
 #define DS2482_CMD_READ 0x96
 #define DS2482_CMD_1WIRE_TRIPLET	0x78
 
+// State enum helpers for data logging
+#define STATE_IDLE   '-'
+#define STATE_RESET  '!'
+#define STATE_SEARCH 'S'
+#define STATE_READ   'R'
+#define STATE_WRITE  'W'
+#define STATE_CHANNEL 'C'
+
+extern Logger logger;
+bool ow_reset;
+
 DS2482::DS2482(const std::string& i2c_dev, int address)
 	: fd(-1), addr(address)
 {
@@ -59,6 +76,7 @@ DS2482::DS2482(const std::string& i2c_dev, int address)
 #else
 	(void)i2c_dev;
 	(void)address;
+	fd = -1;
 #endif
 	ch = 0xff;
 	_read_ptr = 0;
@@ -68,6 +86,65 @@ DS2482::~DS2482()
 {
 	if (fd >= 0)
 		close(fd);
+	if (!vcd_file)
+		vcd_file.close();
+}
+
+uint64_t start_time;
+
+uint64_t get_now_us()
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000ULL;
+}
+
+bool DS2482::log_init(const std::string& path)
+{
+	if (vcd_file.is_open())
+		return true;
+	vcd_file.open(path);
+	if (!vcd_file) {
+		logger.error("Failed to data log file");
+		return false;
+	}
+    start_time = get_now_us();
+	vcd_file << "$date\n  Today, 2026\n$end\n";
+    vcd_file << "$timescale\n  1s\n$end\n"; // Using arbitrary 1s steps for sequence
+    vcd_file << "$scope module 1wire $end\n";
+
+    // Define an 8-bit bus for state, 8-bit for commands, 8-bit for data bytes
+    vcd_file << "$var wire 8 a bus_state $end\n";
+    vcd_file << "$var wire 8 b ch0_data $end\n";
+    vcd_file << "$var wire 8 c ch1_data $end\n";
+    vcd_file << "$var wire 8 d ch2_data $end\n";
+
+    vcd_file << "$upscope $end\n";
+    vcd_file << "$enddefinitions $end\n";
+
+	return true;
+}
+
+void DS2482::log_event(uint8_t state, uint8_t data)
+{
+	static uint8_t cmd;
+
+	if (!vcd_file)
+		return;
+    uint64_t relative_us = get_now_us() - start_time;
+
+    vcd_file << "#" << relative_us << "\n"; // The timestamp
+	//vcd_file << "#" << sim_step++ << "\n";
+    // Print values in VCD binary format (8 bits each)
+    vcd_file << "b" << std::bitset<8>(state) << " a\n";
+	if (ch == 0)
+		vcd_file << "b" << std::bitset<8>(data) << " b\n";
+	if (ch == 1)
+		vcd_file << "b" << std::bitset<8>(data) << " c\n";
+	if (ch == 2)
+		vcd_file << "b" << std::bitset<8>(data) << " d\n";
+
+	vcd_file.flush();
 }
 
 // The 1-Wire CRC scheme is described in Maxim Application Note 27:
@@ -277,6 +354,7 @@ uint8_t DS2482::_read()
 	}
 	return d;
 #else
+	// TODO simulate read with test data (array)
 	return 0;
 #endif
 }
@@ -354,6 +432,10 @@ bool DS2482::selectChannel(uint8_t channel)
 	to the channel register */
 
 	uint8_t check = _read();
+#ifndef USE_I2C
+	// simulate access if testing
+	check = chan_r[channel];
+#endif
 	if (check != chan_r[channel]) {
 		last_err = ERR_CHCHK;
 		return false;
@@ -385,7 +467,6 @@ bool DS2482::selectChannel(uint8_t channel)
 bool DS2482::reset()
 {
 	last_err = ERR_NONE;
-	//std::lock_guard<std::mutex> lock(mtx);
 	busyWait();
 	if (last_err != ERR_NONE) {
 		/* err can be 11..18 */
@@ -398,7 +479,13 @@ bool DS2482::reset()
 		last_err += ERR_RESET2;
 		return false;
 	}
+	log_event(STATE_RESET, 0);
+#ifdef USE_I2C
 	usleep(400);
+#else
+	// simultate presence pulse if testing
+	return true;
+#endif
 	uint8_t stat = busyWait();
 	if (last_err != ERR_NONE) {
 		/* err can be 11..18 */
@@ -423,7 +510,6 @@ bool DS2482::reset()
 uint8_t DS2482::write(uint8_t b, uint8_t power)
 {
 	(void)power;
-	//std::lock_guard<std::mutex> lock(mtx);
 	last_err = ERR_NONE;
 	busyWait();
 	if (last_err != ERR_NONE) {
@@ -432,18 +518,19 @@ uint8_t DS2482::write(uint8_t b, uint8_t power)
 		return 0xff;
 	}
 	_write_cmd (DS2482_CMD_WRITE, b);
-
 	if (last_err != ERR_NONE) {
 		/* err can be 1..5 */
 		last_err += ERR_WRITE2;
 		return 0xff;
 	}
+	log_event(STATE_WRITE, b);
 
 	return b;
 }
 
 uint8_t DS2482::read()
 {
+	uint8_t b;
 	//std::lock_guard<std::mutex> lock(mtx);
 
 	last_err = ERR_NONE;
@@ -464,8 +551,10 @@ uint8_t DS2482::read()
 		return 0xff;
 	}
 	setReadPtr(DS2482_PTR_CODE_DATA);
+	b = _read();
+	log_event(STATE_READ, b);
 
-	return _read();
+	return b;
 }
 
 void DS2482::skip()
@@ -593,8 +682,10 @@ bool DS2482::search(uint8_t *newAddr, bool search_mode)
 	if (searchLastDisrepancy == 0)
 		searchExhausted = 1;
 
-	for (i = 0; i < 8; i++)
+	for (i = 0; i < 8; i++) {
 		newAddr[i] = searchAddress[i];
+		log_event(STATE_SEARCH, searchAddress[i]);
+	}
 	return true;
 }
 

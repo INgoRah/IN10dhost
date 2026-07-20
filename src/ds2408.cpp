@@ -91,6 +91,10 @@ int ds2408::fs_attr(std::string& path) const
 					return 1;
 				if (path.find("sensed." + std::to_string(i)) != string::npos)
 					return 1;
+				if (path.find("sensed." + std::to_string(i)) != string::npos)
+					return 1;
+				if (path.find("latched." + std::to_string(i)) != string::npos)
+					return 1;
 				if (path.find("pin." + std::to_string(i) + "/name") != string::npos)
 					return 20;
 				if (path.find("pin." + std::to_string(i) + "/func") != string::npos)
@@ -115,7 +119,7 @@ int ds2408::fs_read(string& path, char* buf, size_t size, bool uncached)
 	if (path.find("BYTE") != string::npos) {
 		if (uncached)
 			reg_read(false);
-		std::sprintf(buf, "%d", data[PIO_LS]);
+		std::sprintf(buf, "%d", data[PIO_OUT]);
 		goto out;
 	}
 	if (path.find("cfg") != string::npos) {
@@ -264,14 +268,11 @@ uint8_t ds2408::ard_set(uint8_t pio, uint8_t val)
 uint8_t ds2408::latch_reset()
 {
 	uint8_t retry, tmp, err = 0;
-#ifdef USE_I2C
 	bool res;
-#endif
 
 	retry = LATCH_RESET_RETRY - 1;
 	do {
 		tmp = 0xff;
-#ifdef USE_I2C
 		res = ow->reset();
 		if (res && ow->last_err == 0)
 			ow->select(addr);
@@ -279,7 +280,7 @@ uint8_t ds2408::latch_reset()
 			ow->write (0xC3);
 		if (ow->last_err == 0)
 			tmp = ow->read();
-#else
+#ifndef USE_I2C
 		tmp = 0xaa;
 #endif
 		if (tmp == 0xAA)
@@ -291,18 +292,7 @@ uint8_t ds2408::latch_reset()
 			err = ow->last_err;
 		delay(LATCH_RESET_RETRY - retry);
 	} while (--retry > 0);
-#ifdef DEBUG
-	if ((err && retry == 0) || (err)) {
-		Serial.print (F("latch reset err="));
-		Serial.print (err);
-		if (retry == 0)
-			Serial.println(F(" ERR! "));
-		else {
-			Serial.print(F(" retry="));
-			Serial.println(retry);
-		}
-	}
-#endif
+
 	if (retry == 0)
 		return 0xff;
 
@@ -341,12 +331,11 @@ uint8_t ds2408::pin_switch(uint8_t pio, enum _pio_mode state, uint8_t lvl)
 
 uint8_t ds2408::pio_set(uint8_t pio)
 {
-#ifdef USE_I2C
 	uint8_t r, retry, err = 0;
 	bool ret;
-#endif
+
 	logger.log(LogLevel::DEBUG, "set PIO " + std::to_string(pio) + " in mode " + std::to_string(mode));
-#ifdef USE_I2C
+
 	std::lock_guard<std::mutex> lock(ow->mtx);
 	retry = PIOSET_RETRY - 1;
 	do {
@@ -366,6 +355,9 @@ uint8_t ds2408::pio_set(uint8_t pio)
 		// lets try a pseudo read at least to avoid
 		// a hung dev
 		r = ow->read();
+#ifndef USE_I2C
+		r = 0xAA;
+#endif
 		if (r == 0xAA) {
 			data[PIO_OUT] = pio;
 			break;
@@ -380,11 +372,6 @@ uint8_t ds2408::pio_set(uint8_t pio)
 		latch_reset();
 	}
 	return r;
-#else
-	data[0] = pio;
-	data[PIO_OUT] = pio;
-	return 0xAA;
-#endif
 }
 
 /* Read DS2408 registers
@@ -405,18 +392,15 @@ uint8_t ds2408::reg_read(bool latch_reset)
 {
 	uint8_t tmp, err = 0;
 	uint8_t retry = REG_RETRY - 1;
-#ifdef USE_I2C
 	bool ret;
 	uint8_t buf[3];  // Put everything in the buffer so we can compute CRC easily.
 	// read data registers
 	buf[0] = 0xF0;	// Read PIO Registers
 	buf[1] = 0x88;	// LSB address
 	buf[2] = 0x00;	// MSB address
-#endif
 	do {
 		//wdt_reset(); ??
 		/* read latch */
-#ifdef USE_I2C
 		std::lock_guard<std::mutex> lock(ow->mtx);
 		ret = ow->selectChannel(bus);
 		if (ow->last_err == 0)
@@ -430,16 +414,18 @@ uint8_t ds2408::reg_read(bool latch_reset)
 		// try this: alway read not running into a watchdog
 		// on the slave
 		// if (ow->last_err == 0)
+#ifdef USE_I2C
 		ow->read (data, 10);
+#else
+		uint8_t dummy[10];
+		ow->read (dummy, 10);
+#endif
 		/* check for valid status register */
+		data[STAT] = 0x00;
 		if (data[STAT] != 0xff)
 			break;
-		tmp = 0x55;
 		if (err == 0)
 			err = ow->last_err;
-#else
-		tmp = 0xaa;
-#endif
 		// if we got here, there is an issue and we
 		// will try again
 		//delay(5);
@@ -451,7 +437,7 @@ uint8_t ds2408::reg_read(bool latch_reset)
 	// clear the alarm status
 	tmp = this->latch_reset();
 
-	logger.verbose(rom + " " + std::format(" read_regs {:#x} {:#x} {:#x}", data[PIO_OUT], data[PIO_LS], data[PIO_LATCH]));
+	logger.verbose(rom + " " + std::format(" read_regs OUT={:#x} LS={:#x} LATCH={:#x} STAT={:#x}", data[PIO_OUT], data[PIO_LS], data[PIO_LATCH], data[STAT]));
 	return tmp;
 }
 
@@ -470,6 +456,26 @@ int ds2408::cfg_read()
 
 	for (i = 0; i < CFG_SIZE - 1; i++)
 		cfg[i] = ow->read ();
+#endif
+	return len;
+}
+
+int ds2408::cfg_write(int len)
+{
+	if (len > CFG_SIZE)
+		len = CFG_SIZE;
+
+#ifdef USE_I2C
+	int i;
+	std::lock_guard<std::mutex> lock(ow->mtx);
+
+	ow->selectChannel(bus);
+	ow->reset();
+	ow->select(addr);
+	ow->write (0x86);
+
+	for (i = 0; i < len - 1; i++)
+		ow->write(cfg[i]);
 #endif
 	return len;
 }

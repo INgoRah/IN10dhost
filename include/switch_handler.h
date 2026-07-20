@@ -145,7 +145,6 @@ class SwitchHandler : IFs {
 		bool actor_handle(union pio dst, enum _pio_mode state);
 		void begin(DS2482 *ow);
 		void loop();
-		void initSwTable();
 		bool dev_alarm(uint8_t bus, uint8_t adr[8]);
 		bool alarmHandler(uint8_t busNr);
 		bool switchHandle(uint8_t busNr, uint8_t adr1);

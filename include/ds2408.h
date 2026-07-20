@@ -42,7 +42,7 @@ class ds2408 : public OwDev, public IDS2408 {
 		uint8_t reg_read(bool latch_reset);
 		uint8_t latch_reset();
 		int cfg_read();
-		int cfg_write();
+		int cfg_write(int len = CFG_SIZE);
 		uint8_t level_set(uint8_t pio, uint8_t level, uint8_t cmd = TMR_TYPE_ON, uint8_t val = 0);
 		uint8_t pin_switch(uint8_t pio, enum _pio_mode state, uint8_t lvl = 0);
 		uint8_t ard_set(uint8_t pio, uint8_t val);

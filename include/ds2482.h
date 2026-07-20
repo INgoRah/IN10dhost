@@ -3,6 +3,8 @@
 #include <string>
 #include <stdint.h>
 #include <mutex>
+#include <iostream>
+#include <fstream> // Required for std::ofstream
 
 #define stOk 0
 #define stTimeout 1
@@ -77,6 +79,8 @@ enum DS2482_ERR {
 
 class DS2482
 {
+private:
+	std::ofstream vcd_file;
 public:
 	DS2482() { fd = -1; };
 	DS2482(const std::string& i2c_dev, int address);
@@ -85,6 +89,7 @@ public:
 	std::mutex mtx;
 	uint8_t last_err;
 	bool init();
+	bool log_init(const std::string& path);
 	bool configureDev(uint8_t config);
 	void resetDev();
 
@@ -132,4 +137,5 @@ private:
 	void setReadPtr(uint8_t readPtr);
 
 	uint8_t busyWait(); //blocks until
+	void log_event(uint8_t state, uint8_t data);
 };

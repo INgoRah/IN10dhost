@@ -47,3 +47,9 @@ jobs:
       with:
         coverage-file: coverage.info # Path to your LCOV file
         minimum-coverage: 80              # Fails if below 80%
+    - name: Run Coverity Scan
+      uses: vapier/coverity-scan-action@v1
+      with:
+        email: ${{ secrets.COVERITY_SCAN_EMAIL }}
+        token: ${{ secrets.COVERITY_TOKEN }}
+        command: 'cmake --build build'

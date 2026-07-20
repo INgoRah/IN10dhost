@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <fuse3/fuse.h>
 #include <gtest/gtest.h>
 #include <gmock/gmock.h>
 
@@ -22,10 +23,13 @@ public:
 
 MockDS2482 mds;
 #endif
+extern void fs_init(fuse_operations* fs_ops);
+static struct fuse_operations fs_ops = {};
 
 class DevTest : public ::testing::Test {
 protected:
     void SetUp() override {
+		fs_init(&fs_ops);
         ow.init();
 		ow.begin(&ds);
     }
@@ -91,6 +95,7 @@ TEST_F(DevTest, add_devices)
 	//printf("adding device 29.0200FDFF6677F8...");
 	ow.update_device(0, "29.0200FDFF6677F8");
 	ow.update_device(1, "29.0701F8FE6677F4");
+	ow.update_device(0, "20.0200F8FE6677F4");
 	ow.update_data();
 	EXPECT_NE(ow.find(0, 2), nullptr);
 	EXPECT_NE(ow.find(0x290200FDFF6677F8), nullptr);
@@ -101,12 +106,74 @@ TEST_F(DevTest, add_devices)
     std::vector<OwDev*>  devs = ow.list_devices(1);
 	EXPECT_EQ(devs.size(), 2);
     devs = ow.list_devices(0);
-	EXPECT_EQ(devs.size(), 1);
+	EXPECT_EQ(devs.size(), 2);
 	// add again and check no duplicates
 	ow.update_device(0, "29.0200FDFF6677F8");
 	ow.update_data();
 	devs = ow.list_devices(0);
-	EXPECT_EQ(devs.size(), 1);
+	EXPECT_EQ(devs.size(), 2);
+}
+
+TEST_F(DevTest, Polling)
+{
+	char buf[8];
+	int res;
+
+	// add a device with poll interval of 5 seconds
+	ow.update_device(0, "28.0501FAFE6677A0");
+	res = fs_ops.read("/28.0501FAFE6677A0/poll", buf, 5, 0, nullptr);
+	EXPECT_GT(res, 0);
+	EXPECT_STREQ(buf, "0");
+	ow.poll();
+	res = ow.poll();
+	// no polling (no device)
+	EXPECT_EQ(res, -1);
+
+	sprintf(buf, "%d", 1);
+	// initialize
+	// @0
+	ow.poll_time();
+	usleep(500*1000);
+	res = fs_ops.write("/28.0501FAFE6677A0/poll", buf, strlen(buf), 0, nullptr);
+	res = fs_ops.read("/28.0501FAFE6677A0/poll", buf, 5, 0, nullptr);
+	EXPECT_GT(res, 0);
+	EXPECT_STREQ(buf, "1");
+	// let the device poll in between the seconds
+	// @500 ms
+	ow.poll();
+	logger.set_level(LogLevel::VERBOSE);
+	res = ow.poll_time();
+	EXPECT_LE(res, 500);
+	usleep(250*1000);
+	// @750 ms
+	// no polling device yet
+	res = ow.poll_time();
+	// remaining 250 not polling yet
+	EXPECT_LE(res, 250);
+	res = ow.poll();
+	// device still needs 500 ms till polling
+	EXPECT_EQ(res, 0);
+	usleep(250*1000);
+	res = ow.poll_time();
+	// @1000 ms
+	// seconds polling
+	res = ow.poll();
+	// TODO add a plugin action and check it is called or at least
+	// returning 1
+	//EXPECT_EQ(res, 1);
+	// device should poll now
+	usleep(500*1000);
+	// @1500 ms
+	// device should poll now
+	res = ow.poll();
+	EXPECT_EQ(res, 1);
+	// now the remaining for the second
+	res = ow.poll_time();
+	EXPECT_LE(res, 500);
+	usleep(500*1000);
+	res = ow.poll_time();
+	EXPECT_EQ(res, 0);
+	ow.poll();
 }
 
 TEST_F(DevTest, ds2482)

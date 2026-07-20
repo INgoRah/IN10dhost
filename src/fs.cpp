@@ -359,9 +359,6 @@ static int fs_read(const char* path, char* buf, size_t size, off_t offset,
 	string spath(path);
 	spath.erase(0, 1);
 	(void)offset;
-	if (strcmp(path, "/dev_codes") == 0) {
-		return ow.dump(buf);
-	}
 	if (strcmp(path, "/settings/log") == 0) {
 		std::sprintf(buf, "%d", (int)logger.get_level());
 			return std::strlen(buf);

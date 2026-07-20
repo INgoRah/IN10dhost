@@ -86,9 +86,6 @@ int Plugins::cleanup()
 	std::filesystem::path lib_path;
 
 	for (auto plugin_ptr : plugins) {
-		if (!plugin_ptr)
-			continue;
-
 		logger.info(std::format("Cleaning up plugin {}...", plugin_ptr->name));
 		plugin_ptr->exit();
 		// remember the lib path before destroying the plugin instance
@@ -122,19 +119,19 @@ int Plugins::load(json j)
 		skip = false;
 		for (auto plugin_ptr : plugins) {
 			if (plugin_ptr->name == pluginName) {
-				logger.info(std::format("plugin {} already loaded", pluginName));
+				logger.debug(std::format("plugin {} already loaded", pluginName));
 				skip = true;
 				break;
 			}
 		}
 		if (skip)
 			continue;
-		logger.info(std::format("loading #{} plugin {}",i++, pluginName));
+		logger.debug(std::format("loading #{} plugin {}",i++, pluginName));
 		auto p = plugin_init(pluginName);
 		if (p)
 			p->config_set(pluginConfig);
 	}
-	logger.info(std::format("loaded {} plugins", plugins.size()));
+	logger.debug(std::format("loaded {} plugins", plugins.size()));
 	return 0;
 }
 
@@ -143,8 +140,6 @@ json Plugins::save()
 	int i = 0;
 	json j = json::object();
 	for (auto plugin_ptr : plugins) {
-		if (!plugin_ptr)
-			continue;
 		j[plugin_ptr->name.c_str()] = plugin_ptr->config_get();
 		logger.debug(std::format("saving #{} plugin {}", ++i, plugin_ptr->name));
 	}
@@ -158,9 +153,7 @@ int Plugins::action(int action, int val)
 
 	ret = 0;
 	for (auto plugin_ptr : plugins) {
-		logger.warn(std::format("plugin {} action: {}", plugin_ptr->name, action));
-		if (!plugin_ptr)
-			continue;
+		logger.debug(std::format("plugin {} action: {}", plugin_ptr->name, action));
 		// depending on the action, we might want to skip some plugins or
 		// handle errors differently
 		ret += plugin_ptr->action(action, val);

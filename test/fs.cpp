@@ -13,6 +13,7 @@
 #include "ds2408.h"
 
 extern OwDevices ow;
+extern DS2482 ds;
 extern void fs_init(fuse_operations* fs_ops);
 
 static struct fuse_operations fs_ops = {};
@@ -35,6 +36,7 @@ protected:
 	void SetUp() override {
 		fs_init(&fs_ops);
 		ow.init();
+		ow.begin(&ds);
 		ow.set_mode(0x10);
 	}
 };
@@ -131,6 +133,33 @@ TEST_F(FsTest, GetDS1820Devices) {
 	EXPECT_TRUE(S_ISREG(st.st_mode));
 	EXPECT_EQ(st.st_size, 4);
 #endif
+}
+
+TEST_F(FsTest, GetDS2450Devices) {
+	char buf[1024];
+	int res;
+	struct stat st;
+
+	ow.update_device(0, "20.0200F8FE66771E");
+	ow.update_data();
+	res = fs_ops.readdir("/20.0200F8FE66771E", buf, filler, 0, nullptr, (enum fuse_readdir_flags)0);
+	EXPECT_EQ(res, 0);
+	for (char c = 'A'; c <= 'D'; c++) {
+		string path = "/20.0200F8FE66771E/volt.";
+		path += c;
+		res = fs_ops.open(path.c_str(), nullptr);
+		EXPECT_EQ(res, 0);
+		res = fs_ops.getattr(path.c_str(), &st, nullptr);
+		EXPECT_EQ(res, 0);
+		EXPECT_TRUE(S_ISREG(st.st_mode));
+		EXPECT_GE(st.st_size, 4);
+		res = fs_ops.read(path.c_str(), buf, 32, 0, nullptr);
+		EXPECT_GE(res, 4);
+		path = "/uncached/20.0200F8FE66771E/volt.";
+		path += c;
+		res = fs_ops.read(path.c_str(), buf, 32, 0, nullptr);
+		EXPECT_GE(res, 4);
+	}
 }
 
 // Test device file attribute retrieval
@@ -372,6 +401,7 @@ TEST_F(FsTest, WriteReadDevPio) {
 	EXPECT_EQ(buf[0], '1');
 	fs_ops.read("/29.0701F8FE6677F4/PIO.1", buf, 2, 0, nullptr);
 	EXPECT_EQ(buf[0], '1');
+	logger.set_level(LogLevel::VERBOSE);
 
 	buf[0] = '0';
 	fs_ops.write("/29.0701F8FE6677F4/PIO.0", buf, 2, 0, nullptr);
@@ -381,7 +411,7 @@ TEST_F(FsTest, WriteReadDevPio) {
 	fs_ops.write("/29.0701F8FE6677F4/PIO.1", buf, 2, 0, nullptr);
 	res = fs_ops.read("/29.0701F8FE6677F4/BYTE", buf, 2, 0, nullptr);
 	EXPECT_STREQ(buf, "0");
-	dev->data[PIO_LS] = 222;
+	dev->data[PIO_OUT] = 222;
 	res = fs_ops.read("/uncached/29.0701F8FE6677F4/BYTE", buf, 3, 0, nullptr);
 	EXPECT_STREQ(buf, "222");
 }

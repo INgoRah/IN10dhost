@@ -119,16 +119,11 @@ uint8_t SwitchHandler::bitnumber()
 	return 0xff;
 }
 
-void SwitchHandler::initSwTable()
-{
-}
-
 void SwitchHandler::begin(DS2482 *ow)
 {
 	this->ds = ow;
 	mode = MODE_ALRAM_HANDLING | MODE_ALRAM_POLLING | MODE_AUTO_SWITCH;
 	logger.info("starting switch handler");
-	initSwTable();
 }
 
 /* Convert from alarm location to a lookup table format (16 bit)
@@ -233,7 +228,7 @@ bool SwitchHandler::switchHandle(uint8_t busNr, uint8_t adr1)
 bool SwitchHandler::dev_alarm(uint8_t bus, uint8_t adr[8])
 {
 	if (adr[0] == 0x29) {
-		uint8_t res, to = 30;
+		uint8_t res, to = 8;
 		ds2408* dev = (ds2408*)ow->find(bus, adr[1], 0x29);
 		if (!dev)
 			return false;
@@ -272,7 +267,7 @@ bool SwitchHandler::alarmHandler(uint8_t busNr)
 	uint8_t adr[8];
 	uint8_t j = 0;
 	uint8_t cnt = 10;
-	bool ret;
+	bool ret, srch;
 
 	if (!ds)
 		return false;
@@ -289,16 +284,26 @@ bool SwitchHandler::alarmHandler(uint8_t busNr)
 	// with custom addresses using one byte ID only
 	// at the second byte and the remaining according a
 	// defined scheme, we could stop even after one byte search
-	while (ds->search(adr, false)) {
-		lock.unlock();
+	srch = ds->search(adr, false);
+	lock.unlock();
+	while (srch && cnt > 0) {
 		j++;
 		logger.debug(std::format("Alarm {}.{} {}", busNr, adr[1], adr[2]));
-		dev_alarm(busNr, adr);
+		try {
+			dev_alarm(busNr, adr);
+		}
+		catch (const std::system_error& e) {
+			std::cerr << "Caught system error: " << e.what() << '\n';
+			std::cerr << "Error code: " << e.code() << '\n';
+		}
 		cnt--;
 #ifdef USE_DEBUG
 		if (ds->last_err || cnt == 0)
 			printf("Error searching = %d\n", ds->last_err);
 #endif
+		lock.lock();
+		srch = ds->search(adr, false);
+		lock.unlock();
 	}
 
 	return j > 0 ? true : false;

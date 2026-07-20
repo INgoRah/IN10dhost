@@ -7,6 +7,15 @@
 using json = nlohmann::json;
 using std::string;
 
+enum action_code {
+	CONFIG_LOAD = 0,
+	CONFIG_SAVE = 1,
+	INITIALIZED = 2,
+	PERIODIC_SECOND = 3,
+	PERIODIC_MINUTE = 4,
+	ALARM_BEFORE = 5,
+	ALARM_AFTER = 6
+};
 class Plugin {
 public:
 	string name;

@@ -88,14 +88,22 @@ void background_worker()
 #endif
 	while (running.load()) {
 		// periodic work
-		// e.g. sync, cleanup, polling, logging
+		// setup 1 sec timer for polling
 #if USE_GPIO
 		ret = 0;
 		state = gpiod_line_request_get_value(line, GPIO_LINE);
 		if (state == 1) {
+			int tm;
+
 			fds[0].events = POLLIN;
 			fds[1].events = POLLIN | POLLERR;
-			ret = poll(fds, 2, timeout);
+			// define next timeout for polling the devices, periodic second timer
+			if (timeout == -1)
+				tm = ow.poll_time();
+			else
+				tm = std::min(ow.poll_time(), timeout);
+
+			ret = poll(fds, 2, tm);
 			tp = HrClock::now();
 		}
 		//logger.verbose("Poll " + std::to_string(ret) + " handled, GPIO state=" + std::to_string(state));
@@ -107,6 +115,8 @@ void background_worker()
 		if (ret > 0 && (fds[1].revents & POLLIN))
 			// READ THE EVENTS to clear the poll status
 			gpiod_line_request_read_edge_events(line, event_buffer, 16);
+		if (ret == 0)
+			ow.poll();
 #else
 		poll(fds, 1, 5000);
 #endif
@@ -177,8 +187,6 @@ void enable_rt(void)
 	}
 }
 
-extern int plugins_action(int action, int val);
-
 int main(int argc, char* argv[])
 {
 	int ret;
@@ -207,7 +215,7 @@ int main(int argc, char* argv[])
 		running.store(false);
 		worker.join();
 	}catch (const std::exception& e) {
-		printf("%s", e.what());
+		printf("worker stopping failed with an exception: %s\n", e.what());
 	}
 #ifdef USE_GPIO
 	gpiod_line_request_release(line);
