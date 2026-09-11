@@ -125,6 +125,17 @@ TEST_F(SwTest, switching)
 	adr[1] = 0x03;
 	ret = swHdl.dev_alarm(1, adr);
 	EXPECT_EQ(ret, false);
+
+	// actor_handle() against a bus/address with no registered device
+	union pio dst;
+	dst.data = 0;
+	dst.da.bus = 3;
+	dst.da.adr = 0x7f;
+	EXPECT_EQ(swHdl.actor_handle(dst, TOGGLE), false);
+
+	// alarmHandler() is a no-op under USE_I2C=OFF, never called from
+	// anywhere else in this build
+	EXPECT_EQ(swHdl.alarmHandler(0), false);
 }
 
 TEST_F(SwTest, FsSwitches)
@@ -167,6 +178,10 @@ TEST_F(SwTest, FsSwitches)
 	EXPECT_GT(res, 0);
 	res = fs_ops.getattr("/switches/na", &st, nullptr);
 	EXPECT_NE(res, 0);
+
+	// a switches path fs_read() doesn't recognize (not "list")
+	res = fs_ops.read("/switches/add", buf, 1024, 0, nullptr);
+	EXPECT_EQ(res, 0);
 }
 
 TEST_F(SwTest, SwitchesConfig)

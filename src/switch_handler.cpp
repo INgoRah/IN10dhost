@@ -186,6 +186,8 @@ bool SwitchHandler::actor_handle(union pio p, enum _pio_mode state)
 	bool ret = false;
 
 	ds2408* dev = (ds2408*)ow->find(p.da.bus, p.da.adr, 0x29);
+	ds->log_event('2',p.da.pio);
+
 	if (dev)
 		ret = dev->pin_switch(p.da.pio, state);
 	else
@@ -233,6 +235,7 @@ bool SwitchHandler::dev_alarm(uint8_t bus, uint8_t adr[8])
 		if (!dev)
 			return false;
 		//dev->set_alarm(true);
+		ds->log_event('1',adr[1]);
 		res = dev->reg_read(true);
 		/* fill data for use in switchHandle */
 		if (res == 0xaa || res == 0xff) {

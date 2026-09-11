@@ -11,6 +11,8 @@
 #include "ds2482.h"
 #include "ow_devices.h"
 #include "ds2408.h"
+#include "ds1820.h"
+#include "ard_i2c.h"
 
 extern OwDevices ow;
 extern DS2482 ds;
@@ -133,6 +135,16 @@ TEST_F(FsTest, GetDS1820Devices) {
 	EXPECT_TRUE(S_ISREG(st.st_mode));
 	EXPECT_EQ(st.st_size, 4);
 #endif
+}
+
+TEST_F(FsTest, DS1820SetAlarms) {
+	// flag 2 ("set alarms and reset") is never reached through fs_read
+	// (which only ever passes 0 or 1); exercised directly here
+	ow.update_device(1, "28.0501FAFE6677A0");
+	ow.update_data();
+	ds1820* dev = (ds1820*)ow.find(1, 5, 0x28);
+	ASSERT_NE(dev, nullptr);
+	EXPECT_EQ(dev->temp_read(2), 0);
 }
 
 TEST_F(FsTest, GetDS2450Devices) {
@@ -415,6 +427,56 @@ TEST_F(FsTest, WriteReadDevPio) {
 	EXPECT_STREQ(buf, "222");
 }
 
+TEST_F(FsTest, Ds2408Gaps) {
+	char buf[128];
+	int res;
+	struct stat st;
+
+	ow.update_device(1, "29.0701F8FE6677F4");
+	ow.update_data();
+	ds2408* dev = (ds2408*)ow.find(0x290701F8FE6677F4);
+	ASSERT_NE(dev, nullptr);
+
+	// "latched.N" attribute is queried by getattr but not exercised by
+	// any existing read/write test
+	res = fs_ops.getattr("/29.0701F8FE6677F4/latched.0", &st, nullptr);
+	EXPECT_EQ(res, 0);
+	EXPECT_TRUE(S_ISREG(st.st_mode));
+
+	// non-numeric BYTE write
+	res = fs_ops.write("/29.0701F8FE6677F4/BYTE", (char*)"nope", 4, 0, nullptr);
+	EXPECT_EQ(res, -EINVAL);
+
+	// Arduino-relay path (mode != 0x10): the FsTest fixture defaults
+	// every new device to 0x10 via OwDevices::set_mode(), so the
+	// non-relay ard_set() branch is otherwise never taken
+	dev->set_mode(0);
+	buf[0] = '1';
+	buf[1] = '\0';
+	res = fs_ops.write("/29.0701F8FE6677F4/PIO.0", buf, 2, 0, nullptr);
+	EXPECT_EQ(res, 2);
+	dev->set_mode(0x10);
+
+	// never exercised: writes the device's cfg block back over the bus
+	EXPECT_EQ(dev->cfg_write(), CFG_SIZE);
+
+	// OwDev::fs_attr()'s empty-path guard: no FUSE caller ever passes
+	// an empty path (the ROM prefix is always still attached), so it's
+	// only reachable by calling the base implementation directly
+	std::string empty;
+	EXPECT_EQ(dev->fs_attr(empty), 0);
+
+	// a generic (non-"name") attribute, e.g. "poll", takes the
+	// suglen-return branch that "name" itself doesn't
+	res = fs_ops.getattr("/29.0701F8FE6677F4/poll", &st, nullptr);
+	EXPECT_EQ(res, 0);
+	EXPECT_TRUE(S_ISREG(st.st_mode));
+
+	// non-numeric "poll" write
+	res = fs_ops.write("/29.0701F8FE6677F4/poll", (char*)"nope", 4, 0, nullptr);
+	EXPECT_EQ(res, -1);
+}
+
 TEST_F(FsTest, WriteReadDevLevel) {
 	LogLevel lvl = logger.get_level();
 	char buf[128];
@@ -476,8 +538,7 @@ TEST_F(FsTest, SettingsDirectoryAttr) {
 	EXPECT_EQ(lvl, 3);
 	buf[0] = '9';
 	res = fs_ops.write("/settings/log", buf, 2, 0, nullptr);
-	lvl = (int)logger.get_level();
-	EXPECT_EQ(lvl, 8);
+	EXPECT_EQ(res, -EINVAL);
 
 	logger.set_level(prev_lvl);
 
@@ -558,4 +619,115 @@ TEST_F(FsTest, PseudoArduinoDev) {
 	buf[1] = '\0';
 	//res = fs_ops.write("/AD.0900F8FF6677E2/power", buf, 2, 0, nullptr);
 	//EXPECT_EQ(res, 2);
+
+	// interrupt-handling timing stats, no samples recorded yet
+	res = fs_ops.read("/AD.0900F8FF6677E2/int_min", buf, 32, 0, nullptr);
+	EXPECT_GT(res, 0);
+	EXPECT_STREQ(buf, "0");
+	res = fs_ops.read("/AD.0900F8FF6677E2/int_max", buf, 32, 0, nullptr);
+	EXPECT_GT(res, 0);
+	EXPECT_STREQ(buf, "0");
+	res = fs_ops.read("/AD.0900F8FF6677E2/int_avg", buf, 32, 0, nullptr);
+	EXPECT_GT(res, 0);
+	EXPECT_STREQ(buf, "0");
+
+	// paths not handled by Ard_i2c itself fall back to the base OwDev
+	// read/write implementation
+	res = fs_ops.write("/AD.0900F8FF6677E2/name", (char*)"arduino", 8, 0, nullptr);
+	EXPECT_GT(res, 0);
+	res = fs_ops.read("/AD.0900F8FF6677E2/name", buf, 32, 0, nullptr);
+	EXPECT_GT(res, 0);
+	EXPECT_STREQ(buf, "arduino");
+
+	// device lifecycle / interrupt handling, unreachable through the
+	// FUSE read/write API
+	Ard_i2c* arduino = (Ard_i2c*)ow.find(1, 9, 0xAD);
+	ASSERT_NE(arduino, nullptr);
+	EXPECT_EQ(arduino->begin(&ow), 0);
+	// no-ops without USE_I2C, just exercised for coverage
+	arduino->interrupt();
+	arduino->events(-1);
+	arduino->end();
+}
+
+TEST_F(FsTest, MalformedBusPaths) {
+	struct stat st;
+	int res;
+
+	// "bus." with no digits following it at all
+	res = fs_ops.getattr("/bus.x", &st, nullptr);
+	EXPECT_EQ(res, -ENOENT);
+	// well-formed but out of MAX_BUS range
+	res = fs_ops.getattr("/bus.99", &st, nullptr);
+	EXPECT_EQ(res, -ENOENT);
+}
+
+TEST_F(FsTest, LogDirectory) {
+	struct stat st;
+	int res;
+
+	res = fs_ops.getattr("/log", &st, nullptr);
+	EXPECT_EQ(res, 0);
+	EXPECT_TRUE(S_ISDIR(st.st_mode));
+
+	res = fs_ops.getattr("/log/1wire.vcd", &st, nullptr);
+	EXPECT_EQ(res, 0);
+	EXPECT_TRUE(S_ISREG(st.st_mode));
+	EXPECT_GT(st.st_size, 0);
+
+	res = fs_ops.readdir("/log", nullptr, filler, 0, nullptr, (enum fuse_readdir_flags)0);
+	EXPECT_EQ(res, 0);
+
+	res = fs_ops.open("/log/1wire.vcd", nullptr);
+	EXPECT_EQ(res, 0);
+}
+
+TEST_F(FsTest, ReaddirBusLevel) {
+	int res;
+
+	ow.update_device(0, "29.0300FDFF6677F9");
+	ow.update_data();
+	// lists every device registered on bus 0, exercising the bus-level
+	// (as opposed to device-level) branch of fs_readdir
+	res = fs_ops.readdir("/bus.0", nullptr, filler, 0, nullptr, (enum fuse_readdir_flags)0);
+	EXPECT_EQ(res, 0);
+}
+
+TEST_F(FsTest, ReaddirDeviceLevelErrors) {
+	int res;
+
+	// subpath under a device directory that isn't a well-formed ROM
+	res = fs_ops.readdir("/not-a-rom", nullptr, filler, 0, nullptr, (enum fuse_readdir_flags)0);
+	EXPECT_EQ(res, -ENOENT);
+	// well-formed ROM shape, but never registered
+	res = fs_ops.readdir("/00.000000000000AA/x", nullptr, filler, 0, nullptr, (enum fuse_readdir_flags)0);
+	EXPECT_EQ(res, -ENOENT);
+}
+
+TEST_F(FsTest, OpenFallback) {
+	// not a settings/log path, not a device ROM: falls back to
+	// SwitchHandler::fs_open(), which unconditionally succeeds
+	int res = fs_ops.open("/switches/list", nullptr);
+	EXPECT_EQ(res, 0);
+}
+
+TEST_F(FsTest, SettingsWriteErrors) {
+	int res;
+
+	res = fs_ops.write("/settings/log", (char*)"nope", 4, 0, nullptr);
+	EXPECT_EQ(res, -EINVAL);
+	res = fs_ops.write("/settings/mode", (char*)"nope", 4, 0, nullptr);
+	EXPECT_EQ(res, -EINVAL);
+	res = fs_ops.write("/settings/poll", (char*)"nope", 4, 0, nullptr);
+	EXPECT_EQ(res, -EINVAL);
+
+	// out of uint8_t range as well as non-numeric
+	res = fs_ops.write("/settings/mode", (char*)"99999999999", 11, 0, nullptr);
+	EXPECT_EQ(res, -EINVAL);
+
+	// triggers Plugins::reload() + action(INITIALIZED); the write then
+	// falls through to the generic device/switch handling below, which
+	// doesn't recognize this path either
+	res = fs_ops.write("/settings/plugins", (char*)"", 0, 0, nullptr);
+	EXPECT_EQ(res, -ENOENT);
 }

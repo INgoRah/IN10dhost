@@ -294,17 +294,25 @@ void OwDevices::update_data()
 	deviceCount = 0;
 	logger.log(LogLevel::DEBUG, std::to_string(cache.devices.size()) + " devices ");
 	for (auto it = cache.devices.begin(); it != cache.devices.end(); ) {
-		auto& dev = *it;
+		try {
+			auto& dev = *it;
 
-		if (find(dev->rom_code)) {
-			logger.warn(std::format("duplicated dev {} with {}", dev->rom, dev->rom_code));
-			it = cache.devices.erase(it); // Erase returns the NEXT valid iterator
-			continue;
+			if (find(dev->rom_code)) {
+				logger.warn("duplicated dev " + dev->rom + " with " + std::to_string(dev->rom_code));
+				it = cache.devices.erase(it); // Erase returns the NEXT valid iterator
+				continue;
+			}
+			cache.busses[dev->bus].devices.push_back(it->get());
+			add_device(it->get());
+			dev->set_mode(cache.mode);
+			++it; // Only increment if we didn't erase
+		} catch (const std::exception& e) {
+			logger.error("Error processing device: " + std::string(e.what()));
+			++it;
+		} catch (...) {
+			logger.error("Unknown error processing device");
+			++it;
 		}
-		cache.busses[dev->bus].devices.push_back(it->get());
-		add_device(it->get());
-		dev->set_mode(cache.mode);
-		++it; // Only increment if we didn't erase
 	}
 	logger.log(LogLevel::DEBUG, "update, busses=" + std::to_string(cache.busses.size()) + " = " + std::to_string(deviceCount) + " devices ");
 }
@@ -358,9 +366,10 @@ uint8_t OwDevices::search(bool mode)
 {
 	char buf[18];
 	int pos;
-	uint8_t adr[8], bus;
+	uint8_t bus;
 #ifdef USE_I2C
-	uint8_t  res = 0;
+	uint8_t adr[8];
+	uint8_t res = 0;
 #endif
 
 	for (bus = 0; bus < 4; bus++) {
@@ -387,7 +396,7 @@ uint8_t OwDevices::search(bool mode)
 	sprintf(buf, "%02X.", adrt[0]);
 	pos = 2;
 	for (int j = 1; j < 7; j++) {
-		sprintf(&buf[pos], "%02X", adr[j]);
+		sprintf(&buf[pos], "%02X", adrt[j]);
 		pos += 2;
 	}
 	update_device(1, buf);
@@ -418,8 +427,10 @@ int OwDevices::poll_time()
 #if 1
 	for (auto& dev : cache.devices) {
 		int next = dev->poll_next();
-		if (next == 0)
+		if (next == 0) {
+			logger.info(std::format("polling {} ", dev->addr[0]));
 			return 0; // time to poll now
+		}
 		if (next > 0 && next < next_timeout)
 	        next_timeout = std::min(next_timeout, next);
     }
@@ -448,6 +459,13 @@ int OwDevices::poll()
 		else if (poll == 0)
 			ret = std::max(ret, 0);
 	}
+	// TODO add global polling using cache.poll
+	/*
+	if (cache.poll > 0 && elapsed >= cache.poll * 1000) {
+		for (int bus = 0; bus < MAX_BUS; bus++)
+			swHdl.alarmHandler(bus);
+	}
+	*/
 	if (cnt == 0)
 		return ret; // no device needs polling
 	return cnt;

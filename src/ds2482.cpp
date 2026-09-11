@@ -62,14 +62,6 @@
 #define DS2482_CMD_READ 0x96
 #define DS2482_CMD_1WIRE_TRIPLET	0x78
 
-// State enum helpers for data logging
-#define STATE_IDLE   '-'
-#define STATE_RESET  '!'
-#define STATE_SEARCH 'S'
-#define STATE_READ   'R'
-#define STATE_WRITE  'W'
-#define STATE_CHANNEL 'C'
-
 extern Logger logger;
 
 typedef struct {
@@ -78,7 +70,7 @@ typedef struct {
 	uint8_t state;
 	uint8_t data;
 } log_data;
-RingBuffer<log_data, 1024> data_log;
+RingBuffer<log_data, 2048> data_log;
 
 
 DS2482::DS2482(const std::string& i2c_dev, int address)
@@ -97,8 +89,10 @@ DS2482::DS2482(const std::string& i2c_dev, int address)
 
 DS2482::~DS2482()
 {
+#ifdef USE_I2C
 	if (fd >= 0)
 		close(fd);
+#endif
 	data_log.clear();
 }
 
@@ -149,7 +143,7 @@ int DS2482::log_dump(char* buf, size_t size)
 	};
  	// Appending VCD header blocks
 	append_to_buf("$date\n  Today, 2026\n$end\n");
-	append_to_buf("$timescale\n  1s\n$end\n");
+	append_to_buf("$timescale\n  1us\n$end\n");
 	append_to_buf("$scope module 1wire $end\n");
 	// Define variables
 	append_to_buf("$var wire 8 a bus_state $end\n");
@@ -176,8 +170,10 @@ int DS2482::log_dump(char* buf, size_t size)
 		append_to_buf("#%s\n", buf); // The timestamp
 		byte_to_binary_str(l.state, (char *)buf);
 		append_to_buf("b%s a\n", buf);
-		byte_to_binary_str(l.data, (char *)buf);
-		append_to_buf("b%s ", buf);
+		if (l.ch < 3) {
+			byte_to_binary_str(l.data, (char *)buf);
+			append_to_buf("b%s ", buf);
+		}
 		switch (l.ch) {
 			case 0:
 				append_to_buf("b\n");
@@ -468,10 +464,9 @@ bool DS2482::selectChannel(uint8_t channel)
 	uint8_t check;
 	static const uint8_t chan_r[8] = { 0xB8, 0xB1, 0xAA, 0xA3, 0x9C, 0x95, 0x8E, 0x87 };
 	static const uint8_t chan_w[8] = { 0xF0, 0xE1, 0xD2, 0xC3, 0xB4, 0xA5, 0x96, 0x87 };
-#if 0
+
 	if (ch == channel)
 		return true;
-#endif
 	last_err = ERR_NONE;
 	if (busyWait() == DS2482_STATUS_INVAL) {
 		/* err can be 11..18 */
@@ -500,8 +495,8 @@ bool DS2482::selectChannel(uint8_t channel)
 	ch = channel;
 	return true;
 sel_ch_error:
-	ch = 0xff;
 	logger.error(std::format("Failed to select channel {}, error code: {}", channel, last_err));
+	ch = 0xff;
 	return false;
 }
 
@@ -728,10 +723,9 @@ bool DS2482::search(uint8_t *newAddr, bool search_mode)
 		else
 			searchAddress[romByte] &= (uint8_t)~romBit;
 		/* if only interested in max 2 bytes we can stop here
-		   could save 50 ms
-		if (!search_mode && i == 16)
+		   could save 50 ms */
+		if (!search_mode && searchAddress[0] == 0x29 && i == 16)
 			break;
-		*/
 	}
 
 	searchLastDisrepancy = last_zero;

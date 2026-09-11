@@ -91,8 +91,6 @@ int ds2408::fs_attr(std::string& path) const
 					return 1;
 				if (path.find("sensed." + std::to_string(i)) != string::npos)
 					return 1;
-				if (path.find("sensed." + std::to_string(i)) != string::npos)
-					return 1;
 				if (path.find("latched." + std::to_string(i)) != string::npos)
 					return 1;
 				if (path.find("pin." + std::to_string(i) + "/name") != string::npos)
@@ -127,7 +125,7 @@ int ds2408::fs_read(string& path, char* buf, size_t size, bool uncached)
 			if (cfg_read() == -1)
 				return -EAGAIN;
 		//   |CRC |  RES    |SW   1    2    3    4    5    6    7   | CFG  1    2    3    4    5    6    7  |FEA |OFF |MAJ |MIN |TYP |   OFF   |   FACT  |S   |IO  |TH  |TL  |TYP |THR |DIMD|DIMU|DIF |TM1 |TM2 |SWA0|SWA1|SWA2|SWA3|SWA4|SWA5|SWA6.
-		for (int i = 0; i < CFG_SIZE && (size_t)(i * 3) < size - 1; i++) {
+		for (int i = 0; i < CFG_SIZE && (size_t)((i + 1) * 3) < size - 1; i++) {
 			std::sprintf(buf + i * 3, "%02X ", cfg[i]);
 		}
 		goto out;
@@ -180,9 +178,15 @@ int ds2408::fs_write(string& path, const char* buf, size_t size)
 	string s;
 
 	if (path.find("BYTE") != string::npos) {
-		uint8_t tmp = (uint8_t)(std::stoi(buf) & 0xff);
-		pio_set(tmp);
-		return size;
+		try {
+			uint8_t tmp = (uint8_t)(std::stoi(buf) & 0xff);
+			pio_set(tmp);
+			return size;
+		} catch (const std::invalid_argument&) {
+			return -EINVAL;
+		} catch (const std::out_of_range&) {
+			return -EINVAL;
+		}
 	}
 	for (const auto& s : DS2408) {
 		string sname = s.name;
@@ -231,8 +235,8 @@ uint8_t ds2408::ard_set(uint8_t pio, uint8_t val)
 	uint8_t ret;
 	int to = 100;
 
-	int fd = open("/dev/i2c-0", 0x2f);
-	if (fd <= 0) {
+	int fd = open("/dev/i2c-0", O_RDWR);
+	if (fd < 0) {
 		logger.warn("error opening Arduino");
 		return 0xff;
 	}
@@ -268,9 +272,11 @@ uint8_t ds2408::ard_set(uint8_t pio, uint8_t val)
 
 uint8_t ds2408::latch_reset()
 {
-	uint8_t retry, tmp, err = 0;
+	uint8_t retry, tmp;
 	bool res;
-
+#ifdef USE_I2C
+	uint8_t err = 0;
+#endif
 	retry = LATCH_RESET_RETRY - 1;
 	do {
 		tmp = 0xff;
@@ -493,6 +499,8 @@ uint8_t ds2408::level_set(uint8_t pio, uint8_t level, uint8_t cmd, uint8_t val)
 	logger.log(LogLevel::DEBUG, "set PIO level=" + std::to_string(level) + " for PIO " + std::to_string(pio) + " in mode " + std::to_string(mode));
 
 #ifndef USE_I2C
+	(void)cmd;
+	(void)val;
 	return 0xaa;
 #else
 	/* if setting any level, a level 0 means stop */

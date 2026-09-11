@@ -39,7 +39,7 @@ json OwDev::to_json() const
 
 void OwDev::from_json(const json& j)
 {
-	j.at("bus").get_to(bus);
+	j.at("bus").get_to(bus); // TODO throw exception if bus is out of range
 	j.at("rom").get_to(rom);
 	j.at("id").get_to(id);
 	j.at("name").get_to(name);

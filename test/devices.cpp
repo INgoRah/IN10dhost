@@ -1,6 +1,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <fstream>
+#include <vector>
 #include <fuse3/fuse.h>
 #include <gtest/gtest.h>
 #include <gmock/gmock.h>
@@ -10,6 +12,7 @@
 #include "ds2482.h"
 #include "ow_devices.h"
 #include "ds2408.h"
+#include "ds2450.h"
 
 extern OwDevices ow;
 extern DS2482 ds;
@@ -101,6 +104,8 @@ TEST_F(DevTest, add_devices)
 	EXPECT_NE(ow.find(0x290200FDFF6677F8), nullptr);
 	EXPECT_NE(ow.find(1, 7), nullptr);
 	EXPECT_NE(ow.find(0x290701F8FE6677F4), nullptr);
+	// wildcard type: matches on bus+id alone
+	EXPECT_NE(ow.find(0, 2, 0xff), nullptr);
 
 	// list all 3 devices
     std::vector<OwDev*>  devs = ow.list_devices(1);
@@ -112,6 +117,15 @@ TEST_F(DevTest, add_devices)
 	ow.update_data();
 	devs = ow.list_devices(0);
 	EXPECT_EQ(devs.size(), 2);
+
+	// dump the recorded 1-Wire trace through the real FUSE read path
+	// (matches the size fs_getattr advertises for /log/1wire.vcd)
+	// buf size is AI generated
+	std::vector<char> vcd_buf(218 + 1024 * 30);
+	int vcd_res = fs_ops.read("/log/1wire.vcd", vcd_buf.data(), vcd_buf.size(), 0, nullptr);
+	EXPECT_GT(vcd_res, 0);
+	std::ofstream out("1wire.vcd", std::ios::binary);
+	out.write(vcd_buf.data(), vcd_res);
 }
 
 TEST_F(DevTest, Polling)
@@ -182,4 +196,148 @@ TEST_F(DevTest, ds2482)
 	// printout for value
 	//logger.error(std::format("crc: {}", crc));
 	EXPECT_EQ(crc, 47933);
+
+	// dormant / simulation-only entry points that no device driver ever
+	// reaches through its normal fs_read/fs_write path
+	ds.resetDev();
+	EXPECT_TRUE(ds.configureDev(0x01));
+	ds.target_search(0x29);
+	uint8_t adr[8] = {0};
+	// simulated (USE_I2C off) search() always reports "no more devices"
+	// right after issuing reset+write, never entering the real bit walk
+	EXPECT_FALSE(ds.search(adr, true));
+}
+
+TEST_F(DevTest, ds2482_log_dump)
+{
+	// no buffer / zero size guard
+	EXPECT_EQ(ds.log_dump(nullptr, 0), 0);
+	EXPECT_EQ(ds.log_dump(nullptr, 16), 0);
+
+	// buffer too small for even the first header line: exercises the
+	// truncation branch inside the append_to_buf lambda
+	char tiny[4];
+	EXPECT_GT(ds.log_dump(tiny, sizeof(tiny)), 0);
+
+	// channel 2 is never selected by any device added elsewhere in this
+	// suite (they all live on bus 0/1), so its VCD identifier ('d') is
+	// otherwise never exercised.
+	// Sized generously (not just to fit this one entry): by the time
+	// this test runs, every earlier test in the whole binary has been
+	// pushing entries into the same global, ring-buffer-backed log, and
+	// log_dump() writes oldest-first, so a buffer only sized for this
+	// one entry would get truncated by everything logged before it.
+	ds.selectChannel(2);
+	ds.reset();
+	std::vector<char> buf(256 * 1024);
+	int n = ds.log_dump(buf.data(), buf.size());
+	ASSERT_GT(n, 0);
+	EXPECT_NE(std::string(buf.data(), n).find(" d\n"), std::string::npos);
+}
+
+TEST_F(DevTest, ds2450)
+{
+	// boundary/API-only checks on a standalone (not bus-bound) instance
+	ds2450 raw;
+	EXPECT_EQ(raw.adc_read(5, 0), -1);       // out-of-range channel
+	EXPECT_FLOAT_EQ(raw.adc_get(0), 0.0f);
+	EXPECT_FLOAT_EQ(raw.adc_get(1), 0.0f);
+	EXPECT_FLOAT_EQ(raw.adc_get(2), 0.0f);
+	EXPECT_FLOAT_EQ(raw.adc_get(3), 0.0f);
+	EXPECT_FLOAT_EQ(raw.adc_get(9), -1.0f);  // out-of-range channel
+
+	ow.update_device(0, "20.0300F8FE6677F5");
+	ow.update_data();
+	// the trailing ROM byte is a CRC that OwDev::update() recomputes on
+	// load, so the path actually served by FUSE isn't the literal string
+	// above; look the device up and use its corrected rom for paths
+	ds2450* dev = (ds2450*)ow.find(0, 3, 0x20);
+	ASSERT_NE(dev, nullptr);
+	std::string base = "/" + dev->rom;
+	char buf2[32];
+	int res;
+
+	// buffer too small for a "x.xx" voltage reading
+	res = fs_ops.read((base + "/volt.A").c_str(), buf2, 3, 0, nullptr);
+	EXPECT_EQ(res, -EINVAL);
+
+	// path not handled by ds2450 itself falls back to the base OwDev
+	// read/write implementation
+	res = fs_ops.write((base + "/name").c_str(), (char*)"adc", 4, 0, nullptr);
+	EXPECT_GT(res, 0);
+	res = fs_ops.read((base + "/name").c_str(), buf2, 32, 0, nullptr);
+	EXPECT_GT(res, 0);
+	EXPECT_STREQ(buf2, "adc");
+
+	// drive the device-level poll() override: no interval set yet ->
+	// delegates straight to OwDev::poll()'s "no polling" (-1) path
+	EXPECT_EQ(dev->poll(), -1);
+
+	// set a 1s interval and let it elapse so OwDev::poll() reports 1,
+	// driving ds2450::poll()'s own ADC-read branch
+	res = fs_ops.write((base + "/poll").c_str(), (char*)"1", 1, 0, nullptr);
+	EXPECT_GT(res, 0);
+	usleep(1100 * 1000);
+	EXPECT_EQ(dev->poll(), 1);
+
+	// cached read (flag 2), only reachable by calling adc_read()
+	// directly since fs_read_volt() never passes it through; dat[]
+	// was just populated by the poll() above
+	EXPECT_EQ(dev->adc_read(0, 2), 0);
+}
+
+// every other config-loading test in this suite uses a ds2408-only
+// fixture (test/plugin.json); this drives make_device_from_json()'s
+// other three device types, only reachable by actually loading them
+// from a config file rather than the in-memory update_device() path
+TEST_F(DevTest, LoadAllDeviceTypesFromJson)
+{
+	const char* path = "test_all_device_types.json";
+	std::ofstream(path) << R"({
+		"version": 1,
+		"bus_count": 4,
+		"mode": 0,
+		"busses": [
+			{"id": 0, "dev_count": 0}, {"id": 1, "dev_count": 0},
+			{"id": 2, "dev_count": 0}, {"id": 3, "dev_count": 0}
+		],
+		"devices": [
+			{"type": "ds2408", "bus": 0, "rom": "29.0400FDFF6677FA", "id": 0, "name": ""},
+			{"type": "ds1820", "bus": 0, "rom": "28.0501FAFE6677A0", "id": 0, "name": ""},
+			{"type": "ds2450", "bus": 0, "rom": "20.0300F8FE6677F5", "id": 0, "name": ""},
+			{"type": "ard_i2c", "bus": 0, "rom": "AD.0900F8FF6677E2", "id": 0, "name": ""}
+		]
+	})";
+
+	// note: deliberately NOT reusing 29.0200FDFF6677F8 (rom_code
+	// 0x290200FDFF6677F8) here - the "example" test plugin's action()
+	// hardcodes that exact rom_code and calls pio_set(1) on whatever
+	// device holds it whenever plugins.action(INITIALIZED) fires,
+	// which ow.load() does at the end of every call
+	ow.load(path);
+	EXPECT_NE(ow.find(0, 4, 0x29), nullptr);
+	EXPECT_NE(ow.find(0, 5, 0x28), nullptr);
+	EXPECT_NE(ow.find(0, 3, 0x20), nullptr);
+	EXPECT_NE(ow.find(0, 9, 0xAD), nullptr);
+	std::remove(path);
+}
+
+TEST_F(DevTest, LoadUnknownDeviceTypeThrows)
+{
+	const char* path = "test_unknown_device_type.json";
+	std::ofstream(path) << R"({
+		"version": 1,
+		"bus_count": 4,
+		"mode": 0,
+		"busses": [
+			{"id": 0, "dev_count": 0}, {"id": 1, "dev_count": 0},
+			{"id": 2, "dev_count": 0}, {"id": 3, "dev_count": 0}
+		],
+		"devices": [
+			{"type": "not_a_real_device", "bus": 0, "rom": "29.0200FDFF6677F8", "id": 0, "name": ""}
+		]
+	})";
+
+	EXPECT_THROW(ow.load(path), std::runtime_error);
+	std::remove(path);
 }

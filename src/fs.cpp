@@ -65,7 +65,8 @@ static bool extractBusNumber(string& path, int& busNumber)
 		return false; // no number found
 
 	busNumber = std::stoi(path.substr(numStart, numEnd - numStart));
-
+	if (busNumber < 0 || busNumber >= MAX_BUS)
+		return false;
 	// erase "/bus.<number>/"
 	path.erase(pos, numEnd - pos + 1);
 
@@ -421,21 +422,40 @@ static int fs_write(const char* path, const char* buf, size_t size,
 {
 	(void)offset;
 	if (strcmp(path, "/settings/log") == 0) {
+		try {
+			int tmp = std::stoi(buf);
+			if (tmp < 0 || tmp > 8)
+				return -EINVAL;
+		} catch (const std::invalid_argument&) {
+			return -EINVAL;
+		} catch (const std::out_of_range&) {
+			return -EINVAL;
+		}
 		uint8_t tmp = (uint8_t)(std::stoi(buf));
-		if (tmp > 8)
-			tmp = 8;
 		logger.set_level((LogLevel)tmp);
 		return size;
 	}
 	if (strcmp(path, "/settings/mode") == 0) {
-		uint8_t tmp = (uint8_t)(std::stoi(buf));
-		ow.set_mode(tmp);
-		return size;
+		try {
+			uint8_t tmp = (uint8_t)(std::stoi(buf));
+			ow.set_mode(tmp);
+			return size;
+		} catch (const std::invalid_argument&) {
+			return -EINVAL;
+		} catch (const std::out_of_range&) {
+			return -EINVAL;
+		}
 	}
 	if (strcmp(path, "/settings/poll") == 0) {
-		uint8_t tmp = (uint8_t)(std::stoi(buf));
-		ow.set_poll(tmp);
-		return size;
+		try {
+			uint8_t tmp = (uint8_t)(std::stoi(buf));
+			ow.set_poll(tmp);
+			return size;
+		} catch (const std::invalid_argument&) {
+			return -EINVAL;
+		} catch (const std::out_of_range&) {
+			return -EINVAL;
+		}
 	}
 	if (strcmp(path, "/settings/plugins") == 0) {
 		plugins.reload();
@@ -457,7 +477,7 @@ static int fs_write(const char* path, const char* buf, size_t size,
 	if (extract_subpath(spath, "switches"))
 		return swHdl.fs_write(spath, buf, size);
 
-	return size;
+	return -ENOENT;
 }
 
 static void* init(struct fuse_conn_info*, struct fuse_config*)
