@@ -35,6 +35,17 @@
 #include <linux/i2c.h>
 #include <cstring>
 #include <cerrno>
+#include <format>
+#include <cinttypes>
+
+// for data logger
+#include <iostream>
+#include <fstream> // Required for std::ofstream
+#include <time.h>
+#include <bitset>
+#include "ring_buffer/ring_buffer.h"
+
+#include "logger.h"
 
 /* Values for DS2482_CMD_SET_READ_PTR */
 #define DS2482_PTR_CODE_STATUS		0xF0
@@ -51,6 +62,17 @@
 #define DS2482_CMD_READ 0x96
 #define DS2482_CMD_1WIRE_TRIPLET	0x78
 
+extern Logger logger;
+
+typedef struct {
+	uint64_t ts;
+	uint8_t ch;
+	uint8_t state;
+	uint8_t data;
+} log_data;
+RingBuffer<log_data, 2048> data_log;
+
+
 DS2482::DS2482(const std::string& i2c_dev, int address)
 	: fd(-1), addr(address)
 {
@@ -59,6 +81,7 @@ DS2482::DS2482(const std::string& i2c_dev, int address)
 #else
 	(void)i2c_dev;
 	(void)address;
+	fd = -1;
 #endif
 	ch = 0xff;
 	_read_ptr = 0;
@@ -66,8 +89,111 @@ DS2482::DS2482(const std::string& i2c_dev, int address)
 
 DS2482::~DS2482()
 {
+#ifdef USE_I2C
 	if (fd >= 0)
 		close(fd);
+#endif
+	data_log.clear();
+}
+
+uint64_t DS2482::get_now_us()
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000ULL;
+}
+
+
+// Helper to convert a byte to an 8-character binary string safely without std::bitset
+void byte_to_binary_str(unsigned char byte, char* out_str) {
+    for (int i = 7; i >= 0; --i) {
+        out_str[7 - i] = (byte & (1 << i)) ? '1' : '0';
+    }
+    out_str[8] = '\0';
+}
+
+int DS2482::log_dump(char* buf, size_t size)
+{
+    char* current_ptr = buf;
+    size_t remaining_size = size;
+    int written = 0;
+
+	if (!buf || size == 0)
+		return 0;
+
+	// Advanced lambda that accepts printf-style formatting arguments
+	auto append_to_buf = [&](const char* format, auto... args) {
+		if (remaining_size <= 1) return;
+
+		// Safely format the dynamic string into the buffer
+		int res;
+		if constexpr (sizeof...(args) == 0)
+			res = snprintf(current_ptr, remaining_size, "%s", format);
+		else
+			res = snprintf(current_ptr, remaining_size, format, args...);
+		if (res > 0) {
+			size_t actual_written = static_cast<size_t>(res);
+			if (actual_written >= remaining_size) {
+				actual_written = remaining_size - 1;
+			}
+			current_ptr += actual_written;
+			remaining_size -= actual_written;
+			written += actual_written;
+		}
+	};
+ 	// Appending VCD header blocks
+	append_to_buf("$date\n  Today, 2026\n$end\n");
+	append_to_buf("$timescale\n  1us\n$end\n");
+	append_to_buf("$scope module 1wire $end\n");
+	// Define variables
+	append_to_buf("$var wire 8 a bus_state $end\n");
+	append_to_buf("$var wire 8 b ch0_data $end\n");
+	append_to_buf("$var wire 8 c ch1_data $end\n");
+	append_to_buf("$var wire 8 d ch2_data $end\n");
+
+	// Close scopes
+	append_to_buf("$upscope $end\n");
+	append_to_buf("$enddefinitions $end\n");
+	int add = 0;
+	uint64_t old_ts = 0;
+	for (int i = 0; i < data_log.size();i++) {
+		log_data l = data_log[i];
+		char buf[32];
+		if (old_ts >= l.ts) {
+			add++;
+			l.ts += add;
+		} else {
+			add = 0;
+		}
+		old_ts = l.ts;
+		snprintf(buf, 32, "%" PRIu64, l.ts);
+		append_to_buf("#%s\n", buf); // The timestamp
+		byte_to_binary_str(l.state, (char *)buf);
+		append_to_buf("b%s a\n", buf);
+		if (l.ch < 3) {
+			byte_to_binary_str(l.data, (char *)buf);
+			append_to_buf("b%s ", buf);
+		}
+		switch (l.ch) {
+			case 0:
+				append_to_buf("b\n");
+				break;
+			case 1:
+				append_to_buf("c\n");
+				break;
+			case 2:
+				append_to_buf("d\n");
+				break;
+		}
+	}
+	return written;
+}
+
+
+void DS2482::log_event(uint8_t state, uint8_t data)
+{
+    uint64_t relative_us = get_now_us() - start_time;
+	data_log.push(log_data{relative_us, ch, state, data});
 }
 
 // The 1-Wire CRC scheme is described in Maxim Application Note 27:
@@ -122,6 +248,7 @@ bool DS2482::init()
 		return false;
 	}
 #endif
+	start_time = get_now_us();
 
 	return true;
 }
@@ -277,6 +404,7 @@ uint8_t DS2482::_read()
 	}
 	return d;
 #else
+	// TODO simulate read with test data (array)
 	return 0;
 #endif
 }
@@ -305,6 +433,7 @@ uint8_t DS2482::busyWait()
 		return DS2482_STATUS_INVAL;
 	}
 	while(res & DS2482_STATUS_BUSY) {
+		// coverity[SLEEP] - Intentional block
 		usleep(10);
 		res = _read();
 		if (last_err == ERR_READ) {
@@ -332,35 +461,43 @@ uint8_t DS2482::busyWait()
  */
 bool DS2482::selectChannel(uint8_t channel)
 {
+	uint8_t check;
 	static const uint8_t chan_r[8] = { 0xB8, 0xB1, 0xAA, 0xA3, 0x9C, 0x95, 0x8E, 0x87 };
 	static const uint8_t chan_w[8] = { 0xF0, 0xE1, 0xD2, 0xC3, 0xB4, 0xA5, 0x96, 0x87 };
-#if 0
+
 	if (ch == channel)
 		return true;
-#endif
 	last_err = ERR_NONE;
 	if (busyWait() == DS2482_STATUS_INVAL) {
 		/* err can be 11..18 */
 		last_err += ERR_CHSEL1;
-		return false;
+		goto sel_ch_error;
 	}
 	_write_cmd(DS2482_CMD_CHANNEL, chan_w[channel]);
 	if (last_err != ERR_NONE) {
 		/* err can be 1..5 : 41 ..45*/
 		last_err += ERR_CHSEL2;
-		return false;
+		goto sel_ch_error;
 	}
 	/* after channel selection the read pointer points
 	to the channel register */
 
-	uint8_t check = _read();
+	check = _read();
+#ifndef USE_I2C
+	// simulate access if testing
+	check = chan_r[channel];
+#endif
 	if (check != chan_r[channel]) {
 		last_err = ERR_CHCHK;
-		return false;
+		goto sel_ch_error;
 	}
 
 	ch = channel;
 	return true;
+sel_ch_error:
+	logger.error(std::format("Failed to select channel {}, error code: {}", channel, last_err));
+	ch = 0xff;
+	return false;
 }
 
 /* 52 .. address send, NACK received (on busy wait)
@@ -385,7 +522,6 @@ bool DS2482::selectChannel(uint8_t channel)
 bool DS2482::reset()
 {
 	last_err = ERR_NONE;
-	//std::lock_guard<std::mutex> lock(mtx);
 	busyWait();
 	if (last_err != ERR_NONE) {
 		/* err can be 11..18 */
@@ -398,7 +534,14 @@ bool DS2482::reset()
 		last_err += ERR_RESET2;
 		return false;
 	}
+	log_event(STATE_RESET, 0);
+#ifdef USE_I2C
+	// coverity[SLEEP] - Intentional block
 	usleep(400);
+#else
+	// simultate presence pulse if testing
+	return true;
+#endif
 	uint8_t stat = busyWait();
 	if (last_err != ERR_NONE) {
 		/* err can be 11..18 */
@@ -423,7 +566,6 @@ bool DS2482::reset()
 uint8_t DS2482::write(uint8_t b, uint8_t power)
 {
 	(void)power;
-	//std::lock_guard<std::mutex> lock(mtx);
 	last_err = ERR_NONE;
 	busyWait();
 	if (last_err != ERR_NONE) {
@@ -432,19 +574,19 @@ uint8_t DS2482::write(uint8_t b, uint8_t power)
 		return 0xff;
 	}
 	_write_cmd (DS2482_CMD_WRITE, b);
-
 	if (last_err != ERR_NONE) {
 		/* err can be 1..5 */
 		last_err += ERR_WRITE2;
 		return 0xff;
 	}
+	log_event(STATE_WRITE, b);
 
 	return b;
 }
 
 uint8_t DS2482::read()
 {
-	//std::lock_guard<std::mutex> lock(mtx);
+	uint8_t b;
 
 	last_err = ERR_NONE;
 	busyWait();
@@ -464,13 +606,10 @@ uint8_t DS2482::read()
 		return 0xff;
 	}
 	setReadPtr(DS2482_PTR_CODE_DATA);
+	b = _read();
+	log_event(STATE_READ, b);
 
-	return _read();
-}
-
-void DS2482::skip()
-{
-	write(OW_SKIP_ROM);
+	return b;
 }
 
 void DS2482::select(const uint8_t rom[8])
@@ -515,11 +654,14 @@ void DS2482::reset_search()
 
 bool DS2482::search(uint8_t *newAddr, bool search_mode)
 {
+#ifdef USE_I2C
 	uint8_t i;
 	uint8_t direction;
 	uint8_t last_zero = 0;
 	uint8_t stat;
-
+#else
+	(void)newAddr;
+#endif
 	if (searchExhausted)
 		return false;
 
@@ -532,7 +674,7 @@ bool DS2482::search(uint8_t *newAddr, bool search_mode)
 	}
 #ifndef USE_I2C
 	return false;
-#endif
+#else
 	for(i = 1; i < 65; i++) {
 		uint8_t romByte = (i - 1) >> 3;
 		uint8_t romBit = 1 << ((i - 1) & 7);
@@ -581,10 +723,9 @@ bool DS2482::search(uint8_t *newAddr, bool search_mode)
 		else
 			searchAddress[romByte] &= (uint8_t)~romBit;
 		/* if only interested in max 2 bytes we can stop here
-		   could save 50 ms
-		if (!search_mode && i == 16)
+		   could save 50 ms */
+		if (!search_mode && searchAddress[0] == 0x29 && i == 16)
 			break;
-		*/
 	}
 
 	searchLastDisrepancy = last_zero;
@@ -593,9 +734,12 @@ bool DS2482::search(uint8_t *newAddr, bool search_mode)
 	if (searchLastDisrepancy == 0)
 		searchExhausted = 1;
 
-	for (i = 0; i < 8; i++)
+	for (i = 0; i < 8; i++) {
 		newAddr[i] = searchAddress[i];
+		log_event(STATE_SEARCH, searchAddress[i]);
+	}
 	return true;
+#endif
 }
 
 void DS2482::write(const uint8_t *buf, uint16_t count, uint8_t power/* = 0 */)

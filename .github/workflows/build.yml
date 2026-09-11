@@ -47,3 +47,11 @@ jobs:
       with:
         coverage-file: coverage.info # Path to your LCOV file
         minimum-coverage: 80              # Fails if below 80%
+    - name: configure for coverity
+      run: ${{ matrix.cc }} mkdir build-cov;cmake -DUSE_GPIO=NO -DUSE_I2C=YES -DTESTING=OFF -DCMAKE_BUILD_TYPE=Release -S . -B build-cov
+    - name: Run Coverity Scan
+      uses: vapier/coverity-scan-action@v1
+      with:
+        email: ${{ secrets.COVERITY_SCAN_EMAIL }}
+        token: ${{ secrets.COVERITY_TOKEN }}
+        command: 'cmake --build build-cov'

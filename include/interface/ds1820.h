@@ -3,7 +3,7 @@
 
 class IDS1820 {
 	public:
-		virtual float temp_read(const uint8_t mode) = 0;
+		virtual float temp_read(const uint8_t flag) = 0;
 };
 
 #endif // _IDS1820_H

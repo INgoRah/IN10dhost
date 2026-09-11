@@ -96,7 +96,7 @@ bool parse_buf(std::string_view buf, struct _sw_tbl& sw)
 SwitchHandler::SwitchHandler()
 {
 	cur_latch = 0;
-	this->ds = NULL;
+	this->ds = nullptr;
 }
 
 SwitchHandler::SwitchHandler(OwDevices* devs)  : SwitchHandler()
@@ -119,16 +119,11 @@ uint8_t SwitchHandler::bitnumber()
 	return 0xff;
 }
 
-void SwitchHandler::initSwTable()
-{
-}
-
 void SwitchHandler::begin(DS2482 *ow)
 {
 	this->ds = ow;
 	mode = MODE_ALRAM_HANDLING | MODE_ALRAM_POLLING | MODE_AUTO_SWITCH;
 	logger.info("starting switch handler");
-	initSwTable();
 }
 
 /* Convert from alarm location to a lookup table format (16 bit)
@@ -191,6 +186,8 @@ bool SwitchHandler::actor_handle(union pio p, enum _pio_mode state)
 	bool ret = false;
 
 	ds2408* dev = (ds2408*)ow->find(p.da.bus, p.da.adr, 0x29);
+	ds->log_event('2',p.da.pio);
+
 	if (dev)
 		ret = dev->pin_switch(p.da.pio, state);
 	else
@@ -205,7 +202,7 @@ bool SwitchHandler::actor_handle(union pio p, enum _pio_mode state)
 bool SwitchHandler::switchHandle(uint8_t busNr, uint8_t adr1)
 {
 	union s_adr src;
-	uint8_t i;
+	size_t i;
 
 	src.data = srcData(busNr, adr1);
 	logger.debug(std::format("switch handling {}.{}", (int)src.sa.bus, (int)src.sa.adr));
@@ -233,11 +230,12 @@ bool SwitchHandler::switchHandle(uint8_t busNr, uint8_t adr1)
 bool SwitchHandler::dev_alarm(uint8_t bus, uint8_t adr[8])
 {
 	if (adr[0] == 0x29) {
-		uint8_t res, to = 30;
+		uint8_t res, to = 8;
 		ds2408* dev = (ds2408*)ow->find(bus, adr[1], 0x29);
 		if (!dev)
 			return false;
 		//dev->set_alarm(true);
+		ds->log_event('1',adr[1]);
 		res = dev->reg_read(true);
 		/* fill data for use in switchHandle */
 		if (res == 0xaa || res == 0xff) {
@@ -272,33 +270,44 @@ bool SwitchHandler::alarmHandler(uint8_t busNr)
 	uint8_t adr[8];
 	uint8_t j = 0;
 	uint8_t cnt = 10;
-	bool ret;
+	bool ret, srch;
 
-	if (!ds)
+	if (ds == nullptr)
 		return false;
-	//ds = bus[busNr];
-	std::unique_lock<std::mutex> lock(ds->mtx);
+	{
+		std::lock_guard<std::mutex> lock(ds->mtx);
 
-	ret = ds->selectChannel(busNr);
-	if (!ret)
-		// this could be a timeout or other issue
-		// must be repeated
-		return false;
-	ds->target_search(0x29);
-	// improve time by 1 ms with a familiy search for 0x29 only
-	// with custom addresses using one byte ID only
-	// at the second byte and the remaining according a
-	// defined scheme, we could stop even after one byte search
-	while (ds->search(adr, false)) {
-		lock.unlock();
+		ret = ds->selectChannel(busNr);
+		if (!ret)
+			// this could be a timeout or other issue
+			// must be repeated
+			return false;
+		ds->target_search(0x29);
+		// improve time by 1 ms with a familiy search for 0x29 only
+		// with custom addresses using one byte ID only
+		// at the second byte and the remaining according a
+		// defined scheme, we could stop even after one byte search
+		srch = ds->search(adr, false);
+	}
+	while (srch && cnt > 0) {
 		j++;
 		logger.debug(std::format("Alarm {}.{} {}", busNr, adr[1], adr[2]));
-		dev_alarm(busNr, adr);
+		try {
+			dev_alarm(busNr, adr);
+		}
+		catch (const std::system_error& e) {
+			std::cerr << "Caught system error: " << e.what() << '\n';
+			std::cerr << "Error code: " << e.code() << '\n';
+		}
 		cnt--;
 #ifdef USE_DEBUG
 		if (ds->last_err || cnt == 0)
 			printf("Error searching = %d\n", ds->last_err);
 #endif
+		{
+			std::lock_guard<std::mutex> lock(ds->mtx);
+			srch = ds->search(adr, false);
+		}
 	}
 
 	return j > 0 ? true : false;

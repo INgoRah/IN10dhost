@@ -2,7 +2,9 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <cstring>
+#ifdef GPIOD_V2
 #include <gpiod.h>
+#endif
 #include <poll.h>
 #include <time.h>
 #include <sched.h>
@@ -60,54 +62,68 @@ int wake_fd;
 
 void background_worker()
 {
-#if USE_GPIO
+#ifdef USE_GPIO
 	struct pollfd fds[2];
 	int state;
 	int ret;
+	Ard_i2c* arduino;
 #else
 	struct pollfd fds[1];
 #endif
+	int tm;
 	int timeout = ow.get_poll();
-	Ard_i2c* arduino;
-	HrClock::time_point tp;
 
 	if (timeout == 0)
 		timeout = -1;
 	else
 		timeout *= 1000;
+#ifdef USE_GPIO
 	arduino = (Ard_i2c*)ow.find(0, 9, 0xAD);
 	if (!arduino) {
+		// TODO restart working after search
 		logger.warn("No arduino device");
 		return;
 	}
+#endif
 	// Setup the buffer before the loop
 	fds[0].fd = wake_fd;
-#if USE_GPIO
+#ifdef USE_GPIO
 	struct gpiod_edge_event_buffer *event_buffer = gpiod_edge_event_buffer_new(16);
 	fds[1].fd = gpiod_line_request_get_fd(line);
+	logger.info("periodic worker started");
 #endif
 	while (running.load()) {
 		// periodic work
-		// e.g. sync, cleanup, polling, logging
-#if USE_GPIO
+		// setup 1 sec timer for polling
+#ifdef USE_GPIO
 		ret = 0;
 		state = gpiod_line_request_get_value(line, GPIO_LINE);
 		if (state == 1) {
+
 			fds[0].events = POLLIN;
 			fds[1].events = POLLIN | POLLERR;
-			ret = poll(fds, 2, timeout);
-			tp = HrClock::now();
+			// define next timeout for polling the devices, periodic second timer
+			if (timeout == -1)
+				tm = ow.poll_time();
+			else
+				tm = std::min(ow.poll_time(), timeout);
+			logger.verbose("Polling " + std::to_string(tm));
+			ret = poll(fds, 2, tm);
+			if (ret)
+				ds.log_event(STATE_EVENT, 0);
 		}
-		//logger.verbose("Poll " + std::to_string(ret) + " handled, GPIO state=" + std::to_string(state));
-		arduino->interrupt();
-		if (state == 1) {
-			auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(HrClock::now() - tp);
-			logger.info(std::format("used {} ", duration));
-		}
-		if (ret > 0 && (fds[1].revents & POLLIN))
+		if (ret > 0 && (fds[1].revents & POLLIN)) {
+			logger.verbose("Poll " + std::to_string(ret) + " handled, GPIO state=" + std::to_string(state));
+			arduino->interrupt();
 			// READ THE EVENTS to clear the poll status
 			gpiod_line_request_read_edge_events(line, event_buffer, 16);
+		}
+		if (ret == 0) {
+			ds.log_event(STATE_POLL, tm);
+			ow.poll();
+		}
 #else
+		ds.log_event(STATE_POLL, 0);
 		poll(fds, 1, 5000);
 #endif
 		// External wake (CLI / FUSE)
@@ -121,7 +137,7 @@ void background_worker()
 
 void setup_gpio()
 {
-#if USE_GPIO
+#ifdef USE_GPIO
 	chip = gpiod_chip_open("/dev/gpiochip0");
 	if (!chip)
 		perror("gpiod_chip_open");
@@ -177,13 +193,15 @@ void enable_rt(void)
 	}
 }
 
-extern int plugins_action(int action, int val);
-
 int main(int argc, char* argv[])
 {
 	int ret;
 
-	std::signal(SIGSEGV, segfault_handler);
+	//std::signal(SIGSEGV, segfault_handler);
+	printf("Starting IN10dhost daemon %s...\n", __TIME__);
+	enable_rt();
+	setup();
+
 	string f = std::filesystem::current_path();
 	logger.set_level(LogLevel::INFO);
 	f = f + "/data.json";
@@ -193,13 +211,11 @@ int main(int argc, char* argv[])
 	}
 	catch (const std::exception& e) {
 		printf("loading failed %s\n" , e.what());
+		// create default config
 	}
-	enable_rt();
-	setup();
 	std::thread worker(background_worker);
 	ret = fuse_main(argc, argv, &fs_ops, nullptr);
 	printf("fuse ended with %d\n", ret);
-
 	// trigger wake up of thread
 	uint64_t v = 1;
 	(void)write(wake_fd, &v, sizeof(v)); // Triggers fds[0]
@@ -207,7 +223,7 @@ int main(int argc, char* argv[])
 		running.store(false);
 		worker.join();
 	}catch (const std::exception& e) {
-		printf("%s", e.what());
+		printf("worker stopping failed with an exception: %s\n", e.what());
 	}
 #ifdef USE_GPIO
 	gpiod_line_request_release(line);

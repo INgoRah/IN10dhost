@@ -1,6 +1,8 @@
 #ifndef _SWITCHHANDLER_H
 #define _SWITCHHANDLER_H
+#ifdef TESTING
 #include <gtest/gtest_prod.h>
+#endif
 #include "ds2482.h"
 #include "ds2408.h"
 #include "fs.h"
@@ -132,8 +134,10 @@ class SwitchHandler : IFs {
 		uint8_t dimLevel(union pio dst, uint8_t* id);
 		uint8_t dimLevel(union d_adr_8 dst, uint8_t* id);
 		uint16_t getLen(uint8_t max, uint16_t elSize);
+#ifdef TESTING
 		// GTest testing support
 		FRIEND_TEST(LLSwTest, ll_funcs);
+#endif
 	public:
 		uint8_t mode;
 		uint8_t light_thr;
@@ -145,7 +149,6 @@ class SwitchHandler : IFs {
 		bool actor_handle(union pio dst, enum _pio_mode state);
 		void begin(DS2482 *ow);
 		void loop();
-		void initSwTable();
 		bool dev_alarm(uint8_t bus, uint8_t adr[8]);
 		bool alarmHandler(uint8_t busNr);
 		bool switchHandle(uint8_t busNr, uint8_t adr1);

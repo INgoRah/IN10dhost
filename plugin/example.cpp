@@ -71,5 +71,4 @@ extern "C" Plugin* create_plugin() {
 
 extern "C" void destroy_plugin(Plugin* p) {
 	delete p;
-	std::cout << "Example plugin deleted" << std::endl;
 }

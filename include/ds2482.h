@@ -3,6 +3,8 @@
 #include <string>
 #include <stdint.h>
 #include <mutex>
+#include <iostream>
+#include <fstream> // Required for std::ofstream
 
 #define stOk 0
 #define stTimeout 1
@@ -31,6 +33,16 @@
 #define DS2482_STATUS_TSB	0x40
 #define DS2482_STATUS_DIR	0x80
 #define DS2482_STATUS_INVAL	0xfd
+
+// State enum helpers for data logging
+#define STATE_IDLE   '-'
+#define STATE_RESET  '0'
+#define STATE_SEARCH 'S'
+#define STATE_READ   'R'
+#define STATE_WRITE  'W'
+#define STATE_CHANNEL 'C'
+#define STATE_POLL  '?'
+#define STATE_EVENT  '!'
 
 enum DS2482_ERR {
   ERR_NONE = 0,
@@ -77,14 +89,18 @@ enum DS2482_ERR {
 
 class DS2482
 {
+private:
+	uint64_t start_time;
+	uint64_t get_now_us();
 public:
-	DS2482() { fd = -1; };
+	DS2482() { searchExhausted = 0; ch = 0xff; fd = -1; _read_ptr = 0; _combined = false; };
 	DS2482(const std::string& i2c_dev, int address);
 	~DS2482();
 
 	std::mutex mtx;
 	uint8_t last_err;
 	bool init();
+	int log_dump(char* buf, size_t size);
 	bool configureDev(uint8_t config);
 	void resetDev();
 
@@ -97,8 +113,6 @@ public:
 	void write(const uint8_t *buf, uint16_t count, uint8_t power/* = 0 */);
 	// Issue a 1-Wire rom select command, you do the reset first.
 	void select(const  uint8_t rom[8]);
-	// Issue skip rom
-	void skip();
 
 	// Clear the search state so that if will start from the beginning again.
 	void reset_search();
@@ -113,6 +127,7 @@ public:
 	bool search(uint8_t *newAddr, bool search_mode = true);
 	uint16_t crc16(const uint8_t* input, uint16_t len, uint16_t crc);
 	bool check_crc16(const uint8_t* input, uint16_t len, const uint8_t* inverted_crc, uint16_t crc);
+	void log_event(uint8_t state, uint8_t data);
 
 private:
 	int fd;
@@ -123,13 +138,22 @@ private:
 	uint8_t searchLastFamilyDiscrepancy;
 	uint8_t searchAddress[8];
 	uint8_t searchExhausted;
+	/* adapter supports plain-I2C combined transfers (I2C_FUNC_I2C) */
+	bool _combined;
 
 	void set_error(int err_code, int def);
 	void _write(uint8_t b);
 	void _write_cmd(uint8_t cmd, uint8_t data);
-	int read_status(uint8_t *status);
+	/* where the DS2482 read pointer ends up after a given command */
+	void _track_read_ptr(uint8_t cmd, uint8_t data);
+	/* command + read back in a single I2C transaction (repeated START) */
+	uint8_t _cmd_read(const uint8_t *cmd, uint8_t len, int def_err = ERR_READ);
 	uint8_t _read();
+	uint8_t _read_status();
 	void setReadPtr(uint8_t readPtr);
 
+	/* poll BUSY starting from an already sampled status byte */
+	uint8_t waitIdle(uint8_t status);
 	uint8_t busyWait(); //blocks until
+	bool log_init();
 };

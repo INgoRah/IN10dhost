@@ -87,6 +87,8 @@ add_compile_options(
     -Wall
     -Wextra
     -Wpedantic
+    -Wunused-variable
+    -Wunused-result
     -std=c++20
     -Wno-psabi
     -DFUSE_USE_VERSION=30
@@ -117,6 +119,7 @@ add_executable(IN10dfsd
     src/ds2482.cpp
     src/ow_dev.cpp
     src/ds2408.cpp
+    src/ds2450.cpp
     src/ds1820.cpp
     src/ow_devices.cpp
     src/plugins.cpp
@@ -151,6 +154,7 @@ target_include_directories(IN10dfsd
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${GPIOD_INCLUDE_DIRS}
+        ${CMAKE_CURRENT_SOURCE_DIR}/lib
 )
 
 # ----------------------------

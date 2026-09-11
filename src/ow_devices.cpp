@@ -1,13 +1,14 @@
 #include <fstream>
 #include <iostream>
 #include <string>
-#include <algorithm>
+#include <algorithm> // for std::max,min...
 #include <fuse3/fuse.h>
 #include "main.h"
 #include "fs.h"
 #include "ow_devices.h"
 #include "ds1820.h"
 #include "ds2408.h"
+#include "ds2450.h"
 #include "ard_i2c.h"
 #include "plugins.h"
 
@@ -52,7 +53,6 @@ void to_json(json& j, const Config& c) {
 		{"version", 1},
 		{"mode", c.mode},
 		{"poll", c.poll},
-		{"log", c.log},
 		{"bus_count", c.bus_count},
 		{"busses", c.busses},
 		{"switches", c.switches}
@@ -67,28 +67,24 @@ void to_json(json& j, const Config& c) {
    Factory (polymorphic creation)
    ========================= */
 
+#define RETURN_DEVICE(type_str, dev_type) \
+	do { \
+		if (type == (type_str)) { \
+			auto dev = std::make_unique<dev_type>(); \
+			if (dev) \
+				dev->from_json(j); \
+			return dev; \
+		} \
+	} while (0)
+
 std::unique_ptr<OwDev> make_device_from_json(const json& j) {
 	const std::string type = j.at("type").get<std::string>();
 
-	if (type == "ds2408") {
-		auto dev = std::make_unique<ds2408>();
-		if (dev)
-			dev->from_json(j); // Polymorphic call
-		return dev;
-	}
-	if (type == "ds1820") {
-		auto dev = std::make_unique<ds1820>();
-		if (dev)
-			dev->from_json(j); // Polymorphic call
-		return dev;
-	}
-	if (type == "ard_i2c") {
-		auto dev = std::make_unique<Ard_i2c>();
-		if (dev)
-			dev->from_json(j); // Polymorphic call
-		return dev;
-	}
-
+	RETURN_DEVICE("ds2408", ds2408);
+	RETURN_DEVICE("ds1820", ds1820);
+	RETURN_DEVICE("ds2450", ds2450);
+	RETURN_DEVICE("ard_i2c", Ard_i2c);
+	// coming here means that the device is not supported
 	throw std::runtime_error("Unknown device type: " + type);
 }
 
@@ -104,14 +100,11 @@ void from_json(const json& j, Config& c) {
 		c.devices.push_back(make_device_from_json(jdev));
 	}
 	c.mode = j.at("mode").get<int>();
-	if (j.contains("log"))
-		c.log = j.at("log").get<int>();
 	if (j.contains("poll"))
 		c.poll = j.at("poll").get<int>();
 }
 
 OwDevices::~OwDevices() {
-	logger.info("Cleaning up OwDevices...");
 	plugins.cleanup();
 }
 
@@ -125,6 +118,24 @@ void OwDevices::init()
 	deviceCount = 0;
 	cache.devices.clear();
 	init_busses();
+	last_sec = HrClock::now();;
+}
+
+void OwDevices::begin(DS2482 *ds)
+{
+	ow = ds;
+
+	for (auto& dev : cache.devices) {
+		dev->begin(ds);
+	}
+    if (!ow->init()) {
+        printf("Failed to initialize DS2482\n");
+		return;
+	}
+#ifdef USE_I2C_EXCLUSIVE
+	ow->resetDev();
+	ow->configureDev(DS2482_CONFIG_APU);
+#endif
 }
 
 void OwDevices::init_busses()
@@ -144,9 +155,9 @@ void OwDevices::set_mode(int mode)
 		dev->set_mode(mode);
 }
 
-void OwDevices::set_log(int level)
+int OwDevices::log_dump(char* buf, size_t size)
 {
-	cache.log = level;
+	return ow->log_dump(buf, size);
 }
 
 void OwDevices::load(const std::string& path) {
@@ -166,12 +177,17 @@ void OwDevices::load(const std::string& path) {
 			cache.version,
 			(unsigned int)cache.devices.size()));
 	}
-	logger.set_level((LogLevel)cache.log);
+	if (j.contains("log")) {
+		int log;
+		log = j.at("log").get<int>();
+		logger.set_level((LogLevel)log);
+	}
 	for (auto& dev : cache.devices) {
+		dev->begin(ow);
 		dev->update();
 	}
 	update_data();
-	plugins.action(2, 0); // loaded
+	plugins.action(INITIALIZED, 0); // loaded
 }
 
 void OwDevices::save(const std::string& path) {
@@ -181,6 +197,7 @@ void OwDevices::save(const std::string& path) {
 	for (auto& b : cache.busses)
 		b.dev_count = b.devices.size();
 	json j = cache;
+	j["log"] = (int)logger.get_level();
 	try {
 		json j_plugins = plugins.save();
 		j["plugins"] = j_plugins;
@@ -277,17 +294,25 @@ void OwDevices::update_data()
 	deviceCount = 0;
 	logger.log(LogLevel::DEBUG, std::to_string(cache.devices.size()) + " devices ");
 	for (auto it = cache.devices.begin(); it != cache.devices.end(); ) {
-		auto& dev = *it;
+		try {
+			auto& dev = *it;
 
-		if (find(dev->rom_code)) {
-			logger.warn(std::format("duplicated dev {} with {}", dev->rom, dev->rom_code));
-			it = cache.devices.erase(it); // Erase returns the NEXT valid iterator
-			continue;
+			if (find(dev->rom_code)) {
+				logger.warn("duplicated dev " + dev->rom + " with " + std::to_string(dev->rom_code));
+				it = cache.devices.erase(it); // Erase returns the NEXT valid iterator
+				continue;
+			}
+			cache.busses[dev->bus].devices.push_back(it->get());
+			add_device(it->get());
+			dev->set_mode(cache.mode);
+			++it; // Only increment if we didn't erase
+		} catch (const std::exception& e) {
+			logger.error("Error processing device: " + std::string(e.what()));
+			++it;
+		} catch (...) {
+			logger.error("Unknown error processing device");
+			++it;
 		}
-		cache.busses[dev->bus].devices.push_back(it->get());
-		add_device(it->get());
-		dev->set_mode(cache.mode);
-		++it; // Only increment if we didn't erase
 	}
 	logger.log(LogLevel::DEBUG, "update, busses=" + std::to_string(cache.busses.size()) + " = " + std::to_string(deviceCount) + " devices ");
 }
@@ -309,6 +334,10 @@ void OwDevices::update_device(int bus, string rom) {
 		auto& p = cache.devices.emplace_back(std::make_unique<ds1820>(rom));
 		dev = p.get();
 	}
+	if (rom.substr(0, 2) == "20") {
+		auto& p = cache.devices.emplace_back(std::make_unique<ds2450>(rom));
+		dev = p.get();
+	}
 	if (rom.substr(0, 2) == "AD") {
 		auto& p = cache.devices.emplace_back(std::make_unique<Ard_i2c>(rom));
 		dev = p.get();
@@ -325,7 +354,6 @@ void OwDevices::update_device(int bus, string rom) {
 		// TODO create generic device to at least show it in the list
 		// issue ...
 	}
-	last_scan_ = Clock::now();
 }
 
 std::vector<OwDev*> OwDevices::list_devices(int bus)
@@ -333,33 +361,20 @@ std::vector<OwDev*> OwDevices::list_devices(int bus)
 	return cache.busses[bus].devices;
 }
 
-int OwDevices::dump(char* buf)
-{
-	char* ptr = &buf[0];
-	int written = 0;
-
-	for (size_t i = 0; i < deviceCount; ++i) {
-		 written = std::sprintf(ptr, "%012llX\n",
-			dev_list[i].romCode);
-		ptr += written;
-	}
-	return strlen(buf);
-}
-
 // search devs
 uint8_t OwDevices::search(bool mode)
 {
 	char buf[18];
 	int pos;
-	uint8_t adr[8], bus;
+	uint8_t bus;
 #ifdef USE_I2C
-	uint8_t  res = 0;
+	uint8_t adr[8];
+	uint8_t res = 0;
 #endif
 
 	for (bus = 0; bus < 4; bus++) {
 		std::lock_guard<std::mutex> lock(ow->mtx);
 		ow->selectChannel(bus);
-		ow->reset();
 		ow->reset_search();
 #ifdef USE_I2C
 		while (ow->search(adr, mode)) {
@@ -380,8 +395,8 @@ uint8_t OwDevices::search(bool mode)
 	uint8_t  adrt[8] = { 0x28, 0x5, 0x1, 0xFA, 0xFE, 0x66, 0x77, 0xC6};
 	sprintf(buf, "%02X.", adrt[0]);
 	pos = 2;
-	for (int j = 1; j < 8; j++) {
-		sprintf(&buf[pos], "%02X", adr[j]);
+	for (int j = 1; j < 7; j++) {
+		sprintf(&buf[pos], "%02X", adrt[j]);
 		pos += 2;
 	}
 	update_device(1, buf);
@@ -397,23 +412,61 @@ uint8_t OwDevices::search(bool mode)
 	return 1;
 }
 
-
-void OwDevices::begin(DS2482 *ds) {
-	ow = ds;
-
+int OwDevices::poll_time()
+{
+	int next_timeout = 60 * 1000; // 60 seconds
+	auto now = HrClock::now();
+	auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_sec).count();
+	if (elapsed >= 1000) {
+		// time to poll now
+		return 0;
+	}
+	// return remaining time in ms for the second timer
+	int sec = (int)(1000 - elapsed);
+	// check all devices for polling
+#if 1
 	for (auto& dev : cache.devices) {
-		dev->begin(ds);
-	}
-#ifdef USE_I2C
-    if (!ow->init()) {
-        printf("Failed to initialize DS2482\n");
-		return;
-	} else {
-		printf("Initialized DS2482\n");
-	}
+		int next = dev->poll_next();
+		if (next == 0) {
+			logger.info(std::format("polling {} ", dev->addr[0]));
+			return 0; // time to poll now
+		}
+		if (next > 0 && next < next_timeout)
+	        next_timeout = std::min(next_timeout, next);
+    }
 #endif
-#ifdef USE_I2C_EXCLUSIVE
-	ow->resetDev();
-	ow->configureDev(DS2482_CONFIG_APU);
-#endif
+	if (next_timeout == 60 * 1000)
+		// no device needs polling, return the seconds
+		return sec;
+	return std::min(next_timeout, sec);
+}
+
+int OwDevices::poll()
+{
+	int ret = -1;
+	int cnt = 0;
+	// check if seconds timer is up
+	auto now = HrClock::now();
+	auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_sec).count();
+	if (elapsed >= 1000) {
+		last_sec = now;
+		cnt = plugins.action(PERIODIC_SECOND);
+	}
+    for (auto& dev : cache.devices) {
+		int poll = dev->poll();
+		if (poll == 1)
+			cnt++; // at least one device polled
+		else if (poll == 0)
+			ret = std::max(ret, 0);
+	}
+	// TODO add global polling using cache.poll
+	/*
+	if (cache.poll > 0 && elapsed >= cache.poll * 1000) {
+		for (int bus = 0; bus < MAX_BUS; bus++)
+			swHdl.alarmHandler(bus);
+	}
+	*/
+	if (cnt == 0)
+		return ret; // no device needs polling
+	return cnt;
 }

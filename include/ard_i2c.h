@@ -12,6 +12,12 @@ class Ard_i2c : public OwDev{
 		// Assuming ad_fd and other globals are defined elsewhere
 		uint8_t lastSeq;
 		int power;
+		// running min/max/average of how long interrupt handling takes,
+		// tracked across the lifetime of the daemon; exposed via fs_read
+		std::chrono::milliseconds min_dur{std::chrono::milliseconds::max()};
+		std::chrono::milliseconds max_dur{std::chrono::milliseconds::zero()};
+		std::chrono::milliseconds sum_dur{std::chrono::milliseconds::zero()};
+		uint32_t dur_count = 0;
 		uint8_t read();
 		void write(uint8_t cmd);
 		void write_data(uint8_t cmd, uint8_t data);
@@ -19,8 +25,8 @@ class Ard_i2c : public OwDev{
 	public:
 		using OwDev::OwDev;
 		using OwDev::type;
-		Ard_i2c(std::string rom) : OwDev(rom) { type = "ard_i2c"; };
 		Ard_i2c();
+		Ard_i2c(std::string rom);
 		void set_mode(int mode) override;
 		std::vector<string> fs_dir(string& path) const override;
 		int fs_attr(string& path) const override;

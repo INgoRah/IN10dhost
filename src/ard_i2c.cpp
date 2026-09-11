@@ -38,10 +38,21 @@ static struct filetype ArdI2c[] = {
 	{ "power", 3 },
 	{ "pwr_total", 3 },
 	{ "test", 2 },
+	{ "int_min", 6 },
+	{ "int_max", 6 },
+	{ "int_avg", 6 },
 };
 
 Ard_i2c::Ard_i2c()
 {
+	lastSeq = 0xff;
+	this->type = "ard_i2c";
+	this->power = 0;
+}
+
+Ard_i2c::Ard_i2c(std::string rom) : OwDev(rom)
+{
+	// initialize members (can't delegate to default when also initializing base OwDev)
 	lastSeq = 0xff;
 	this->type = "ard_i2c";
 	this->power = 0;
@@ -148,7 +159,7 @@ void Ard_i2c::set_mode(int mode)
 {
 	OwDev::set_mode(mode);
 #ifdef USE_I2C
-	int fd = open("/dev/i2c-0", ARD_I2C_ADDR);
+	int fd = open("/dev/i2c-0", O_RDWR);
 	if (fd <= 0) {
 		printf("error opening arduino\n");
 		return;
@@ -171,19 +182,35 @@ void delay_ms(int ms) {
 
 void Ard_i2c::interrupt() {
 #ifdef USE_I2C
-	int fd = open("/dev/i2c-0", ARD_I2C_ADDR);
+	HrClock::time_point tp = HrClock::now();
+	int fd = open("/dev/i2c-0", O_RDWR);
 
-	if (fd <= 0) {
+	if (fd < 0) {
 		logger.warn("Arduino open failed");
 		return;
 	}
 	if (mode == 0x10) {
 		// read status which clears the gpio ("interrupts")
-		i2c_read(fd);
+		uint8_t status = i2c_read(fd);
 		close(fd);
-		// call switch handler
-		for (int bus = 0; bus < MAX_BUS; bus++)
-			swHdl.alarmHandler(bus);
+		//logger.verbose(std::format("AD Stat={:#x}", status));
+		if ((status & 0x3) == 0) {
+			// call switch handler
+			for (int bus = 0; bus < MAX_BUS; bus++)
+				swHdl.alarmHandler(bus);
+		} else {
+			swHdl.alarmHandler((status & 0x3) - 1);
+			auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(HrClock::now() - tp);
+			if (duration < min_dur)
+				min_dur = duration;
+			if (duration > max_dur)
+				max_dur = duration;
+			sum_dur += duration;
+			dur_count++;
+			/*logger.info(std::format("used {} (min={} max={} avg={}ms over {} calls)",
+				duration, min_dur, max_dur, sum_dur.count() / dur_count, dur_count));*/
+		}
+
 		return;
 	}
 	events(fd);
@@ -361,6 +388,19 @@ int Ard_i2c::fs_read(string& path, char* buf, size_t size, bool uncached)
 	}
 	if (path.find("power") != string::npos) {
 		std::sprintf(buf, "%d", power);
+		goto out;
+	}
+	if (path.find("int_min") != string::npos) {
+		// min_dur sits at its ::max() sentinel until the first sample
+		std::sprintf(buf, "%d", dur_count ? (int)min_dur.count() : 0);
+		goto out;
+	}
+	if (path.find("int_max") != string::npos) {
+		std::sprintf(buf, "%d", (int)max_dur.count());
+		goto out;
+	}
+	if (path.find("int_avg") != string::npos) {
+		std::sprintf(buf, "%d", dur_count ? (int)(sum_dur.count() / dur_count) : 0);
 		goto out;
 	}
 	return OwDev::fs_read(path, buf, size, uncached);
