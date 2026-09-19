@@ -34,5 +34,8 @@ foreach(SOURCE_FILE ${PLUGIN_SOURCES})
         PREFIX "lib"
         LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
     )
+    install(TARGETS ${PLUGIN_NAME}
+        LIBRARY DESTINATION /opt/lib/IN10dfsd/
+    )
 
 endforeach()

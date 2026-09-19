@@ -20,6 +20,7 @@ static struct filetype root_dir[] = {
 	{ "uncached", 0 },
 	{ "settings", 0 },
 	{ "switches", 0 },
+	{ "log", 0 },
 };
 
 static struct filetype settings[] = {
@@ -64,7 +65,8 @@ static bool extractBusNumber(string& path, int& busNumber)
 		return false; // no number found
 
 	busNumber = std::stoi(path.substr(numStart, numEnd - numStart));
-
+	if (busNumber < 0 || busNumber >= MAX_BUS)
+		return false;
 	// erase "/bus.<number>/"
 	path.erase(pos, numEnd - pos + 1);
 
@@ -191,6 +193,19 @@ static int fs_getattr(const char* path, struct stat* st, struct fuse_file_info*)
 			if (check_path(spath, s, st))
 				return 0;
 	}
+	if (strcmp(path, "/log") == 0) {
+		st->st_mode = S_IFDIR | 0755;
+		st->st_nlink = 2;
+		return 0;
+	}
+	if (strcmp(path, "/log/1wire.vcd") == 0) {
+		st->st_mode = S_IFREG | 0666;
+		// TODO query real size ow.log_size()
+		st->st_size = 218 + (1024 * 30);
+		st->st_nlink = 1;
+		return 0;
+	}
+
 	int bus;
 	if (extractBusNumber(spath, bus)) {
 		if (spath.length() > 0) {
@@ -279,6 +294,12 @@ static int fs_readdir(const char* path, void* buf, fuse_fill_dir_t filler,
 			filler(buf, s.name, nullptr, 0, static_cast<fuse_fill_dir_flags>(0));
 		return 0;
 	}
+	if (strcmp(path, "/log") == 0) {
+		filler(buf, "1wire.vcd", nullptr, 0, static_cast<fuse_fill_dir_flags>(0));
+		filler(buf, ".", nullptr, 0, static_cast<fuse_fill_dir_flags>(0));
+		filler(buf, "..", nullptr, 0, static_cast<fuse_fill_dir_flags>(0));
+		return 0;
+	}
 	if (strcmp(path, "/switches") == 0) {
 		std::vector<string> ls = swHdl.fs_dir(spath);
 
@@ -335,6 +356,8 @@ static int fs_open(const char* path, struct fuse_file_info*)
 		return 0;
 	if (strcmp(path, "/settings/poll") == 0)
 		return 0;
+	if (strcmp(path, "/log/1wire.vcd") == 0)
+		return 0;
 
 	int bus;
 	bool ret = extractBusNumber(spath, bus);
@@ -359,9 +382,6 @@ static int fs_read(const char* path, char* buf, size_t size, off_t offset,
 	string spath(path);
 	spath.erase(0, 1);
 	(void)offset;
-	if (strcmp(path, "/dev_codes") == 0) {
-		return ow.dump(buf);
-	}
 	if (strcmp(path, "/settings/log") == 0) {
 		std::sprintf(buf, "%d", (int)logger.get_level());
 			return std::strlen(buf);
@@ -373,6 +393,9 @@ static int fs_read(const char* path, char* buf, size_t size, off_t offset,
 	if (strcmp(path, "/settings/poll") == 0) {
 		std::sprintf(buf, "%d", ow.get_poll());
 		return std::strlen(buf);
+	}
+	if (strcmp(path, "/log/1wire.vcd") == 0) {
+		return ow.log_dump(buf, size);
 	}
 	if (extract_subpath(spath, "switches"))
 		return swHdl.fs_read(spath, buf, size);
@@ -399,26 +422,44 @@ static int fs_write(const char* path, const char* buf, size_t size,
 {
 	(void)offset;
 	if (strcmp(path, "/settings/log") == 0) {
+		try {
+			int tmp = std::stoi(buf);
+			if (tmp < 0 || tmp > 8)
+				return -EINVAL;
+		} catch (const std::invalid_argument&) {
+			return -EINVAL;
+		} catch (const std::out_of_range&) {
+			return -EINVAL;
+		}
 		uint8_t tmp = (uint8_t)(std::stoi(buf));
-		if (tmp > 8)
-			tmp = 8;
-		ow.set_log(tmp);
 		logger.set_level((LogLevel)tmp);
 		return size;
 	}
 	if (strcmp(path, "/settings/mode") == 0) {
-		uint8_t tmp = (uint8_t)(std::stoi(buf));
-		ow.set_mode(tmp);
-		return size;
+		try {
+			uint8_t tmp = (uint8_t)(std::stoi(buf));
+			ow.set_mode(tmp);
+			return size;
+		} catch (const std::invalid_argument&) {
+			return -EINVAL;
+		} catch (const std::out_of_range&) {
+			return -EINVAL;
+		}
 	}
 	if (strcmp(path, "/settings/poll") == 0) {
-		uint8_t tmp = (uint8_t)(std::stoi(buf));
-		ow.set_poll(tmp);
-		return size;
+		try {
+			uint8_t tmp = (uint8_t)(std::stoi(buf));
+			ow.set_poll(tmp);
+			return size;
+		} catch (const std::invalid_argument&) {
+			return -EINVAL;
+		} catch (const std::out_of_range&) {
+			return -EINVAL;
+		}
 	}
 	if (strcmp(path, "/settings/plugins") == 0) {
 		plugins.reload();
-		plugins.action(2, 0); // initialized
+		plugins.action(INITIALIZED, 0); // initialized
 	}
 	string spath(path);
 	spath.erase(0, 1);
@@ -436,7 +477,7 @@ static int fs_write(const char* path, const char* buf, size_t size,
 	if (extract_subpath(spath, "switches"))
 		return swHdl.fs_write(spath, buf, size);
 
-	return size;
+	return -ENOENT;
 }
 
 static void* init(struct fuse_conn_info*, struct fuse_config*)

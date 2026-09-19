@@ -15,7 +15,7 @@
         }
     ],
     "devices": [],
-    "log": 0,
+    "log": 3,
     "mode": 16,
     "plugins": {
         "example": {

@@ -76,23 +76,18 @@ int ds1820::fs_read(string& path, char* buf, size_t size, bool uncached)
  * No retry handling because the data might not so important as next cycle
  * will come
 */
-float ds1820::temp_read(const uint8_t mode)
+float ds1820::temp_read(const uint8_t flag)
 {
-#ifdef USE_I2C
 	bool ret;
-#endif
-	uint8_t scratchPad[9];
-	(void)mode;
 
 	std::lock_guard<std::mutex> m(ow->mtx);
-#ifdef USE_I2C
 	ret = ow->selectChannel(bus);
 	if (!ret) {
 		return -1;
 	}
 	ow->reset();
 	ow->select(addr);
-	switch (mode) {
+	switch (flag) {
 	case 0:
 		ow->write(STARTCONVO);
 		return 0;
@@ -124,7 +119,7 @@ float ds1820::temp_read(const uint8_t mode)
 		scratchPad[i] = ow->read();
 	if (scratchPad[1] == 0xff)
 		return -2;
-#else
+#ifndef USE_I2C
 	// dummy data for testing
 	scratchPad[0] = 0x50; // LSB
 	scratchPad[1] = 0x05; // MSB -> 85.00 °C
@@ -144,4 +139,19 @@ float ds1820::temp_read(const uint8_t mode)
 	temp = (float)raw / 16.0;
 
 	return temp;
+}
+
+int ds1820::poll()
+{
+	int poll = OwDev::poll();
+	if (poll == 1) {
+		float old = temp;
+		temp_read(0);
+		//logger.info ("#1 reading %s/%s %d ...\n", rom.c_str(), path.c_str(), ret);
+		temp_read(1);
+		if (temp != old)
+			logger.info (std::format("{} temp={} °, hum={} %", rom, temp, hum));
+		return 1;
+	}
+	return poll;
 }
