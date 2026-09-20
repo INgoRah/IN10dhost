@@ -29,10 +29,14 @@
 #include "ds2408.h"
 #include "switch_handler.h"
 #include "ard_i2c.h"
+#include "cli.h"
 
 Logger logger;
 
-#define GPIO_LINE 6  // Arduino Interrupt
+// The global Cli instance (cli) lives in cli.cpp: pure argv handling,
+// with no FUSE/GPIO/hardware dependency, so it's reachable from GTest
+// too (main.cpp itself is swapped out for test/main.cpp in TESTING
+// builds).
 struct gpiod_chip *chip;
 #ifdef GPIOD_V2
 struct gpiod_line_info *linfo;
@@ -64,69 +68,71 @@ void background_worker()
 {
 #ifdef USE_GPIO
 	struct pollfd fds[2];
-	int state;
-	Ard_i2c* arduino;
-	int tm = 0;
+	Ard_i2c* arduino = nullptr;
+	struct gpiod_edge_event_buffer *event_buffer = nullptr;
+	nfds_t nfds = 1;
+	// cli.gpio_pin == 0 (--gpio-pin=0), a failed setup_gpio(), or no Arduino
+	// device configured on the bus all mean "no GPIO edge fd to watch";
+	// the device-polling loop below is identical either way, it just
+	// doesn't get the extra fd to also watch for interrupts on.
+	if (cli.gpio_pin != 0 && line != nullptr) {
+		arduino = (Ard_i2c*)ow.find(0, 9, 0xAD);
+		if (!arduino) {
+			// TODO restart working after search
+			logger.warn("No arduino device, GPIO edge handling disabled");
+		} else {
+			event_buffer = gpiod_edge_event_buffer_new(16);
+			fds[1].fd = gpiod_line_request_get_fd(line);
+			nfds = 2;
+			logger.info("periodic worker started on GPIO pin " + std::to_string(cli.gpio_pin));
+		}
+	}
+	if (nfds == 1)
+		logger.info("periodic worker started, GPIO inactive");
 #else
 	struct pollfd fds[1];
+	const nfds_t nfds = 1;
+	logger.info("periodic worker started, built without GPIO support");
 #endif
+	fds[0].fd = wake_fd;
+
 	int ret;
+	int tm;
 	int timeout = ow.get_poll();
 
 	if (timeout == 0)
 		timeout = -1;
 	else
 		timeout *= 1000;
-#ifdef USE_GPIO
-	arduino = (Ard_i2c*)ow.find(0, 9, 0xAD);
-	if (!arduino) {
-		// TODO restart working after search
-		logger.warn("No arduino device");
-		return;
-	}
-#endif
-	// Setup the buffer before the loop
-	fds[0].fd = wake_fd;
-#ifdef USE_GPIO
-	struct gpiod_edge_event_buffer *event_buffer = gpiod_edge_event_buffer_new(16);
-	fds[1].fd = gpiod_line_request_get_fd(line);
-	logger.info("periodic worker started");
-#endif
-	while (running.load()) {
-		// periodic work
-		// setup 1 sec timer for polling
-#ifdef USE_GPIO
-		ret = 0;
-		state = gpiod_line_request_get_value(line, GPIO_LINE);
-		if (state == 1) {
 
-			fds[0].events = POLLIN;
+	while (running.load()) {
+		// Single, GPIO-independent device-polling cadence: block for up
+		// to the next due poll, then run it - identical whether GPIO is
+		// active, deactivated, or not built in at all. When GPIO *is*
+		// active, fds[1] rides along on the same poll() call so a wire
+		// interrupt is serviced immediately rather than waiting out tm.
+		tm = (timeout == -1) ? ow.poll_time() : std::min(ow.poll_time(), timeout);
+
+		fds[0].events = POLLIN;
+#ifdef USE_GPIO
+		if (nfds == 2)
 			fds[1].events = POLLIN | POLLERR;
-			// define next timeout for polling the devices, periodic second timer
-			if (timeout == -1)
-				tm = ow.poll_time();
-			else
-				tm = std::min(ow.poll_time(), timeout);
-			logger.verbose("Polling " + std::to_string(tm));
-			ret = poll(fds, 2, tm);
-			if (ret)
-				ds.log_event(STATE_EVENT, 0);
-		}
-		if (ret > 0 && (fds[1].revents & POLLIN)) {
-			logger.verbose("Poll " + std::to_string(ret) + " handled, GPIO state=" + std::to_string(state));
+#endif
+		ret = poll(fds, nfds, tm);
+
+#ifdef USE_GPIO
+		if (nfds == 2 && ret > 0 && (fds[1].revents & POLLIN)) {
+			logger.verbose("GPIO edge, servicing Arduino");
+			ds.log_event(STATE_EVENT, 0);
 			arduino->interrupt();
-			// READ THE EVENTS to clear the poll status
+			// clear the pending edge status
 			gpiod_line_request_read_edge_events(line, event_buffer, 16);
 		}
+#endif
 		if (ret == 0) {
 			ds.log_event(STATE_POLL, tm);
 			ow.poll();
 		}
-#else
-		ds.log_event(STATE_POLL, 0);
-		fds[0].events = POLLIN;
-		ret = poll(fds, 1, 5000);
-#endif
 		// External wake (CLI / FUSE)
 		if (ret > 0 && (fds[0].revents & POLLIN)) {
 			uint64_t v;
@@ -139,12 +145,18 @@ void background_worker()
 void setup_gpio()
 {
 #ifdef USE_GPIO
+	if (cli.gpio_pin == 0) {
+		logger.info("GPIO deactivated (--gpio-pin=0)");
+		return;
+	}
 	chip = gpiod_chip_open("/dev/gpiochip0");
-	if (!chip)
+	if (!chip) {
 		perror("gpiod_chip_open");
+		return;
+	}
 #ifdef GPIOD_V2
 	struct gpiod_line_config *cfg = gpiod_line_config_new();
-	static const unsigned int offsets = GPIO_LINE;
+	unsigned int offsets = (unsigned int)cli.gpio_pin;
 	struct gpiod_line_settings *settings;
 	settings = gpiod_line_settings_new();
 	gpiod_line_settings_set_direction(settings, GPIOD_LINE_DIRECTION_INPUT);
@@ -154,9 +166,15 @@ void setup_gpio()
 	/* Request line */
 	line = gpiod_chip_request_lines(chip, NULL, cfg);
 	gpiod_line_config_free(cfg);
+	if (!line) {
+		perror("gpiod_chip_request_lines");
+		gpiod_chip_close(chip);
+		chip = nullptr;
+		return;
+	}
 #else
 #error not tested/supported
-	line = gpiod_chip_get_line(chip, GPIO_LINE);  // GPIO number
+	line = gpiod_chip_get_line(chip, cli.gpio_pin);  // GPIO number
 	if (!line)
 		perror("gpiod_chip_get_line");
 	if (gpiod_line_request_both_edges_events(
@@ -165,8 +183,8 @@ void setup_gpio()
 		perror("gpiod_line_request");
 	}
 #endif
-	int state = gpiod_line_request_get_value(line, GPIO_LINE);
-	logger.debug("GPIO set up, state=" + std::to_string(state));
+	int state = gpiod_line_request_get_value(line, cli.gpio_pin);
+	logger.debug("GPIO set up on pin " + std::to_string(cli.gpio_pin) + ", state=" + std::to_string(state));
 #endif
 }
 
@@ -176,9 +194,6 @@ int setup()
 	wake_fd = eventfd(0, EFD_NONBLOCK);
 	ow.begin(&ds);
 	swHdl.begin(&ds);
-#ifdef USE_I2C_HOST
-#endif
-	//arduino.begin(&ow);
 
 	return 0;
 }
@@ -200,12 +215,32 @@ int main(int argc, char* argv[])
 
 	//std::signal(SIGSEGV, segfault_handler);
 	printf("Starting IN10dhost daemon %s...\n", __TIME__);
+	cli.parse(argc, argv);
+	if (cli.help_requested) {
+		// -h/--help was deliberately left in argv by cli.parse(), so
+		// fuse_main() below also prints its own help for FUSE's own
+		// options; skip everything else (RT priority, GPIO/DS2482/
+		// switch setup, the worker thread) since none of that matters
+		// for a --help invocation.
+		cli.print_help();
+		fs_init(&fs_ops);
+		return fuse_main(argc, argv, &fs_ops, nullptr);
+	}
+	logger.info("GPIO pin: " + std::to_string(cli.gpio_pin) + (cli.gpio_pin == 0 ? " (deactivated)" : ""));
+	if (cli.soft_start)
+		logger.info("Soft start requested"); // TODO: not yet acted on
 	enable_rt();
 	setup();
 
-	string f = std::filesystem::current_path();
+	string f;
+	if (cli.data_path.empty()) {
+		f = std::filesystem::current_path();
+		f = f + "/data.json";
+	} else {
+		f = cli.data_path;
+	}
+	logger.info("Data file: " + f);
 	logger.set_level(LogLevel::INFO);
-	f = f + "/data.json";
 	fs_init(&fs_ops);
 	try {
 		ow.load(f.c_str());
@@ -228,8 +263,10 @@ int main(int argc, char* argv[])
 		printf("worker stopping failed with an exception: %s\n", e.what());
 	}
 #ifdef USE_GPIO
-	gpiod_line_request_release(line);
-	gpiod_chip_close(chip);
+	if (line)
+		gpiod_line_request_release(line);
+	if (chip)
+		gpiod_chip_close(chip);
 #endif
 	try {
 		ow.save(f.c_str());
