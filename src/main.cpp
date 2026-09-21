@@ -75,8 +75,9 @@ void background_worker()
 	// device configured on the bus all mean "no GPIO edge fd to watch";
 	// the device-polling loop below is identical either way, it just
 	// doesn't get the extra fd to also watch for interrupts on.
+	arduino = (Ard_i2c*)ow.find(0, 9, 0xAD);
+	arduino->set_mode(0x10);
 	if (cli.gpio_pin != 0 && line != nullptr) {
-		arduino = (Ard_i2c*)ow.find(0, 9, 0xAD);
 		if (!arduino) {
 			// TODO restart working after search
 			logger.warn("No arduino device, GPIO edge handling disabled");
@@ -131,7 +132,8 @@ void background_worker()
 #endif
 		if (ret == 0) {
 			ds.log_event(STATE_POLL, tm);
-			ow.poll();
+			ow.dev_poll();
+			ow.alarm_poll();
 		}
 		// External wake (CLI / FUSE)
 		if (ret > 0 && (fds[0].revents & POLLIN)) {

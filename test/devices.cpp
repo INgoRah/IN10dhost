@@ -16,6 +16,7 @@
 
 extern OwDevices ow;
 extern DS2482 ds;
+extern SwitchHandler swHdl;
 
 #if 0
 class MockDS2482 : public DS2482 {
@@ -138,8 +139,8 @@ TEST_F(DevTest, Polling)
 	res = fs_ops.read("/28.0501FAFE6677A0/poll", buf, 5, 0, nullptr);
 	EXPECT_GT(res, 0);
 	EXPECT_STREQ(buf, "0");
-	ow.poll();
-	res = ow.poll();
+	ow.dev_poll();
+	res = ow.dev_poll();
 	// no polling (no device)
 	EXPECT_EQ(res, -1);
 
@@ -154,7 +155,7 @@ TEST_F(DevTest, Polling)
 	EXPECT_STREQ(buf, "1");
 	// let the device poll in between the seconds
 	// @500 ms
-	ow.poll();
+	ow.dev_poll();
 	res = ow.poll_time();
 	EXPECT_LE(res, 500);
 	usleep(250*1000);
@@ -163,14 +164,14 @@ TEST_F(DevTest, Polling)
 	res = ow.poll_time();
 	// remaining 250 not polling yet
 	EXPECT_LE(res, 250);
-	res = ow.poll();
+	res = ow.dev_poll();
 	// device still needs 500 ms till polling
 	EXPECT_EQ(res, 0);
 	usleep(250*1000);
 	res = ow.poll_time();
 	// @1000 ms
 	// seconds polling
-	res = ow.poll();
+	res = ow.dev_poll();
 	// TODO add a plugin action and check it is called or at least
 	// returning 1
 	//EXPECT_EQ(res, 1);
@@ -178,7 +179,7 @@ TEST_F(DevTest, Polling)
 	usleep(500*1000);
 	// @1500 ms
 	// device should poll now
-	res = ow.poll();
+	res = ow.dev_poll();
 	EXPECT_EQ(res, 1);
 	// now the remaining for the second
 	res = ow.poll_time();
@@ -186,7 +187,68 @@ TEST_F(DevTest, Polling)
 	usleep(500*1000);
 	res = ow.poll_time();
 	EXPECT_EQ(res, 0);
-	ow.poll();
+	ow.dev_poll();
+}
+
+TEST_F(DevTest, AlarmPoll)
+{
+	int res;
+	uint8_t saved_mode = swHdl.mode;
+
+	// disabled: cache.poll <= 0
+	ow.set_poll(0);
+	res = ow.alarm_poll();
+	EXPECT_EQ(res, -1);
+
+	// disabled: MODE_ALRAM_POLLING bit off, even with cache.poll set
+	ow.set_poll(1);
+	swHdl.mode &= ~MODE_ALRAM_POLLING;
+	res = ow.alarm_poll();
+	EXPECT_EQ(res, -1);
+
+	// enabled, but not due yet (init() just reset the internal timer)
+	swHdl.mode |= MODE_ALRAM_POLLING;
+	res = ow.alarm_poll();
+	EXPECT_EQ(res, 0);
+
+	// due: elapsed >= cache.poll (1s); runs alarmHandler() per bus and
+	// resets its own timer, so the very next call is "not due" again
+	usleep(1100 * 1000);
+	res = ow.alarm_poll();
+	EXPECT_GE(res, 0);
+	res = ow.alarm_poll();
+	EXPECT_EQ(res, 0);
+
+	swHdl.mode = saved_mode;
+}
+
+TEST_F(DevTest, BasePollPassthrough)
+{
+	// ds2408 has nothing to actively refresh on a timer and doesn't
+	// override poll(); the timing itself is decided by poll_check()
+	// alone (poll() is only ever called once poll_check() has just
+	// returned 1, so the base poll() has nothing left to check).
+	ow.update_device(0, "29.0300FDFF6677F9");
+	ow.update_data();
+	OwDev* dev = ow.find(0, 3, 0x29);
+	ASSERT_NE(dev, nullptr);
+
+	EXPECT_EQ(dev->poll_check(), -1); // no interval set yet
+
+	// the trailing ROM byte is a CRC that OwDev::update() recomputes on
+	// load, so the path actually served by FUSE isn't the literal
+	// string above; use the device's corrected rom for the path
+	std::string path = "/" + dev->rom + "/poll";
+	char buf[8] = "1";
+	int res = fs_ops.write(path.c_str(), buf, 1, 0, nullptr);
+	EXPECT_GT(res, 0);
+	// last_poll defaults to the clock epoch, so the very first check
+	// after setting a nonzero interval is immediately due
+	EXPECT_EQ(dev->poll_check(), 1);
+	EXPECT_EQ(dev->poll(), 1); // base poll(): nothing to actively do
+	EXPECT_EQ(dev->poll_check(), 0); // timer was reset by the check above
+	usleep(1100 * 1000);
+	EXPECT_EQ(dev->poll_check(), 1); // due again
 }
 
 TEST_F(DevTest, ds2482)
@@ -269,15 +331,16 @@ TEST_F(DevTest, ds2450)
 	EXPECT_GT(res, 0);
 	EXPECT_STREQ(buf2, "adc");
 
-	// drive the device-level poll() override: no interval set yet ->
-	// delegates straight to OwDev::poll()'s "no polling" (-1) path
-	EXPECT_EQ(dev->poll(), -1);
+	// drive the device-level polling: no interval set yet -> poll_check()
+	// reports "no polling" (-1), so poll() is never called
+	EXPECT_EQ(dev->poll_check(), -1);
 
-	// set a 1s interval and let it elapse so OwDev::poll() reports 1,
+	// set a 1s interval and let it elapse so poll_check() reports 1,
 	// driving ds2450::poll()'s own ADC-read branch
 	res = fs_ops.write((base + "/poll").c_str(), (char*)"1", 1, 0, nullptr);
 	EXPECT_GT(res, 0);
 	usleep(1100 * 1000);
+	EXPECT_EQ(dev->poll_check(), 1);
 	EXPECT_EQ(dev->poll(), 1);
 
 	// cached read (flag 2), only reachable by calling adc_read()

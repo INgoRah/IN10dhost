@@ -50,6 +50,9 @@ class OwDevices : public IDevices
 		uint8_t dev_vers[MAX_BUS][MAX_ADR];
 #endif
 		HrClock::time_point last_sec;
+		// independent cadence tracker for alarm_poll(), driven by
+		// cache.poll rather than the fixed 1-second tick last_sec uses
+		HrClock::time_point last_alarm_poll;
 		void init_busses();
 
 	public:
@@ -73,7 +76,16 @@ class OwDevices : public IDevices
 		 *  -1 for no polling
 		 */
 		int poll_time();
-		int poll();
+		// Per-device polling: runs the once-a-second plugin tick and
+		// walks cache.devices calling each dev->poll() on its own
+		// poll_interval-driven cycle (see poll_time()).
+		int dev_poll();
+		// Global, cache.poll-driven alarm polling: the periodic
+		// counterpart to GPIO-interrupt-driven alarm detection, for
+		// setups without (or in addition to) a wired interrupt line.
+		// No-op when cache.poll <= 0 or SwitchHandler's own
+		// MODE_ALRAM_POLLING bit is off.
+		int alarm_poll();
 
 		OwDev* find(const string& rom);
 		OwDev* find(uint64_t targetCode);

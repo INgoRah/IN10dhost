@@ -166,14 +166,11 @@ float ds2450::adc_get(uint8_t ch)
 	}
 }
 
+// Only ever called once poll_check() has just returned 1.
 int ds2450::poll()
 {
-	int poll = OwDev::poll();
-	if (poll == 1) {
-		if (adc_read(0, 0) != 0)
-			return EAGAIN;
-		volt_a = adc_read(0, 1);
-		return 1;
-	}
-	return poll;
+	if (adc_read(0, 0) != 0)
+		return EAGAIN;
+	volt_a = adc_read(0, 1);
+	return 1;
 }

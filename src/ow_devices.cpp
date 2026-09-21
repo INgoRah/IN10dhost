@@ -18,6 +18,7 @@ using json = nlohmann::json;
 
 Plugins plugins;
 Config cache;
+extern SwitchHandler swHdl;
 
 struct Device {
 	long long unsigned int romCode;
@@ -123,7 +124,8 @@ void OwDevices::init()
 	deviceCount = 0;
 	cache.devices.clear();
 	init_busses();
-	last_sec = HrClock::now();;
+	last_sec = HrClock::now();
+	last_alarm_poll = last_sec;
 }
 
 void OwDevices::begin(DS2482 *ds)
@@ -435,8 +437,8 @@ int OwDevices::poll_time()
 	}
 	// return remaining time in ms for the second timer
 	int sec = (int)(1000 - elapsed);
+
 	// check all devices for polling
-#if 1
 	for (auto& dev : cache.devices) {
 		int next = dev->poll_next();
 		if (next == 0) {
@@ -446,14 +448,13 @@ int OwDevices::poll_time()
 		if (next > 0 && next < next_timeout)
 	        next_timeout = std::min(next_timeout, next);
     }
-#endif
 	if (next_timeout == 60 * 1000)
 		// no device needs polling, return the seconds
 		return sec;
 	return std::min(next_timeout, sec);
 }
 
-int OwDevices::poll()
+int OwDevices::dev_poll()
 {
 	int ret = -1;
 	int cnt = 0;
@@ -463,22 +464,49 @@ int OwDevices::poll()
 	if (elapsed >= 1000) {
 		last_sec = now;
 		cnt = plugins.action(PERIODIC_SECOND);
+		ow->log_event('3',cnt);
 	}
-    for (auto& dev : cache.devices) {
-		int poll = dev->poll();
-		if (poll == 1)
+	for (auto& dev : cache.devices) {
+		int check = dev->poll_check();
+		if (check == 1) {
+			ow->log_event('4',0);
+			dev->poll();
 			cnt++; // at least one device polled
-		else if (poll == 0)
+		} else if (check == 0) {
 			ret = std::max(ret, 0);
+		}
 	}
-	// TODO add global polling using cache.poll
-	/*
-	if (cache.poll > 0 && elapsed >= cache.poll * 1000) {
-		for (int bus = 0; bus < MAX_BUS; bus++)
-			swHdl.alarmHandler(bus);
-	}
-	*/
 	if (cnt == 0)
 		return ret; // no device needs polling
+	return cnt;
+}
+
+// Global alarm polling, driven by cache.poll rather than any single
+// device's poll_interval: the periodic counterpart to GPIO-interrupt-
+// driven alarm detection (Ard_i2c::interrupt() -> alarmHandler()), for
+// setups without a wired interrupt line, or as a backstop against a
+// missed edge even when one is present.
+// Returns: -1 disabled (cache.poll <= 0, or SwitchHandler's own
+// MODE_ALRAM_POLLING bit is off), 0 not due yet, >=0 number of busses
+// that reported an alarm on this pass.
+int OwDevices::alarm_poll()
+{
+	if (cache.poll <= 0)
+		return -1;
+	if (!(swHdl.mode & MODE_ALRAM_POLLING))
+		return -1;
+	ow->log_event('5',0);
+
+	auto now = HrClock::now();
+	auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_alarm_poll).count();
+	if (elapsed < cache.poll * 1000)
+		return 0;
+	last_alarm_poll = now;
+
+	int cnt = 0;
+	for (int bus = 0; bus < 4; bus++) {
+		if (swHdl.alarmHandler(bus))
+			cnt++;
+	}
 	return cnt;
 }

@@ -21,6 +21,15 @@ class OwDev : IFs, public IDev {
 		uint16_t poll_interval;
 		uint8_t crc8(const uint8_t *addr, uint8_t len);
 	public:
+		// Timing check ("is it due?"), shared by every device type. When
+		// due, it also advances last_poll to schedule the next poll, so it
+		// may only be called once per cycle. Not virtual: derived classes
+		// never need to call or re-check their own parent class's poll()
+		// by name. OwDevices::dev_poll() calls this to decide whether to
+		// call poll() at all; poll() is only ever called once poll_check()
+		// has just returned 1, so poll() implementations never need to
+		// check it themselves.
+		int poll_check();
 		string rom;
 		uint64_t rom_code;
 		string type;

@@ -112,22 +112,34 @@ void OwDev::set_mode(int mode)
 	logger.verbose(std::format("Device rom={} mode={}", rom, mode));
 }
 
-int OwDev::poll()
+// "Is it due" query: -1 no polling configured, 0 not due yet, 1 due
+// now. When due, also advances last_poll to schedule the next poll -
+// so this may only be called once per cycle. OwDevices::dev_poll()
+// calls this to decide whether to call poll() at all; poll() is only
+// ever called once this has just returned 1, so poll() implementations
+// (and this default) never need to check it themselves.
+int OwDev::poll_check()
 {
 	if (poll_interval == 0)
 		// no polling
 		return -1;
-	// check whether it needs polling..
-	auto now = HrClock::now();
-	if (now - last_poll >= std::chrono::milliseconds(1000 * poll_interval)) {
-		// if yes set next poll time
-		last_poll = now;
-		// TODO do the actual polling action in the sub classes, e.g. read the state and update the cache
+	if (HrClock::now() - last_poll >= std::chrono::milliseconds(1000 * poll_interval)) {
+		last_poll = HrClock::now();
 		return 1;
 	}
 
-	// do nothing
+	// not due yet
 	return 0;
+}
+
+// Default poll(): only ever called once poll_check() has just
+// returned 1, so device types with nothing to actively refresh on a
+// timer (e.g. ds2408, whose PIO state is read/written on demand, not
+// polled) have nothing more to do here. Device types that DO need to
+// do something (ds1820, ds2450) override this to perform the action.
+int OwDev::poll()
+{
+	return 1;
 }
 
 int OwDev::poll_next()
