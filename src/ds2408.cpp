@@ -207,6 +207,8 @@ int ds2408::fs_write(string& path, const char* buf, size_t size)
 						return size;
 					}
 					if (path.find(sname) != string::npos) {
+						// coverity[sleep] - bus mutex must be held for the
+						// whole 1-Wire transaction; see latch_reset()
 						std::lock_guard<std::mutex> lock(ow->mtx);
 						// reset the latches
 						latch_reset();
@@ -295,10 +297,11 @@ uint8_t ds2408::pio_set(uint8_t pio)
 
 	logger.log(LogLevel::DEBUG, "set PIO " + std::to_string(pio) + " in mode " + std::to_string(mode));
 
+	// coverity[sleep] - bus mutex must be held for the whole 1-Wire
+	// transaction (reset/select/write/read + retries)
 	std::lock_guard<std::mutex> lock(ow->mtx);
 	retry = PIOSET_RETRY - 1;
 	do {
-		r = 0xff;
 		ret = ow->selectChannel(bus);
 		if (ret)
 			ret = ow->reset();
@@ -360,6 +363,8 @@ uint8_t ds2408::reg_read(bool latch_reset)
 	do {
 		//wdt_reset(); ??
 		/* read latch */
+		// coverity[sleep] - bus mutex must be held for the whole 1-Wire
+		// transaction
 		std::lock_guard<std::mutex> lock(ow->mtx);
 		ret = ow->selectChannel(bus);
 		if (ow->last_err == 0)
@@ -406,6 +411,8 @@ int ds2408::cfg_read()
 
 #ifdef USE_I2C
 	int i;
+	// coverity[sleep] - bus mutex must be held for the whole 1-Wire
+	// transaction
 	std::lock_guard<std::mutex> lock(ow->mtx);
 
 	if (!ow->selectChannel(bus))
@@ -427,6 +434,10 @@ int ds2408::cfg_write(int len)
 	if (len > CFG_SIZE)
 		len = CFG_SIZE;
 
+	// coverity[sleep] - bus mutex must be held for the whole 1-Wire
+	// transaction: the transfer needs exclusive access to the shared
+	// bus for its full duration, so releasing the lock mid-transfer
+	// isn't an option here
 	std::lock_guard<std::mutex> lock(ow->mtx);
 
 	if (!ow->selectChannel(bus))
@@ -458,6 +469,8 @@ uint8_t ds2408::level_set(uint8_t pio, uint8_t level, uint8_t cmd, uint8_t val)
 	if (level == 0 && cmd == 0xDD)
 		/* dim down */
 		data[1] = TMR_TYPE_STOP_DIM;
+	// coverity[sleep] - bus mutex must be held for the whole 1-Wire
+	// transaction
 	std::lock_guard<std::mutex> lock(ow->mtx);
 	if (!ow->selectChannel(bus))
 		return 0xff;

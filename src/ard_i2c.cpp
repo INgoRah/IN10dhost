@@ -235,7 +235,6 @@ void Ard_i2c::events(int fd)
 		buf[0] = 0xE2;
 		buf[1] = 0xA8;
 		i2c_write_data(fd, buf, 2);
-		act = 1;
 		delay_ms(1);
 		// act 2: read status
 		rbuf[0] = i2c_read(fd);
@@ -251,14 +250,12 @@ void Ard_i2c::events(int fd)
 			//printf("no event\n");
 			return;
 		}
-		act = 3;
-		// Request event data, CMD_EVT_DATA
+		// act 3: request event data, CMD_EVT_DATA
 		i2c_write(fd, 0x01);
 		cnt = 50;
 		do {
 			delay_ms(1);
-			act = 4;
-			// check for status STAT_BUSY = 0x1
+			// act 4: check for status STAT_BUSY = 0x1
 			rbuf[0] = i2c_read(fd);
 			if (rbuf[0] == 0xff)
 				continue;
@@ -421,7 +418,7 @@ int Ard_i2c::fs_write(string& path, const char* buf, size_t size)
 		uint8_t tmp = (uint8_t)(std::stoi(buf) & 0xff);
 		logger.log(LogLevel::DEBUG, "write " + path + ", set val=" + std::to_string(tmp));
 #ifdef USE_I2C
-		int fd = open("/dev/i2c-0", ARD_I2C_ADDR);
+		int fd = open("/dev/i2c-0", O_RDWR);
 		if (fd < 0)
 			return 0;
 		uint8_t buf[] = { 0xde, (uint8_t)(tmp & 0xff) };

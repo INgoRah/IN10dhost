@@ -80,6 +80,8 @@ float ds1820::temp_read(const uint8_t flag)
 {
 	bool ret;
 
+	// coverity[sleep] - bus mutex must be held for the whole 1-Wire
+	// transaction
 	std::lock_guard<std::mutex> m(ow->mtx);
 	ret = ow->selectChannel(bus);
 	if (!ret) {

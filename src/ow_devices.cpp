@@ -379,6 +379,8 @@ uint8_t OwDevices::search(bool mode)
 #endif
 
 	for (bus = 0; bus < 4; bus++) {
+		// coverity[sleep] - bus mutex must be held for the whole scan of
+		// this bus (potentially many devices deep)
 		std::lock_guard<std::mutex> lock(ow->mtx);
 		ret = ow->selectChannel(bus);
 		if (!ret) {

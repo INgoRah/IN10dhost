@@ -360,10 +360,10 @@ static int fs_open(const char* path, struct fuse_file_info*)
 		return 0;
 
 	int bus;
-	bool ret = extractBusNumber(spath, bus);
+	extractBusNumber(spath, bus);
 	extract_subpath(spath, "uncached");
 	string rom;
-	ret = extractRom(spath, rom);
+	bool ret = extractRom(spath, rom);
 	if (ret) {
 		const OwDev* dev = ow.find(rom);
 		if (dev) {

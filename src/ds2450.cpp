@@ -107,8 +107,9 @@ int16_t ds2450::adc_read(uint8_t ch, uint8_t flag)
 		return -1;
 	if (flag == 2)
 		return dat[ch];
-	uint16_t crc;
 
+	// coverity[sleep] - bus mutex must be held for the whole 1-Wire
+	// transaction
 	std::lock_guard<std::mutex> lock(ow->mtx);
 	if (!ow->selectChannel(bus))
 		return -1;
@@ -116,23 +117,40 @@ int16_t ds2450::adc_read(uint8_t ch, uint8_t flag)
 		return -1;
 	ow->select(addr);
 	if (flag == 0) {
-		ow->write(0x3c);
-		ow->write(ch+1);
+		uint8_t cmd[3] = { 0x3c, (uint8_t)(ch + 1), 0x55 };
+		ow->write(cmd[0]);
+		ow->write(cmd[1]);
 		// clear all
-		ow->write(0x55);
-		crc = ow->read();
-		crc |= ow->read() << 8;
+		ow->write(cmd[2]);
+		uint8_t inv_crc[2];
+		inv_crc[0] = ow->read();
+		inv_crc[1] = ow->read();
+		// logged, not treated as fatal: the exact CRC byte range for
+		// this command isn't verified against real hardware here
+		if (!ow->check_crc16(cmd, sizeof(cmd), inv_crc, 0))
+			logger.warn(rom + ": DS2450 convert command CRC mismatch");
 		return 0;
 	}
-	ow->write(0xAA);
-	ow->write(0x0);
-	ow->write(0x0);
+	uint8_t cmd[3] = { 0xAA, 0x0, 0x0 };
+	ow->write(cmd[0]);
+	ow->write(cmd[1]);
+	ow->write(cmd[2]);
+	uint8_t crc_buf[3 + 4 * 2];
+	crc_buf[0] = cmd[0];
+	crc_buf[1] = cmd[1];
+	crc_buf[2] = cmd[2];
 	for (int i = 0; i < 4; i++) {
-		dat[i] = ow->read();
-		dat[i] |= ow->read() << 8;
+		uint8_t lo = ow->read();
+		uint8_t hi = ow->read();
+		dat[i] = lo | (hi << 8);
+		crc_buf[3 + i * 2] = lo;
+		crc_buf[3 + i * 2 + 1] = hi;
 	}
-	crc = ow->read();
-	crc |= ow->read() << 8;
+	uint8_t inv_crc[2];
+	inv_crc[0] = ow->read();
+	inv_crc[1] = ow->read();
+	if (!ow->check_crc16(crc_buf, sizeof(crc_buf), inv_crc, 0))
+		logger.warn(rom + ": DS2450 read result CRC mismatch");
 
 	return dat[ch];
 }
