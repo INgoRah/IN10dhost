@@ -280,6 +280,8 @@ bool SwitchHandler::alarmHandler(uint8_t busNr)
 	if (ds == nullptr)
 		return false;
 	{
+		// coverity[sleep] - bus mutex must be held for the whole 1-Wire
+		// transaction
 		std::lock_guard<std::mutex> lock(ds->mtx);
 
 		ret = ds->selectChannel(busNr);
@@ -310,6 +312,8 @@ bool SwitchHandler::alarmHandler(uint8_t busNr)
 			printf("Error searching = %d\n", ds->last_err);
 #endif
 		{
+			// coverity[sleep] - bus mutex must be held for the whole
+			// 1-Wire search step
 			std::lock_guard<std::mutex> lock(ds->mtx);
 			srch = ds->search(adr, false);
 		}

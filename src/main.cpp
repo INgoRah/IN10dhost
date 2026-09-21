@@ -219,7 +219,8 @@ int main(int argc, char* argv[])
 	printf("fuse ended with %d\n", ret);
 	// trigger wake up of thread
 	uint64_t v = 1;
-	(void)write(wake_fd, &v, sizeof(v)); // Triggers fds[0]
+	if (write(wake_fd, &v, sizeof(v)) < 0) // Triggers fds[0]
+		perror("write wake_fd");
 	try {
 		running.store(false);
 		worker.join();
