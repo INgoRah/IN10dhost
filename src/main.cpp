@@ -76,7 +76,8 @@ void background_worker()
 	// the device-polling loop below is identical either way, it just
 	// doesn't get the extra fd to also watch for interrupts on.
 	arduino = (Ard_i2c*)ow.find(0, 9, 0xAD);
-	arduino->set_mode(0x10);
+	if (arduino)
+		arduino->set_mode(0x10);
 	if (cli.gpio_pin != 0 && line != nullptr) {
 		if (!arduino) {
 			// TODO restart working after search
@@ -190,14 +191,37 @@ void setup_gpio()
 #endif
 }
 
-int setup()
+string setup()
 {
+	string f;
+
 	setup_gpio();
 	wake_fd = eventfd(0, EFD_NONBLOCK);
-	ow.begin(&ds);
+
+	if (cli.data_path.empty()) {
+		f = std::filesystem::current_path();
+		f = f + "/data.json";
+	} else {
+		f = cli.data_path;
+	}
+	logger.info("Data file: " + f);
+	logger.set_level(LogLevel::INFO);
+	fs_init(&fs_ops);
+	// resets dev_list/cache.devices/timers to a clean slate; must run
+	// before load() populates them, not after (it would wipe out
+	// everything load() just loaded)
+	ow.init();
+	try {
+		ow.load(f.c_str());
+	}
+	catch (const std::exception& e) {
+		printf("loading failed %s\n" , e.what());
+		// create default config
+	}
+	ow.begin(&ds, cli.soft_start);
 	swHdl.begin(&ds);
 
-	return 0;
+	return f;
 }
 
 void enable_rt(void)
@@ -214,6 +238,7 @@ void enable_rt(void)
 int main(int argc, char* argv[])
 {
 	int ret;
+	string f;
 
 	//std::signal(SIGSEGV, segfault_handler);
 	printf("Starting IN10dhost daemon %s...\n", __TIME__);
@@ -232,25 +257,7 @@ int main(int argc, char* argv[])
 	if (cli.soft_start)
 		logger.info("Soft start requested"); // TODO: not yet acted on
 	enable_rt();
-	setup();
-
-	string f;
-	if (cli.data_path.empty()) {
-		f = std::filesystem::current_path();
-		f = f + "/data.json";
-	} else {
-		f = cli.data_path;
-	}
-	logger.info("Data file: " + f);
-	logger.set_level(LogLevel::INFO);
-	fs_init(&fs_ops);
-	try {
-		ow.load(f.c_str());
-	}
-	catch (const std::exception& e) {
-		printf("loading failed %s\n" , e.what());
-		// create default config
-	}
+	f = setup();
 	std::thread worker(background_worker);
 	ret = fuse_main(argc, argv, &fs_ops, nullptr);
 	printf("fuse ended with %d\n", ret);

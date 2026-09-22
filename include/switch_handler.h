@@ -9,6 +9,13 @@
 
 using std::string;
 
+// MAX_SWITCHES below needs MAX_BUS; don't rely on whoever includes
+// this header to have already defined it (switch_handler.cpp includes
+// this directly, without going through ow_devices.h first).
+#ifndef MAX_BUS
+#define MAX_BUS 4
+#endif
+
 /* config */
 #ifdef AVRSIM
 #define MAX_TIMER 2

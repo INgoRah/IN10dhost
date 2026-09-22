@@ -52,7 +52,6 @@ void from_json(const json& j, Bus& b) {
 void to_json(json& j, const Config& c) {
 	j = json {
 		{"version", 1},
-		{"mode", c.mode},
 		{"poll", c.poll},
 		{"bus_count", c.bus_count},
 		{"busses", c.busses},
@@ -100,7 +99,6 @@ void from_json(const json& j, Config& c) {
 	for (const auto& jdev : j.at("devices")) {
 		c.devices.push_back(make_device_from_json(jdev));
 	}
-	c.mode = j.at("mode").get<int>();
 	if (j.contains("poll"))
 		c.poll = j.at("poll").get<int>();
 }
@@ -128,14 +126,11 @@ void OwDevices::init()
 	last_alarm_poll = last_sec;
 }
 
-void OwDevices::begin(DS2482 *ds)
+void OwDevices::begin(DS2482 *ds, bool soft)
 {
 	ow = ds;
 
-	for (auto& dev : cache.devices) {
-		dev->begin(ds);
-	}
-    if (!ow->init()) {
+    if (!ds->init()) {
         printf("Failed to initialize DS2482\n");
 		return;
 	}
@@ -143,6 +138,16 @@ void OwDevices::begin(DS2482 *ds)
 	ow->resetDev();
 	ow->configureDev(DS2482_CONFIG_APU);
 #endif
+	// bus controller is up; safe to start hardware access on every
+	// already-loaded device (init() has already run on all of them)
+	begin(soft);
+}
+
+void OwDevices::begin(bool soft)
+{
+	for (auto& dev : cache.devices)
+		dev->begin(ow, soft);
+	plugins.action(DS_RUNNING, 0); // loaded
 }
 
 void OwDevices::init_busses()
@@ -151,15 +156,6 @@ void OwDevices::init_busses()
 	cache.bus_count = MAX_BUS;
 	for (int bus = 0;bus < MAX_BUS; bus++)
 		cache.busses.push_back(Bus{bus, 0, {}});
-}
-
-void OwDevices::set_mode(int mode)
-{
-	_mode = mode;
-	cache.mode = mode;
-
-	for (auto& dev : cache.devices)
-		dev->set_mode(mode);
 }
 
 int OwDevices::log_dump(char* buf, size_t size)
@@ -189,12 +185,16 @@ void OwDevices::load(const std::string& path) {
 		log = j.at("log").get<int>();
 		logger.set_level((LogLevel)log);
 	}
+	// init() every loaded device first (no hardware access), then only
+	// once all of them are initialized start hardware access via begin()
+	logger.verbose("init devs ...");
 	for (auto& dev : cache.devices) {
-		dev->begin(ow);
-		dev->update();
+		dev->init();
 	}
+	logger.verbose("init done!");
 	update_data();
-	plugins.action(INITIALIZED, 0); // loaded
+	logger.verbose("update data done!");
+	plugins.action(ACT_INITIALIZED, 0); // loaded
 }
 
 void OwDevices::save(const std::string& path) {
@@ -290,7 +290,7 @@ IDev* OwDevices::get_dev(uint64_t targetCode)
 }
 
 // called after scan or load to
-// update the caches
+// update the caches, no access is done
 void OwDevices::update_data()
 {
 	int bus;
@@ -311,7 +311,6 @@ void OwDevices::update_data()
 			}
 			cache.busses[dev->bus].devices.push_back(it->get());
 			add_device(it->get());
-			dev->set_mode(cache.mode);
 			++it; // Only increment if we didn't erase
 		} catch (const std::exception& e) {
 			logger.error("Error processing device: " + std::string(e.what()));
@@ -329,6 +328,7 @@ void OwDevices::update_data()
 void OwDevices::update_device(int bus, string rom) {
 	if (find(rom) != nullptr) {
 		logger.verbose(std::format("device {} already found", rom));
+		// dev->set_state(DS_RUNNING);
 		return;
 	}
 	OwDev* dev = nullptr;
@@ -351,8 +351,12 @@ void OwDevices::update_device(int bus, string rom) {
 	}
 	if (dev) {
 		dev->bus = bus;
-		dev->begin(ow);
-		dev->set_mode(_mode);
+		// no hardware access here - just config/state normalization and
+		// registration, so this device is findable via add_device()
+		// below. search()'s closing begin() sweep is what actually
+		// brings this (and only this, thanks to its state guard) device
+		// up afterwards.
+		dev->init();
 		logger.verbose(std::format("adding device {}", dev->rom));
 		add_device(dev);
 		// TODO update the bus cache as well
@@ -369,7 +373,7 @@ std::vector<OwDev*> OwDevices::list_devices(int bus)
 }
 
 // search devs
-uint8_t OwDevices::search(bool mode)
+void OwDevices::search(bool mode)
 {
 	char buf[18];
 	int pos;
@@ -393,17 +397,21 @@ uint8_t OwDevices::search(bool mode)
 #ifdef USE_I2C
 		while (ow->search(adr, mode)) {
 				res++;
-				sprintf(buf, "%02X.", adr[0]);
-				pos = 3;
-				for (int j = 1; j < 8; j++) {
-					sprintf(&buf[pos], "%02X", adr[j]);
-					pos += 2;
+				if (mode) {
+					sprintf(buf, "%02X.", adr[0]);
+					pos = 3;
+					for (int j = 1; j < 8; j++) {
+						sprintf(&buf[pos], "%02X", adr[j]);
+						pos += 2;
+					}
+					assert (pos < (int)sizeof(buf));
+					update_device(bus, buf);
 				}
-				assert (pos < (int)sizeof(buf));
-				update_device(bus, buf);
 		}
 #endif
 	}
+	if (!mode)
+		return;
 #ifndef USE_I2C
 	(void)mode;
 	uint8_t  adrt[8] = { 0x28, 0x5, 0x1, 0xFA, 0xFE, 0x66, 0x77, 0xC6};
@@ -422,8 +430,11 @@ uint8_t OwDevices::search(bool mode)
 	// dummy device for arduino
 	update_device(0, "AD.0900F8FF6677E2");
 	update_data();
+	// Every device discovered before has already been begin()'d
+	// Now also make sure, that new discovered devices are begin'd
+	begin();
 
-	return 1;
+	return;
 }
 
 int OwDevices::poll_time()
@@ -463,7 +474,7 @@ int OwDevices::dev_poll()
 	auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_sec).count();
 	if (elapsed >= 1000) {
 		last_sec = now;
-		cnt = plugins.action(PERIODIC_SECOND);
+		cnt = plugins.action(ACT_PERIODIC_SECOND);
 		ow->log_event('3',cnt);
 	}
 	for (auto& dev : cache.devices) {

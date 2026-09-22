@@ -23,6 +23,7 @@ OwDev::OwDev(std::string rom)
 	poll_interval = 0;
 	id = 0;
 	update();
+	state = DS_CREATED;
 }
 
 json OwDev::to_json() const
@@ -98,19 +99,29 @@ void OwDev::update()
 		id = addr[1];
 }
 
-void OwDev::begin(DS2482 *ds)
+// Called after scan/load, before any device's begin(); no hardware
+// access here. Guarded by `state` so repeated calls (e.g. a live bus
+// rescan revisiting an already-known device) only take effect once -
+// and, critically, never downgrade an already-DS_RUNNING device's state
+// back to DS_INIT, which would defeat begin()'s own once-only guard.
+void OwDev::init()
 {
+	if (state == DS_RUNNING)
+		return;
 	update();
-	std::lock_guard<std::mutex> lock(ds->mtx);
-	ow = ds;
-	logger.verbose(std::format("Device id={} type={}, rom={}  ({})  initialized ", id, type, rom, rom_code));
-};
-
-void OwDev::set_mode(int mode)
-{
-	this->mode = mode;
-	logger.verbose(std::format("Device rom={} mode={}", rom, mode));
+	state = DS_INIT;
 }
+
+void OwDev::begin(DS2482 *ds, bool soft)
+{
+	//std::lock_guard<std::mutex> lock(ds->mtx);
+	ow = ds;
+	if (state == DS_RUNNING || state == DS_STALE)
+		return;
+	begin(soft);
+	state = DS_RUNNING;
+	logger.verbose(std::format("Device id={} type={}, rom={}  ({}) begin done ", id, type, rom, rom_code));
+};
 
 // "Is it due" query: -1 no polling configured, 0 not due yet, 1 due
 // now. When due, also advances last_poll to schedule the next poll -

@@ -29,7 +29,6 @@ public:
 	json config_get() const {
 		json j;
 		j["enabled"] = true;
-		j["port"] = 8081;
 		// or if using a struct: j = this->mySettingsStruct;
 		return j;
 	}
@@ -47,13 +46,13 @@ public:
 	{
 		logger->info(std::format("Example plugin action={}, val={}", action, val));
 		switch (action) {
-			case 2: // initialized
+			case ACT_READY:
 			{
 				IDev* dev = devices->get_dev(0x290200FDFF6677F8);
 				if (dev) {
 					IDS2408* d = dynamic_cast<IDS2408*>(dev);
 					if (d) {
-						d->pio_set(1);
+						//d->pio_set(1);
 					}
 					d = nullptr;
 				}

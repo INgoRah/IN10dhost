@@ -352,8 +352,6 @@ static int fs_open(const char* path, struct fuse_file_info*)
 
 	if (strcmp(path, "/settings/log") == 0)
 		return 0;
-	if (strcmp(path, "/settings/mode") == 0)
-		return 0;
 	if (strcmp(path, "/settings/poll") == 0)
 		return 0;
 	if (strcmp(path, "/log/1wire.vcd") == 0)
@@ -385,10 +383,6 @@ static int fs_read(const char* path, char* buf, size_t size, off_t offset,
 	if (strcmp(path, "/settings/log") == 0) {
 		std::sprintf(buf, "%d", (int)logger.get_level());
 			return std::strlen(buf);
-	}
-	if (strcmp(path, "/settings/mode") == 0) {
-		std::sprintf(buf, "%d", ow.get_mode());
-		return std::strlen(buf);
 	}
 	if (strcmp(path, "/settings/poll") == 0) {
 		std::sprintf(buf, "%d", ow.get_poll());
@@ -435,17 +429,6 @@ static int fs_write(const char* path, const char* buf, size_t size,
 		logger.set_level((LogLevel)tmp);
 		return size;
 	}
-	if (strcmp(path, "/settings/mode") == 0) {
-		try {
-			uint8_t tmp = (uint8_t)(std::stoi(buf));
-			ow.set_mode(tmp);
-			return size;
-		} catch (const std::invalid_argument&) {
-			return -EINVAL;
-		} catch (const std::out_of_range&) {
-			return -EINVAL;
-		}
-	}
 	if (strcmp(path, "/settings/poll") == 0) {
 		try {
 			uint8_t tmp = (uint8_t)(std::stoi(buf));
@@ -459,7 +442,7 @@ static int fs_write(const char* path, const char* buf, size_t size,
 	}
 	if (strcmp(path, "/settings/plugins") == 0) {
 		plugins.reload();
-		plugins.action(INITIALIZED, 0); // initialized
+		plugins.action(ACT_INITIALIZED, 0); // initialized
 	}
 	string spath(path);
 	spath.erase(0, 1);

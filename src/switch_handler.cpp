@@ -349,8 +349,9 @@ int SwitchHandler::fs_attr(string& path) const
 
 int SwitchHandler::fs_open(string& path) const
 {
-	(void)path;
-	return 0;
+	if (path.find("list") != string::npos)
+		return 0;
+	return -ENOENT;
 }
 
 int SwitchHandler::fs_read(string& path, char* buf, size_t size, bool uncached)

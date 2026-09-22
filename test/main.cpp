@@ -41,8 +41,6 @@ TEST(main, LoadJson)
 	bool ok = false;
 	string f = std::filesystem::current_path();
 	LogLevel lvl = logger.get_level();
-	ow.begin(&ds);
-	ow.set_mode(0x10);
 	try {
 		ow.load("invalid.json");
 	}
@@ -53,6 +51,7 @@ TEST(main, LoadJson)
 	EXPECT_EQ(ok, true);
 
 	f = f + "/test/data.json";
+	ow.init();
 	try {
 		ow.load(f.c_str());
 		ok = true;
@@ -62,12 +61,38 @@ TEST(main, LoadJson)
 		ok = false;
 	}
 	EXPECT_EQ(ok, true);
+	ow.begin(&ds);
 	// set log level back if changed by test
 	logger.set_level(lvl);
 	ow.save(f);
 	// todo check if file exists
 	EXPECT_EQ(0, 0);
 	ow.init();
+}
+
+TEST(main, InitSequence)
+{
+	bool ok = false;
+	string f = std::filesystem::current_path();
+	LogLevel lvl = logger.get_level();
+	logger.set_level(LogLevel::VERBOSE);
+	logger.info("loading data");
+	f = f + "/test/devs_data.json";
+	try {
+		ow.load(f.c_str());
+		ok = true;
+	}
+	catch (const std::exception& e) {
+		logger.error(std::format("loading failed %s\n", e.what()));
+		ok = false;
+	}
+	logger.info("init ow");
+	ow.init();
+	logger.info("begin 1wire");
+	ow.begin(&ds);
+	EXPECT_EQ(ok, true);
+	// set log level back if changed by test
+	logger.set_level(lvl);
 }
 
 TEST(main, Logging)

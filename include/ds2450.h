@@ -12,7 +12,6 @@ class ds2450 : public OwDev, public IDS2450 {
 		using OwDev::OwDev;
 		using OwDev::type;
 			ds2450() {
-				mode = 0;
 				volt_a = 0.0f;
 				volt_b = 0.0f;
 				volt_c = 0.0f;
@@ -20,7 +19,6 @@ class ds2450 : public OwDev, public IDS2450 {
 				type = "ds2450";
 			};
 			ds2450(std::string rom) : OwDev(rom) {
-				mode = 0;
 				volt_a = 0.0f;
 				volt_b = 0.0f;
 				volt_c = 0.0f;

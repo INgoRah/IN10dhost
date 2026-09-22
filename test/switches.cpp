@@ -58,6 +58,7 @@ protected:
 		// 2.2 crc =d4
 		ow.update_device(adr[2], buf);
 		ow.update_data();
+		ow.begin(&ds);
 		swHdl.begin(&ds);
 	}
 };

@@ -6,7 +6,13 @@
 #include <thread>
 #include "logger.h"
 
-#define MAX_BUS 3
+// MAX_BUS is defined in ow_devices.h (guarded by #ifndef), not here:
+// this used to also define it as 3, which - since main.h is included
+// before ow_devices.h nearly everywhere - silently overrode the real
+// value (4) in most translation units. cache.busses/dev_list etc. are
+// all sized off the 4-bus definition, so a stale 3 here caused
+// out-of-bounds access (e.g. cache.busses[dev->bus] in update_data())
+// for any device actually found on the 4th bus.
 #define MAX_ADR 13
 
 typedef uint8_t byte;
