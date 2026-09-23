@@ -53,14 +53,91 @@ TEST(plugins, LoadPlugin)
 
 }
 
+// Loading the example is a no-op once it is already loaded, so calling
+// this keeps each test below independent of suite execution order.
+static void ensure_example_loaded()
+{
+	plugins.load(json{ { "example", json::object() } });
+}
+
 TEST(plugins, PluginActions)
 {
-	std::string f = std::filesystem::current_path();
+	ensure_example_loaded();
 
-	// set log level back if changed by test
-	// check plugin actually saved config
-	plugins.action(2, 0); // initialized
-	plugins.action(3, 0); // running
+	// Plugins::action() returns the sum over all loaded plugins, and
+	// the example reports 1 for the actions it handles - so a 1 here
+	// proves the event actually reached the plugin's action()
+	EXPECT_EQ(plugins.action(ACT_READY), 1);
+
+	// ... and 0 for everything it falls through to default on
+	EXPECT_EQ(plugins.action(ACT_CFG_LOAD), 0);
+	EXPECT_EQ(plugins.action(ACT_PERIODIC_SECOND), 0);
+}
+
+TEST(plugins, LoadSkipsAlreadyLoadedPlugin)
+{
+	ensure_example_loaded();
+	int once = plugins.action(ACT_READY);
+	EXPECT_EQ(once, 1);
+
+	// a repeated load must not create a second instance - which would
+	// show up as a doubled sum from action()
+	ensure_example_loaded();
+	EXPECT_EQ(plugins.action(ACT_READY), once);
+}
+
+TEST(plugins, ActionPayloadIsPassedThrough)
+{
+	ensure_example_loaded();
+
+	// the example reads rom/pio back out of the payload
+	json data = {
+		{ "bus", 0 },
+		{ "rom", "29.0200FDFF6677F8" },
+		{ "pio", 3 }
+	};
+	EXPECT_EQ(plugins.action(ACT_DEV_CHANGE, 0, &data), 1);
+
+	// data is optional: an action without a payload must be fine too
+	EXPECT_EQ(plugins.action(ACT_DEV_CHANGE, 0, nullptr), 1);
+	EXPECT_EQ(plugins.action(ACT_DEV_CHANGE, 0), 1);
+}
+
+TEST(plugins, PluginExceptionDoesNotEscape)
+{
+	ensure_example_loaded();
+
+	// "pio" as a string makes the example's value("pio", 0xff) throw a
+	// json type_error. Plugins::action() has to contain that: nothing
+	// further up (alarm handling, the poll loop, FUSE read/write)
+	// catches anything, so an escaping exception would terminate the
+	// whole daemon instead of just failing one plugin.
+	json bad = {
+		{ "rom", "29.0200FDFF6677F8" },
+		{ "pio", "not-a-number" }
+	};
+
+	LogLevel lvl = logger.get_level();
+	logger.set_level(LogLevel::NONE); // the failure is logged, expected
+	int ret = -1;
+	EXPECT_NO_THROW(ret = plugins.action(ACT_DEV_CHANGE, 0, &bad));
+	logger.set_level(lvl);
+
+	// the plugin threw instead of returning, so it contributes nothing
+	EXPECT_EQ(ret, 0);
+
+	// and the plugin is still usable for the next event
+	EXPECT_EQ(plugins.action(ACT_READY), 1);
+}
+
+TEST(plugins, ConfigRoundTrip)
+{
+	ensure_example_loaded();
+
+	json saved = plugins.save();
+	ASSERT_TRUE(saved.contains("example"));
+	// what Example::config_get() reports
+	EXPECT_EQ(saved["example"].value("enabled", false), true);
 }
 
 TEST(plugins, PluginSave)

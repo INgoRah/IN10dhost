@@ -563,6 +563,20 @@ bool OwDevices::alarmHandler(uint8_t busNr)
 			std::cerr << "Caught system error: " << e.what() << '\n';
 			std::cerr << "Error code: " << e.code() << '\n';
 		}
+		// hand the plugins the full device address; the bus number
+		// stays in val to match the documented ACT_ALARM_* contract
+		string rom = std::format("{:02X}.", adr[0]);
+		for (int i = 0; i < 8; i++) {
+			// same packing OwDev::rom_code uses, so a plugin can feed
+			// this straight into IDevices::get_dev()
+			if (i > 0)
+				rom += std::format("{:02X}", adr[i]);
+		}
+		json data = {
+			{"bus", busNr},
+			{"rom", rom}
+		};
+		plugins.action(ACT_ALARM_AFTER, busNr, &data);
 		cnt--;
 #ifdef USE_DEBUG
 		if (ds->last_err || cnt == 0)

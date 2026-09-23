@@ -7,6 +7,7 @@
 #include "ow_devices.h"
 #include "ard_i2c.h"
 #include "ds2408.h"
+#include "plugins.h"
 
 #define LATCH_RESET_RETRY 20
 /** Retries for activity latch reset */
@@ -14,6 +15,8 @@
 /** Retries for register read */
 #define REG_RETRY 20
 #define PIOSET_RETRY 20
+
+extern Plugins plugins;
 
 static struct filetype DS2408[] = {
 	{ "BYTE", 3 },
@@ -209,7 +212,7 @@ int ds2408::fs_write(string& path, const char* buf, size_t size)
 					if (path.find(sname) != string::npos) {
 						// coverity[sleep] - bus mutex must be held for the
 						// whole 1-Wire transaction; see latch_reset()
-						std::lock_guard<std::mutex> lock(ow->mtx);
+						std::lock_guard<std::mutex> lock(ds->mtx);
 						// reset the latches
 						latch_reset();
 						data[PIO_LATCH] = 0;
@@ -229,6 +232,7 @@ void ds2408::begin(bool soft)
 		return;
 	// if not soft read regs, cfg ...
 	reg_read(true);
+	// level_set
 }
 
 uint8_t ds2408::latch_reset()
@@ -241,23 +245,23 @@ uint8_t ds2408::latch_reset()
 	retry = LATCH_RESET_RETRY - 1;
 	do {
 		tmp = 0xff;
-		res = ow->reset();
-		if (res && ow->last_err == 0)
-			ow->select(addr);
-		if (ow->last_err == 0)
-			ow->write (0xC3);
-		if (ow->last_err == 0)
-			tmp = ow->read();
+		res = ds->reset();
+		if (res && ds->last_err == 0)
+			ds->select(addr);
+		if (ds->last_err == 0)
+			ds->write (0xC3);
+		if (ds->last_err == 0)
+			tmp = ds->read();
 #ifndef USE_I2C
 		return 0xaa;
 #else
 		if (tmp == 0xAA)
 			break;
-		if (ow->last_err != 0) {
-			err = ow->last_err;
+		if (ds->last_err != 0) {
+			err = ds->last_err;
 		}
 		if (err == 0)
-			err = ow->last_err;
+			err = ds->last_err;
 		delay(LATCH_RESET_RETRY - retry);
 #endif
 	} while (--retry > 0);
@@ -308,13 +312,13 @@ uint8_t ds2408::pio_set(uint8_t pio)
 	{
 	// coverity[sleep] - bus mutex must be held for the whole 1-Wire
 	// transaction (reset/select/write/read + retries)
-	std::lock_guard<std::mutex> lock(ow->mtx);
-	retry = PIOSET_RETRY - 1;
-	do {
+	std::lock_guard<std::mutex> lock(ds->mtx);
+		retry = PIOSET_RETRY - 1;
+		do {
 			ret = ds->selectChannel(bus);
-		if (ret)
+			if (ret)
 				ret = ds->reset();
-		if (ret)
+			if (ret)
 				ds->select(addr);
 			if (ds->last_err == 0)
 				ds->write (0x5A);
@@ -323,26 +327,32 @@ uint8_t ds2408::pio_set(uint8_t pio)
 			if (ds->last_err == 0)
 				ds->write (0xFF & ~(pio));
 			//if (ds->last_err == 0)
-		// lets try a pseudo read at least to avoid
-		// a hung dev
+			// lets try a pseudo read at least to avoid
+			// a hung dev
 			r = ds->read();
-#ifndef USE_I2C
-		r = 0xAA;
-#endif
-		if (r == 0xAA) {
-			data[PIO_OUT] = pio;
-			break;
-		}
-		if (err == 0)
+	#ifndef USE_I2C
+			r = 0xAA;
+	#endif
+			if (r == 0xAA) {
+				data[PIO_OUT] = pio;
+				break;
+			}
+			if (err == 0)
 				err = ds->last_err;
-		usleep(1000);
-	} while (--retry > 0);
-	// if err && retry > 0: err = 0
-	if (r == 0xAA) {
-		// success
-		latch_reset();
+			usleep(1000);
+		} while (--retry > 0);
+		// if err && retry > 0: err = 0
+		if (r == 0xAA) {
+			// success
+			latch_reset();
+		}
 	}
-	}
+	json data = {
+		{"bus", bus},
+		{"rom", rom.c_str()},
+		{"pio", pio}
+	};
+	plugins.action(ACT_DEV_CHANGE, 0, &data);
 
 	return r;
 }
@@ -461,6 +471,11 @@ int ds2408::cfg_write(int len)
 	return len;
 }
 
+/*
+	cmd:
+	- TMR_TYPE_BRIGHTNESS: set current brightness: level_set(0, 0, 0xE3, light)
+	- TMR_TYPE_THRESHOLD
+*/
 uint8_t ds2408::level_set(uint8_t pio, uint8_t level, uint8_t cmd, uint8_t val)
 {
 #ifdef USE_I2C

@@ -159,16 +159,33 @@ json Plugins::save()
 	return j;
 }
 
-int Plugins::action(int action, int val)
+int Plugins::action(int code, int val, const json* data)
 {
 	int ret;
+	ActionEvent ev{ code, val, data };
 
 	ret = 0;
 	for (auto plugin_ptr : plugins) {
-		logger.debug(std::format("plugin {} action: {}", plugin_ptr->name, action));
 		// depending on the action, we might want to skip some plugins or
 		// handle errors differently
-		ret += plugin_ptr->action(action, val);
+		//
+		// A plugin must never be able to take the daemon down. Nothing
+		// up the call chain (alarm handling, the poll loop, FUSE
+		// read/write) catches anything, so an exception escaping here
+		// would reach no handler at all and terminate the process -
+		// e.g. a json type_error from a mistyped value() default. Log
+		// it and carry on with the remaining plugins.
+		try {
+			ret += plugin_ptr->action(ev);
+		}
+		catch (const std::exception& e) {
+			logger.error(std::format("plugin {} action {} failed: {}",
+				plugin_ptr->name, code, e.what()));
+		}
+		catch (...) {
+			logger.error(std::format("plugin {} action {} failed with an unknown exception",
+				plugin_ptr->name, code));
+		}
 	}
 	return ret;
 }

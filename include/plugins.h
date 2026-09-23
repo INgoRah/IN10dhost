@@ -19,5 +19,8 @@ class Plugins {
 		int remove(string name);
 		int load(json j);
 		json save();
-		int action(int action, int val = 0);
+		/* Builds an ActionEvent and hands it to every loaded plugin.
+		   data, when given, must stay alive for the duration of the
+		   call - plugins are not allowed to retain it. */
+		int action(int code, int val = 0, const json* data = nullptr);
 };
