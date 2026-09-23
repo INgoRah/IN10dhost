@@ -44,7 +44,7 @@ Plugin* Plugins::plugin_init(string name)
 
 	f = exec_path / std::filesystem::path(std::string("lib") + name + ".so");
 	if (!fs::exists(f)) {
-		f = "/opt/lib/IN10dhost" / std::filesystem::path(std::string("lib") + name + ".so");
+		f = "/opt/lib/in10dfsd" / std::filesystem::path(std::string("lib") + name + ".so");
 		if (!fs::exists(f)) {
 			return nullptr;
 		}

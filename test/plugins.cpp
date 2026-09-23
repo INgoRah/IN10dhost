@@ -5,6 +5,7 @@
 #include <gtest/gtest.h>
 #include <gmock/gmock.h>
 #include <cstdlib> // Required for std::system
+#include <thread>
 
 #include "main.h"
 #include "ow_devices.h"
@@ -128,6 +129,112 @@ TEST(plugins, PluginExceptionDoesNotEscape)
 
 	// and the plugin is still usable for the next event
 	EXPECT_EQ(plugins.action(ACT_READY), 1);
+}
+
+// The scripting plugin is only built when quickjs was found at configure
+// time, so every test below has to cope with it being absent.
+static bool jsengine_available()
+{
+	return std::filesystem::exists(exec_path() / "libjsengine.so");
+}
+
+// Loads the jsengine plugin with a script written on the fly.
+//
+// Plugins::load() skips a plugin that is already loaded and there is no
+// API to swap its script afterwards, so every test has to share one
+// script that branches on the action code rather than loading its own.
+static void load_js_once()
+{
+	static std::string path;
+
+	if (!path.empty())
+		return;
+	path = (std::filesystem::current_path() / "test_engine.js").string();
+	std::ofstream(path) << R"JS(
+		function onAction(code, val, data) {
+			switch (code) {
+			case 3:                     /* ACT_READY */
+				return 7;
+			case 8:                     /* ACT_DEV_CHANGE */
+				return data ? data.pio : 0;
+			case 6:                     /* ACT_ALARM_BEFORE: throws */
+				throw new Error("boom");
+			case 7:                     /* ACT_ALARM_AFTER: never returns */
+				while (true) { }
+			}
+			return 0;
+		}
+	)JS";
+	plugins.load(json{ { "jsengine", { { "script", path } } } });
+}
+
+TEST(plugins, JsEngineRunsScript)
+{
+	if (!jsengine_available())
+		GTEST_SKIP() << "built without quickjs";
+
+	// what the script returns from onAction() is summed into the result
+	// along with every other plugin, so compare against a baseline
+	// instead of an absolute value
+	int base = plugins.action(ACT_READY);
+	load_js_once();
+	EXPECT_EQ(plugins.action(ACT_READY), base + 7);
+
+	// the payload really arrives as a JS object: the script reads
+	// data.pio back out of it and returns that
+	int dev_base = plugins.action(ACT_DEV_CHANGE, 0, nullptr);
+	json data = { { "rom", "29.0200FDFF6677F8" }, { "pio", 5 } };
+	EXPECT_EQ(plugins.action(ACT_DEV_CHANGE, 0, &data), dev_base + 5);
+}
+
+TEST(plugins, JsEngineFromOtherThread)
+{
+	if (!jsengine_available())
+		GTEST_SKIP() << "built without quickjs";
+
+	load_js_once();
+
+	// The engine is created on the thread that loads the config, but
+	// the daemon dispatches from the background poll worker and from
+	// the FUSE threads. QuickJS derives its stack limit from the stack
+	// pointer it saw at JS_NewRuntime(), so unless that top is re-based
+	// per thread every call from another thread fails with "Maximum
+	// call stack size exceeded".
+	int base = plugins.action(ACT_READY);
+	int other = 0;
+
+	std::thread t([&] { other = plugins.action(ACT_READY); });
+	t.join();
+
+	EXPECT_EQ(other, base);
+}
+
+TEST(plugins, JsEngineSurvivesBadScript)
+{
+	if (!jsengine_available())
+		GTEST_SKIP() << "built without quickjs";
+
+	load_js_once();
+	LogLevel lvl = logger.get_level();
+	logger.set_level(LogLevel::NONE); // the script errors are expected
+
+	// a script that throws must not escape into the daemon ...
+	EXPECT_NO_THROW(plugins.action(ACT_ALARM_BEFORE));
+	// ... and the engine stays usable for the next event
+	EXPECT_NO_THROW(plugins.action(ACT_READY));
+
+	// an endless loop is cut off by the engine's interrupt handler
+	// instead of hanging the daemon; if that regresses this hangs
+	auto start = std::chrono::steady_clock::now();
+	EXPECT_NO_THROW(plugins.action(ACT_ALARM_AFTER));
+	auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+		std::chrono::steady_clock::now() - start).count();
+	// it really ran and really got interrupted, rather than the script
+	// never having been reached at all
+	EXPECT_GE(ms, 100);
+	EXPECT_LT(ms, 5000);
+
+	logger.set_level(lvl);
 }
 
 TEST(plugins, ConfigRoundTrip)
