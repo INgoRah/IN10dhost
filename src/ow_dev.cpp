@@ -115,7 +115,7 @@ void OwDev::init()
 void OwDev::begin(DS2482 *ds, bool soft)
 {
 	//std::lock_guard<std::mutex> lock(ds->mtx);
-	ow = ds;
+	this->ds = ds;
 	if (state == DS_RUNNING || state == DS_STALE)
 		return;
 	begin(soft);

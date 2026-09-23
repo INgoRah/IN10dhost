@@ -54,8 +54,8 @@ int ds1820::fs_read(string& path, char* buf, size_t size, bool uncached)
 		return std::strlen(buf);
 	}
 	if (path.find("temperature") != string::npos) {
-		//std::unique_lock<std::mutex> mtx(ow->mtx, std::defer_lock);
-		//std::unique_lock<std::mutex> mtx(ow->mtx);
+		//std::unique_lock<std::mutex> mtx(ds->mtx, std::defer_lock);
+		//std::unique_lock<std::mutex> mtx(ds->mtx);
 		if (uncached) {
 			temp_read(0);
 			//logger.info ("#1 reading %s/%s %d ...\n", rom.c_str(), path.c_str(), ret);
@@ -82,28 +82,28 @@ float ds1820::temp_read(const uint8_t flag)
 
 	// coverity[sleep] - bus mutex must be held for the whole 1-Wire
 	// transaction
-	std::lock_guard<std::mutex> m(ow->mtx);
-	ret = ow->selectChannel(bus);
+	std::lock_guard<std::mutex> m(ds->mtx);
+	ret = ds->selectChannel(bus);
 	if (!ret) {
 		return -1;
 	}
-	ow->reset();
-	ow->select(addr);
+	ds->reset();
+	ds->select(addr);
 	switch (flag) {
 	case 0:
-		ow->write(STARTCONVO);
+		ds->write(STARTCONVO);
 		return 0;
 	case 2:
-		ow->write(WRITESCRATCH);
-		ow->write(35); // high alarm temp
-		ow->write(10); // low alarm temp
+		ds->write(WRITESCRATCH);
+		ds->write(35); // high alarm temp
+		ds->write(10); // low alarm temp
 		return 0;
 	case 1:
 	default:
 		/* read temp */
 		break;
 	}
-	ow->write(READSCRATCH);
+	ds->write(READSCRATCH);
 	// Read all registers in a simple loop
 	// byte 0: temperature LSB
 	// byte 1: temperature MSB
@@ -118,7 +118,7 @@ float ds1820::temp_read(const uint8_t flag)
 	//         DS18B20 & DS1822: store for crc
 	// byte 8: SCRATCHPAD_CRC
 	for (uint8_t i = 0; i < 9; i++)
-		scratchPad[i] = ow->read();
+		scratchPad[i] = ds->read();
 	if (scratchPad[1] == 0xff)
 		return -2;
 #ifndef USE_I2C

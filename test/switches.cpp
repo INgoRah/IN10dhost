@@ -134,9 +134,9 @@ TEST_F(SwTest, switching)
 	dst.da.adr = 0x7f;
 	EXPECT_EQ(swHdl.actor_handle(dst, TOGGLE), false);
 
-	// alarmHandler() is a no-op under USE_I2C=OFF, never called from
-	// anywhere else in this build
-	EXPECT_EQ(swHdl.alarmHandler(0), false);
+	// alarmHandler() now lives on OwDevices; it is a no-op under
+	// USE_I2C=OFF, never called from anywhere else in this build
+	EXPECT_EQ(ow.alarmHandler(0), false);
 }
 
 TEST_F(SwTest, FsSwitches)

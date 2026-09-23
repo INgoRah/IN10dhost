@@ -305,26 +305,27 @@ uint8_t ds2408::pio_set(uint8_t pio)
 
 	logger.log(LogLevel::DEBUG, "set PIO " + std::to_string(pio));
 
+	{
 	// coverity[sleep] - bus mutex must be held for the whole 1-Wire
 	// transaction (reset/select/write/read + retries)
 	std::lock_guard<std::mutex> lock(ow->mtx);
 	retry = PIOSET_RETRY - 1;
 	do {
-		ret = ow->selectChannel(bus);
+			ret = ds->selectChannel(bus);
 		if (ret)
-			ret = ow->reset();
+				ret = ds->reset();
 		if (ret)
-			ow->select(addr);
-		if (ow->last_err == 0)
-			ow->write (0x5A);
-		if (ow->last_err == 0)
-			ow->write (pio);
-		if (ow->last_err == 0)
-			ow->write (0xFF & ~(pio));
-		//if (ow->last_err == 0)
+				ds->select(addr);
+			if (ds->last_err == 0)
+				ds->write (0x5A);
+			if (ds->last_err == 0)
+				ds->write (pio);
+			if (ds->last_err == 0)
+				ds->write (0xFF & ~(pio));
+			//if (ds->last_err == 0)
 		// lets try a pseudo read at least to avoid
 		// a hung dev
-		r = ow->read();
+			r = ds->read();
 #ifndef USE_I2C
 		r = 0xAA;
 #endif
@@ -333,7 +334,7 @@ uint8_t ds2408::pio_set(uint8_t pio)
 			break;
 		}
 		if (err == 0)
-			err = ow->last_err;
+				err = ds->last_err;
 		usleep(1000);
 	} while (--retry > 0);
 	// if err && retry > 0: err = 0
@@ -341,6 +342,8 @@ uint8_t ds2408::pio_set(uint8_t pio)
 		// success
 		latch_reset();
 	}
+	}
+
 	return r;
 }
 
@@ -371,33 +374,31 @@ uint8_t ds2408::reg_read(bool latch_reset)
 	do {
 		//wdt_reset(); ??
 		/* read latch */
-		std::lock_guard<std::mutex> lock(ow->mtx);
-		// coverity[sleep] - bus mutex must be held for the whole 1-Wire
-		// transaction
-		ret = ow->selectChannel(bus);
-		if (ow->last_err == 0)
-			ret = ow->reset();
-		if (ret && ow->last_err == 0)
-			ow->select(addr);
-		if (ow->last_err == 0)
-			ow->write (buf, 3, 0);
+		std::lock_guard<std::mutex> lock(ds->mtx);
+		ret = ds->selectChannel(bus);
+		if (ds->last_err == 0)
+			ret = ds->reset();
+		if (ret && ds->last_err == 0)
+			ds->select(addr);
+		if (ds->last_err == 0)
+			ds->write (buf, 3, 0);
 		// 3 cmd bytes, 6 data bytes, 2 0xFF, 2 CRC16
 		// 1:
 		// try this: alway read not running into a watchdog
 		// on the slave
-		// if (ow->last_err == 0)
+		// if (ds->last_err == 0)
 #ifdef USE_I2C
-		ow->read (data, 10);
+		ds->read (data, 10);
 #else
 		uint8_t dummy[10];
-		ow->read (dummy, 10);
+		ds->read (dummy, 10);
 #endif
 		/* check for valid status register */
 		data[STAT] = 0x00;
 		if (data[STAT] != 0xff)
 			break;
 		if (err == 0)
-			err = ow->last_err;
+			err = ds->last_err;
 		// if we got here, there is an issue and we
 		// will try again
 		//delay(5);
@@ -421,16 +422,16 @@ int ds2408::cfg_read()
 	int i;
 	// coverity[sleep] - bus mutex must be held for the whole 1-Wire
 	// transaction
-	std::lock_guard<std::mutex> lock(ow->mtx);
+	std::lock_guard<std::mutex> lock(ds->mtx);
 
-	if (!ow->selectChannel(bus))
+	if (!ds->selectChannel(bus))
 		return -1;
-	ow->reset();
-	ow->select(addr);
-	ow->write (0x85);
+	ds->reset();
+	ds->select(addr);
+	ds->write (0x85);
 
 	for (i = 0; i < CFG_SIZE - 1; i++)
-		cfg[i] = ow->read ();
+		cfg[i] = ds->read ();
 #endif
 	return len;
 }
@@ -446,16 +447,16 @@ int ds2408::cfg_write(int len)
 	// transaction: the transfer needs exclusive access to the shared
 	// bus for its full duration, so releasing the lock mid-transfer
 	// isn't an option here
-	std::lock_guard<std::mutex> lock(ow->mtx);
+	std::lock_guard<std::mutex> lock(ds->mtx);
 
-	if (!ow->selectChannel(bus))
+	if (!ds->selectChannel(bus))
 		return -1;
-	ow->reset();
-	ow->select(addr);
-	ow->write (0x86);
+	ds->reset();
+	ds->select(addr);
+	ds->write (0x86);
 
 	for (i = 0; i < len - 1; i++)
-		ow->write(cfg[i]);
+		ds->write(cfg[i]);
 
 	return len;
 }
@@ -479,24 +480,24 @@ uint8_t ds2408::level_set(uint8_t pio, uint8_t level, uint8_t cmd, uint8_t val)
 		data[1] = TMR_TYPE_STOP_DIM;
 	// coverity[sleep] - bus mutex must be held for the whole 1-Wire
 	// transaction
-	std::lock_guard<std::mutex> lock(ow->mtx);
-	if (!ow->selectChannel(bus))
+	std::lock_guard<std::mutex> lock(ds->mtx);
+	if (!ds->selectChannel(bus))
 		return 0xff;
-	if (!ow->reset())
+	if (!ds->reset())
 		return 0xff;
 
-	ow->select(addr);
+	ds->select(addr);
 	for (int i = 0; i < 5; i++) {
-		ow->write(data[i]);
-		if (ow->last_err != 0)
+		ds->write(data[i]);
+		if (ds->last_err != 0)
 			break;
 	}
-	//if (ow->last_err == 0)
+	//if (ds->last_err == 0)
 	// lets try a pseudo read at least to avoid
 	// a hung dev
-	crc = ow->read();
-	crc |= ow->read() << 8;
-	uint16_t crc16 = ow->crc16(data, 5, 0);
+	crc = ds->read();
+	crc |= ds->read() << 8;
+	uint16_t crc16 = ds->crc16(data, 5, 0);
 	if (crc == static_cast<uint16_t>(~crc16))
 		return 0xAA;
 

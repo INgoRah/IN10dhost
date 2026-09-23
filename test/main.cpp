@@ -75,7 +75,6 @@ TEST(main, InitSequence)
 	bool ok = false;
 	string f = std::filesystem::current_path();
 	LogLevel lvl = logger.get_level();
-	logger.set_level(LogLevel::VERBOSE);
 	logger.info("loading data");
 	f = f + "/test/devs_data.json";
 	try {
