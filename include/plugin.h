@@ -8,13 +8,13 @@ using json = nlohmann::json;
 using std::string;
 
 enum action_code {
-	CONFIG_LOAD = 0,
-	CONFIG_SAVE = 1,
-	INITIALIZED = 2,
-	PERIODIC_SECOND = 3,
-	PERIODIC_MINUTE = 4,
-	ALARM_BEFORE = 5,
-	ALARM_AFTER = 6
+	ACT_CFG_LOAD = 0,
+	ACT_CFG_SAVE = 1,
+	ACT_INITIALIZED = 2,
+	ACT_READY = 3,
+	ACT_PERIODIC_SECOND = 4,
+	ACT_ALARM_BEFORE = 6,
+	ACT_ALARM_AFTER = 7
 };
 class Plugin {
 public:
@@ -32,13 +32,13 @@ public:
 		0 - config load
 		1 - config save
 		2 - initialized (after init and plugins_init)
-		3 - every second (for regular tasks)
-		4 - every minute
-		5 - on alarm (before default handling), val = bus number
+		3 - devices ready for access
+		4 - every second (for regular tasks)
+		6 - on alarm (before default handling), val = bus number
 	     returns 0 for ok and no action
 			< 0 for error
 			> 0 for more action needed (e.g. updating)
-		6 - on alarm (after default handling), val = bus number
+		7 - on alarm (after default handling), val = bus number
 		 returns:
 			1 - for error, no further action, abort
 			0 - ok, nothing done and continue processing alarms (default)

@@ -43,6 +43,20 @@ static struct filetype ArdI2c[] = {
 	{ "int_avg", 6 },
 };
 
+json Ard_i2c::to_json() const {
+	json j = OwDev::to_json(); // Get base class fields
+	j["mode"] = mode; // Add specific field
+
+	return j;
+};
+
+void Ard_i2c::from_json(const json& j) {
+	OwDev::from_json(j); // Delegate common fields to base
+	if (j.contains("mode")) {
+		j.at("mode").get_to(mode);
+	}
+}
+
 Ard_i2c::Ard_i2c()
 {
 	lastSeq = 0xff;
@@ -133,9 +147,9 @@ int i2c_write_data(int fd, uint8_t* buf, uint16_t size)
 }
 #endif
 
-int Ard_i2c::begin(OwDevices* ow)
+void Ard_i2c::begin(bool soft)
 {
-	this->ow = ow;
+	(void)soft;
 	logger.info("starting arduino");
 #ifdef USE_I2C
 #if 0
@@ -148,7 +162,7 @@ int Ard_i2c::begin(OwDevices* ow)
 	close(ad_fd);
 #endif
 #endif
-	return 0;
+	set_mode(mode);
 }
 
 void Ard_i2c::end()
@@ -157,7 +171,7 @@ void Ard_i2c::end()
 
 void Ard_i2c::set_mode(int mode)
 {
-	OwDev::set_mode(mode);
+	this->mode = mode;
 #ifdef USE_I2C
 	int fd = open("/dev/i2c-0", O_RDWR);
 	if (fd < 0) {
@@ -213,12 +227,15 @@ void Ard_i2c::interrupt() {
 
 		return;
 	}
+#if 0
 	events(fd);
 	close(fd);
 #endif
+#endif
 }
 
-void Ard_i2c::events(int fd)
+#if 0
+void Ard_i2c::events(int fd, OwDevices* ow)
 {
 #ifdef USE_I2C
 	uint8_t rbuf[10];
@@ -325,7 +342,7 @@ void Ard_i2c::events(int fd)
 		*/
 		// updateOwState(t, b, a, press, latch, d); // Call your logic here
 		// find by bus and device id
-		OwDev* dev = ow->find(rbuf[1], rbuf[2], 0xff);
+		OwDev* dev = owner->find(rbuf[1], rbuf[2], 0xff);
 		if (dev) {
 			uint8_t type = rbuf[0];
 			switch (type) {
@@ -352,6 +369,7 @@ void Ard_i2c::events(int fd)
 	(void)fd;
 #endif
 }
+#endif
 
 std::vector<std::string> Ard_i2c::fs_dir(string& path) const
 {

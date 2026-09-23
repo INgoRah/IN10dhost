@@ -114,6 +114,7 @@ endif()
 # ----------------------------
 add_executable(IN10dfsd
     src/logger.cpp
+    src/cli.cpp
     src/fs.cpp
     src/ard_i2c.cpp
     src/ds2482.cpp
@@ -134,6 +135,7 @@ if(TESTING)
         test/devices.cpp
         test/switches.cpp
         test/plugins.cpp
+        test/cli.cpp
     )
     set(test GTest::gtest_main)
 

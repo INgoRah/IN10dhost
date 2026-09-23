@@ -8,10 +8,10 @@ int i2c_read_data(int fd, uint8_t* buf, uint16_t size);
 
 class Ard_i2c : public OwDev{
 	private:
-		OwDevices* ow;
 		// Assuming ad_fd and other globals are defined elsewhere
 		uint8_t lastSeq;
 		int power;
+		int mode;
 		// running min/max/average of how long interrupt handling takes,
 		// tracked across the lifetime of the daemon; exposed via fs_read
 		std::chrono::milliseconds min_dur{std::chrono::milliseconds::max()};
@@ -27,14 +27,18 @@ class Ard_i2c : public OwDev{
 		using OwDev::type;
 		Ard_i2c();
 		Ard_i2c(std::string rom);
-		void set_mode(int mode) override;
+		json to_json() const override;
+		virtual void from_json(const json& j);
+		void set_mode(int mode);
 		std::vector<string> fs_dir(string& path) const override;
 		int fs_attr(string& path) const override;
 		int fs_read(string& path, char* buf, size_t size, bool uncached = false) override;
 		int fs_write(string& path, const char* buf, size_t size) override;
 
-		int begin(OwDevices* ow);
+		void begin(bool soft=false) override;
 		void end();
-		void events(int fd);
+#if 0
+		void events(int fd, OwDevices* ow);
+#endif
 		void interrupt();
 };

@@ -36,10 +36,12 @@ TEST(plugins, LoadPlugin)
 	string s = std::format("touch {}/libinvalid.so", exec_path().string());
 	std::system(s.c_str());
 	f = f + "/test/plugin.json";
-	logger.set_level(LogLevel::NONE);
 	try {
+		logger.error("loading json with plugin");
 		ow.load(f.c_str());
 		logger.set_level(lvl);
+		logger.error("begin with plugin");
+		ow.begin(&ds);
 		ok = true;
 	}
 	catch (const std::exception& e) {
@@ -48,6 +50,17 @@ TEST(plugins, LoadPlugin)
 		ok = false;
 	}
 	EXPECT_EQ(ok, true);
+
+}
+
+TEST(plugins, PluginActions)
+{
+	std::string f = std::filesystem::current_path();
+
+	// set log level back if changed by test
+	// check plugin actually saved config
+	plugins.action(2, 0); // initialized
+	plugins.action(3, 0); // running
 }
 
 TEST(plugins, PluginSave)
@@ -58,7 +71,6 @@ TEST(plugins, PluginSave)
 	// check plugin actually saved config
 	ow.save(f);
 	ow.begin(&ds);
-	plugins.action(2, 0); // initialized
 }
 
 TEST(plugins, LoadPluginCopyFailure)

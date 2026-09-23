@@ -1,5 +1,5 @@
 {
-    "bus_count": 3,
+    "bus_count": 4,
     "busses": [
         {
             "dev_count": 0,
@@ -12,15 +12,17 @@
         {
             "dev_count": 0,
             "id": 2
+        },
+        {
+            "dev_count": 0,
+            "id": 3
         }
     ],
     "devices": [],
     "log": 3,
-    "mode": 16,
     "plugins": {
         "example": {
-            "enabled": true,
-            "port": 8081
+            "enabled": true
         }
     },
     "poll": 0,

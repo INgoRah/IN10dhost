@@ -23,11 +23,9 @@
             "type": "ds2408"
         }
    ],
-    "mode": 0,
     "plugins": {
         "example": {
-            "enabled": true,
-            "port": 8081
+            "enabled": true
         },
         "invalid" : {},
         "notfound" : {},

@@ -1,6 +1,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <algorithm>
+#include <vector>
 #include <fuse3/fuse.h>
 
 #include <gtest/gtest.h>
@@ -39,7 +41,6 @@ protected:
 		fs_init(&fs_ops);
 		ow.init();
 		ow.begin(&ds);
-		ow.set_mode(0x10);
 	}
 };
 
@@ -105,8 +106,12 @@ TEST_F(FsTest, GetDS1820Devices) {
 	int res;
 	struct stat st;
 
+	LogLevel lvl = logger.get_level();
+	logger.set_level(LogLevel::VERBOSE);
+
 	ow.update_device(1, "28.0501FAFE6677A0");
 	ow.update_data();
+	logger.verbose("data updated");
 	res = fs_ops.readdir("/28.0501FAFE6677A0", buf, filler, 0, nullptr, (enum fuse_readdir_flags)0);
 	EXPECT_EQ(res, 0);
 	res = fs_ops.open("/28.0501FAFE6677A0/temperature", nullptr);
@@ -123,11 +128,15 @@ TEST_F(FsTest, GetDS1820Devices) {
 	EXPECT_EQ(st.st_size, 4);
 	res = fs_ops.read("/28.0501FAFE6677A0/humidity", buf, 32, 0, nullptr);
 	EXPECT_GT(res, 0);
-
 	res = fs_ops.getattr("/bus.1/28.0501FAFE6677A0/temperature", &st, nullptr);
 	EXPECT_EQ(res, 0);
 	EXPECT_TRUE(S_ISREG(st.st_mode));
+	logger.error("read");
+	// uncached is accessing the device
+	ow.begin(&ds);
 	res = fs_ops.read("/uncached/28.0501FAFE6677A0/temperature", buf, 32, 0, nullptr);
+	// set log level back if changed by test
+	logger.set_level(lvl);
 #if 0
 	EXPECT_EQ(res, 2);
 	res = fs_ops.getattr("/28.0501FAFE6677A0/humidity", &st, nullptr);
@@ -242,6 +251,8 @@ TEST_F(FsTest, DevDirs) {
 	EXPECT_TRUE(S_ISREG(st.st_mode));
 	res = fs_ops.read("/29.0701F8FE6677F4/cfg", buf, 32, 0, nullptr);
 	EXPECT_GE(res, 0);
+	// uncached is accessing the device
+	ow.begin(&ds);
 	res = fs_ops.read("/uncached/29.0701F8FE6677F4/cfg", buf, 32, 0, nullptr);
 	EXPECT_GE(res, 0);
 
@@ -531,19 +542,6 @@ TEST_F(FsTest, SettingsDirectoryAttr) {
 
 	logger.set_level(prev_lvl);
 
-	res = fs_ops.getattr("/settings/mode", &st, nullptr);
-	EXPECT_EQ(res, 0);
-	EXPECT_TRUE(S_ISREG(st.st_mode));
-	res = fs_ops.open("/settings/mode",  nullptr);
-	EXPECT_EQ(res, 0);
-	res = fs_ops.read("/settings/mode", buf, 2, 0, nullptr);
-	EXPECT_EQ(res, 2);
-	buf[0] = '1';
-	buf[1] = '6';
-	buf[2] = '\0';
-	res = fs_ops.write("/settings/mode", buf, 3, 0, nullptr);
-	EXPECT_EQ(res, 3);
-
 	res = fs_ops.getattr("/settings/poll", &st, nullptr);
 	EXPECT_EQ(res, 0);
 	EXPECT_TRUE(S_ISREG(st.st_mode));
@@ -578,6 +576,7 @@ TEST_F(FsTest, PseudoArduinoDev) {
 
 	ow.update_device(1, "AD.0900F8FF6677E2");
 	ow.update_data();
+	ow.begin(&ds);
 	res = fs_ops.getattr("/AD.0900F8FF6677E2", &st, nullptr);
 	EXPECT_EQ(res, 0);
 	EXPECT_TRUE(S_ISDIR(st.st_mode));
@@ -632,10 +631,9 @@ TEST_F(FsTest, PseudoArduinoDev) {
 	// FUSE read/write API
 	Ard_i2c* arduino = (Ard_i2c*)ow.find(1, 9, 0xAD);
 	ASSERT_NE(arduino, nullptr);
-	EXPECT_EQ(arduino->begin(&ow), 0);
+	arduino->begin();
 	// no-ops without USE_I2C, just exercised for coverage
 	arduino->interrupt();
-	arduino->events(-1);
 	arduino->end();
 }
 
@@ -695,7 +693,7 @@ TEST_F(FsTest, ReaddirDeviceLevelErrors) {
 
 TEST_F(FsTest, OpenFallback) {
 	// not a settings/log path, not a device ROM: falls back to
-	// SwitchHandler::fs_open(), which unconditionally succeeds
+	// SwitchHandler::fs_open()
 	int res = fs_ops.open("/switches/list", nullptr);
 	EXPECT_EQ(res, 0);
 }
@@ -705,18 +703,78 @@ TEST_F(FsTest, SettingsWriteErrors) {
 
 	res = fs_ops.write("/settings/log", (char*)"nope", 4, 0, nullptr);
 	EXPECT_EQ(res, -EINVAL);
-	res = fs_ops.write("/settings/mode", (char*)"nope", 4, 0, nullptr);
-	EXPECT_EQ(res, -EINVAL);
 	res = fs_ops.write("/settings/poll", (char*)"nope", 4, 0, nullptr);
 	EXPECT_EQ(res, -EINVAL);
 
-	// out of uint8_t range as well as non-numeric
-	res = fs_ops.write("/settings/mode", (char*)"99999999999", 11, 0, nullptr);
-	EXPECT_EQ(res, -EINVAL);
-
-	// triggers Plugins::reload() + action(INITIALIZED); the write then
+	// triggers Plugins::reload() + action(ACT_INITIALIZED); the write then
 	// falls through to the generic device/switch handling below, which
 	// doesn't recognize this path either
 	res = fs_ops.write("/settings/plugins", (char*)"", 0, 0, nullptr);
 	EXPECT_EQ(res, -ENOENT);
+}
+
+TEST_F(FsTest, SettingsWriteOutOfRange) {
+	// "nope" above exercises std::invalid_argument; a numeric string
+	// that overflows int exercises the separate std::out_of_range catch
+	int res;
+	char buf[32] = "99999999999999999999";
+
+	res = fs_ops.write("/settings/log", buf, strlen(buf), 0, nullptr);
+	EXPECT_EQ(res, -EINVAL);
+	res = fs_ops.write("/settings/poll", buf, strlen(buf), 0, nullptr);
+	EXPECT_EQ(res, -EINVAL);
+}
+
+TEST_F(FsTest, OpenWrong) {
+	int res = fs_ops.open("/blabla.txt", nullptr);
+	EXPECT_EQ(res, -ENOENT);
+}
+
+TEST_F(FsTest, ReadUnknownPathReturnsEnoent) {
+	// not "switches", not a bus/rom path (no ".", so extractRom() never
+	// matches): falls through every branch to the final -ENOENT
+	char buf[32];
+	int res = fs_ops.read("/totally/unknown/path", buf, sizeof(buf), 0, nullptr);
+	EXPECT_EQ(res, -ENOENT);
+}
+
+TEST_F(FsTest, DoubleSlashPathsAreNormalized) {
+	// a stray extra leading slash - e.g. from a client that joins path
+	// segments naively - leaves one "/" unconsumed by the generic
+	// leading-slash strip every fs_* entry point does up front; both
+	// extractRom() and extract_subpath() defensively absorb it rather
+	// than failing the lookup
+	ow.update_device(1, "29.1400FDFF6677F8");
+	ow.update_data();
+	OwDev* dev = ow.find(1, 0x14, 0x29);
+	ASSERT_NE(dev, nullptr);
+	char buf[32];
+
+	std::string path = "//" + dev->rom + "/name";
+	int res = fs_ops.read(path.c_str(), buf, sizeof(buf), 0, nullptr);
+	EXPECT_GE(res, 0);
+
+	path = "//uncached/" + dev->rom + "/name";
+	res = fs_ops.read(path.c_str(), buf, sizeof(buf), 0, nullptr);
+	EXPECT_GE(res, 0);
+}
+
+TEST_F(FsTest, AlarmReaddirSkipsNonAlarmingDevices) {
+	// readdir("/alarm") lists only devices with alarm set; a device
+	// present but not currently alarming must be filtered out
+	ow.update_device(1, "29.1500FDFF6677F8");
+	ow.update_data();
+	OwDev* dev = ow.find(1, 0x15, 0x29);
+	ASSERT_NE(dev, nullptr);
+	dev->alarm = false;
+
+	std::vector<std::string> seen;
+	auto record_filler = [](void* buf, const char* name, const struct stat*,
+							 off_t, enum fuse_fill_dir_flags) {
+		static_cast<std::vector<std::string>*>(buf)->push_back(name);
+		return 0;
+	};
+	int res = fs_ops.readdir("/alarm", &seen, record_filler, 0, nullptr, FUSE_READDIR_PLUS);
+	EXPECT_EQ(res, 0);
+	EXPECT_EQ(std::find(seen.begin(), seen.end(), dev->rom), seen.end());
 }

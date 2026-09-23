@@ -223,6 +223,14 @@ int ds2408::fs_write(string& path, const char* buf, size_t size)
 	return OwDev::fs_write(path, buf, size);
 }
 
+void ds2408::begin(bool soft)
+{
+	if (soft)
+		return;
+	// if not soft read regs, cfg ...
+	reg_read(true);
+}
+
 uint8_t ds2408::latch_reset()
 {
 	uint8_t retry, tmp;
@@ -295,7 +303,7 @@ uint8_t ds2408::pio_set(uint8_t pio)
 	uint8_t r, retry, err = 0;
 	bool ret;
 
-	logger.log(LogLevel::DEBUG, "set PIO " + std::to_string(pio) + " in mode " + std::to_string(mode));
+	logger.log(LogLevel::DEBUG, "set PIO " + std::to_string(pio));
 
 	// coverity[sleep] - bus mutex must be held for the whole 1-Wire
 	// transaction (reset/select/write/read + retries)
@@ -363,9 +371,9 @@ uint8_t ds2408::reg_read(bool latch_reset)
 	do {
 		//wdt_reset(); ??
 		/* read latch */
+		std::lock_guard<std::mutex> lock(ow->mtx);
 		// coverity[sleep] - bus mutex must be held for the whole 1-Wire
 		// transaction
-		std::lock_guard<std::mutex> lock(ow->mtx);
 		ret = ow->selectChannel(bus);
 		if (ow->last_err == 0)
 			ret = ow->reset();
@@ -458,7 +466,7 @@ uint8_t ds2408::level_set(uint8_t pio, uint8_t level, uint8_t cmd, uint8_t val)
 	uint8_t data[5] = { 0xC5, cmd, pio, val, level };
 	uint16_t crc;
 #endif
-	logger.log(LogLevel::DEBUG, "set PIO level=" + std::to_string(level) + " for PIO " + std::to_string(pio) + " in mode " + std::to_string(mode));
+	logger.log(LogLevel::DEBUG, "set PIO level=" + std::to_string(level) + " for PIO " + std::to_string(pio));
 
 #ifndef USE_I2C
 	(void)cmd;

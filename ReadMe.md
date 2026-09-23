@@ -55,3 +55,24 @@ docker run -d \
   my_image
 
 docker run -p 8081:8081 --mount type=bind,source=/mnt/1wire,target=/mnt/1wire,bind-propagation=shared --name iobroker -v iobrokerdata:/opt/iobroker -h iobroker buanet/iobroker
+
+
+# start up
+
+- passive mode: no i2c interaction, no gpio interrupt:
+  arduino mode != 16, poll=0 and --gpio-pin=0
+- soft start: full service, but no initial interraction
+
+## arduino mode = 0x10 and gpio set
+
+Full handling of arduino interrupts
+
+## switch mode 0x14
+
+Full switching
+
+## mode: soft
+ - no reading of any device status or config
+ - no initialization of any device setting (thresholds, brightness, etc.)
+
+## mode: default

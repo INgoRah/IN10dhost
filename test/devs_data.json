@@ -1,0 +1,74 @@
+{
+    "bus_count": 3,
+    "busses": [
+        {
+            "dev_count": 0,
+            "id": 0
+        },
+        {
+            "dev_count": 0,
+            "id": 1
+        },
+        {
+            "dev_count": 0,
+            "id": 2
+        }
+    ],
+    "devices": [
+        {
+            "bus": 0,
+            "id": 9,
+            "name": "",
+            "mode": 16,
+            "poll": 0,
+            "rom": "AD.0900F8FF6677E2",
+            "type": "ard_i2c"
+        },
+        {
+            "bus": 1,
+            "cfg": [
+                73,
+                78,
+                49,
+                48,
+                100,
+                104,
+                111,
+                115,
+                116,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                3,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                19,
+                0
+            ],
+            "id": 5,
+            "name": "",
+            "rom": "29.0501FAFE66779D",
+            "type": "ds2408"
+        }
+    ],
+    "log": 8,
+    "mode": 16,
+    "plugins": {
+        "example": {
+            "enabled": true,
+            "port": 8081
+        }
+    },
+    "poll": 0,
+    "switches": [],
+    "version": 1
+}

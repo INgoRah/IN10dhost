@@ -143,17 +143,14 @@ float ds1820::temp_read(const uint8_t flag)
 	return temp;
 }
 
+// Only ever called once poll_check() has just returned 1.
 int ds1820::poll()
 {
-	int poll = OwDev::poll();
-	if (poll == 1) {
-		float old = temp;
-		temp_read(0);
-		//logger.info ("#1 reading %s/%s %d ...\n", rom.c_str(), path.c_str(), ret);
-		temp_read(1);
-		if (temp != old)
-			logger.info (std::format("{} temp={} °, hum={} %", rom, temp, hum));
-		return 1;
-	}
-	return poll;
+	float old = temp;
+	temp_read(0);
+	//logger.info ("#1 reading %s/%s %d ...\n", rom.c_str(), path.c_str(), ret);
+	temp_read(1);
+	if (temp != old)
+		logger.info (std::format("{} temp={} °, hum={} %", rom, temp, hum));
+	return 1;
 }

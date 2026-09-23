@@ -23,6 +23,7 @@ OwDev::OwDev(std::string rom)
 	poll_interval = 0;
 	id = 0;
 	update();
+	state = DS_CREATED;
 }
 
 json OwDev::to_json() const
@@ -98,36 +99,58 @@ void OwDev::update()
 		id = addr[1];
 }
 
-void OwDev::begin(DS2482 *ds)
+// Called after scan/load, before any device's begin(); no hardware
+// access here. Guarded by `state` so repeated calls (e.g. a live bus
+// rescan revisiting an already-known device) only take effect once -
+// and, critically, never downgrade an already-DS_RUNNING device's state
+// back to DS_INIT, which would defeat begin()'s own once-only guard.
+void OwDev::init()
 {
+	if (state == DS_RUNNING)
+		return;
 	update();
-	std::lock_guard<std::mutex> lock(ds->mtx);
-	ow = ds;
-	logger.verbose(std::format("Device id={} type={}, rom={}  ({})  initialized ", id, type, rom, rom_code));
-};
-
-void OwDev::set_mode(int mode)
-{
-	this->mode = mode;
-	logger.verbose(std::format("Device rom={} mode={}", rom, mode));
+	state = DS_INIT;
 }
 
-int OwDev::poll()
+void OwDev::begin(DS2482 *ds, bool soft)
+{
+	//std::lock_guard<std::mutex> lock(ds->mtx);
+	ow = ds;
+	if (state == DS_RUNNING || state == DS_STALE)
+		return;
+	begin(soft);
+	state = DS_RUNNING;
+	logger.verbose(std::format("Device id={} type={}, rom={}  ({}) begin done ", id, type, rom, rom_code));
+};
+
+// "Is it due" query: -1 no polling configured, 0 not due yet, 1 due
+// now. When due, also advances last_poll to schedule the next poll -
+// so this may only be called once per cycle. OwDevices::dev_poll()
+// calls this to decide whether to call poll() at all; poll() is only
+// ever called once this has just returned 1, so poll() implementations
+// (and this default) never need to check it themselves.
+int OwDev::poll_check()
 {
 	if (poll_interval == 0)
 		// no polling
 		return -1;
-	// check whether it needs polling..
-	auto now = HrClock::now();
-	if (now - last_poll >= std::chrono::milliseconds(1000 * poll_interval)) {
-		// if yes set next poll time
-		last_poll = now;
-		// TODO do the actual polling action in the sub classes, e.g. read the state and update the cache
+	if (HrClock::now() - last_poll >= std::chrono::milliseconds(1000 * poll_interval)) {
+		last_poll = HrClock::now();
 		return 1;
 	}
 
-	// do nothing
+	// not due yet
 	return 0;
+}
+
+// Default poll(): only ever called once poll_check() has just
+// returned 1, so device types with nothing to actively refresh on a
+// timer (e.g. ds2408, whose PIO state is read/written on demand, not
+// polled) have nothing more to do here. Device types that DO need to
+// do something (ds1820, ds2450) override this to perform the action.
+int OwDev::poll()
+{
+	return 1;
 }
 
 int OwDev::poll_next()
