@@ -28,14 +28,14 @@ cmake -DUSE_I2C=ON -DUSE_GPIO=NO \
 cmake --build build-arm
 
 ## run as
-sudo build-arm/bin/IN10dfsd -f -o allow_other /mnt/1wire
+sudo build-arm/bin/in10dfs -f -o allow_other /mnt/1wire
 
 ## Sbuild debian package
 
 sudo sbuild-apt trixie-armhf apt-get install gpiod libgpiod-dev fuse3 libfuse3-dev
 
 '''
-sbuild --dist=trixie --arch=armhf --no-run-lintian --no-clean-source
+sbuild --dist=trixie --arch=armhf --no-run-lintian --no-clean-source --extra-repository="deb http://deb.debian.org/debian trixie-backports main"
 '''
 
 optional with -chroot=trixie-armhf
@@ -44,8 +44,8 @@ sbuild-shell trixie-armhf
 apt-cache search libgpiod
 
 ## or copy
-cmake --build build-arm && scp build-arm/bin/IN10dfsd root@192.168.178.79:/opt
-cmake --build build-arm && scp build-arm/bin/IN10dfsd root@192.168.178.37:/data/home/ingo
+cmake --build build-arm && scp build-arm/bin/in10dfs root@192.168.178.79:/opt
+cmake --build build-arm && scp build-arm/bin/in10dfs root@192.168.178.37:/data/home/ingo
 
 
 ## Publish to Docker

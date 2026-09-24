@@ -55,7 +55,7 @@ public:
 	void parse(int& argc, char* argv[]);
 
 	// Prints usage text for the options above to stdout.
-	void print_help(const char* prog_name = "IN10dfsd") const;
+	void print_help(const char* prog_name = "in10dfs") const;
 
 private:
 	bool match_flag(const std::string& arg, const char* short_name, const char* long_name) const;

@@ -65,7 +65,7 @@ foreach(SOURCE_FILE ${PLUGIN_SOURCES})
     # the fault injection fixture stays in the build tree
     if(NOT PLUGIN_NAME STREQUAL "faulty")
         install(TARGETS ${PLUGIN_NAME}
-            LIBRARY DESTINATION /opt/lib/IN10dfsd/
+            LIBRARY DESTINATION /opt/lib/in10dfs/
         )
     endif()
 
@@ -74,6 +74,6 @@ endforeach()
 if(QJS_FOUND)
     # so the path the example script documents for itself actually exists
     install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/example.js
-        DESTINATION /opt/lib/IN10dfsd/
+        DESTINATION /opt/lib/in10dfs/
     )
 endif()

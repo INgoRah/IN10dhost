@@ -42,7 +42,7 @@ std::filesystem::path Plugins::find_lib(const string& name) const
 	f = exec_path / std::filesystem::path(std::string("lib") + name + ".so");
 	if (fs::exists(f))
 		return f;
-	f = "/opt/lib/in10dfsd" / std::filesystem::path(std::string("lib") + name + ".so");
+	f = "/opt/lib/in10dfs" / std::filesystem::path(std::string("lib") + name + ".so");
 	if (fs::exists(f))
 		return f;
 

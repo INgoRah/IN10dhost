@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(IN10dfsd VERSION 0.1 LANGUAGES CXX)
+project(in10dfs VERSION 0.1 LANGUAGES CXX)
 
 set(CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/CMake" ${CMAKE_MODULE_PATH})
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
@@ -112,7 +112,7 @@ endif()
 # ----------------------------
 # Sources
 # ----------------------------
-add_executable(IN10dfsd
+add_executable(in10dfs
     src/logger.cpp
     src/cli.cpp
     src/fs.cpp
@@ -127,8 +127,8 @@ add_executable(IN10dfsd
     src/switch_handler.cpp
 )
 if(TESTING)
-    target_compile_definitions(IN10dfsd PRIVATE TESTING=1)
-    target_sources(IN10dfsd
+    target_compile_definitions(in10dfs PRIVATE TESTING=1)
+    target_sources(in10dfs
         PRIVATE
         test/main.cpp
         test/fs.cpp
@@ -139,9 +139,9 @@ if(TESTING)
     )
     set(test GTest::gtest_main)
 
-    gtest_discover_tests(IN10dfsd)
+    gtest_discover_tests(in10dfs)
 else()
-    target_sources(IN10dfsd
+    target_sources(in10dfs
         PRIVATE
         src/main.cpp
     )
@@ -152,7 +152,7 @@ include_directories(
     ${FUSE3_INCLUDE_DIRS}
 )
 
-target_include_directories(IN10dfsd
+target_include_directories(in10dfs
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${GPIOD_INCLUDE_DIRS}
@@ -162,7 +162,7 @@ target_include_directories(IN10dfsd
 # ----------------------------
 # Linux-specific libraries
 # ----------------------------
-target_link_libraries(IN10dfsd
+target_link_libraries(in10dfs
     PRIVATE
         pthread
         dl
@@ -173,14 +173,14 @@ target_link_libraries(IN10dfsd
 )
 
 if(TESTING)
-    target_link_options(IN10dfsd
+    target_link_options(in10dfs
         PRIVATE
             -static-libstdc++
             -static-libgcc
             --coverage -g -O0
     )
 else()
-    target_link_options(IN10dfsd
+    target_link_options(in10dfs
         PRIVATE
             -static-libstdc++
             -static-libgcc
@@ -188,7 +188,7 @@ else()
     )
 endif()
 if(SANITIZE)
-    target_link_options(IN10dfsd
+    target_link_options(in10dfs
         PRIVATE
        -fsanitize=address
     )
@@ -197,7 +197,7 @@ endif()
 # ----------------------------
 # Install (optional)
 # ----------------------------
-install(TARGETS IN10dfsd
+install(TARGETS in10dfs
    RUNTIME DESTINATION /usr/bin
 )
 

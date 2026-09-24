@@ -4,7 +4,7 @@
  * Point the plugin at this file from data.json:
  *
  *   "plugins": {
- *       "jsengine": { "script": "/opt/lib/in10dfsd/example.js" }
+ *       "jsengine": { "script": "/opt/lib/in10dfs/example.js" }
  *   }
  *
  * The daemon calls onAction() for every event. Return 1 when the event

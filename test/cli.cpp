@@ -11,7 +11,7 @@
 class Argv {
 public:
 	explicit Argv(std::vector<std::string> args) : storage(std::move(args)) {
-		storage.insert(storage.begin(), "IN10dfsd");
+		storage.insert(storage.begin(), "in10dfs");
 		for (auto& s : storage)
 			ptrs.push_back(s.data());
 		argc = (int)ptrs.size();
@@ -57,7 +57,7 @@ TEST_F(CliTest, DefaultsAreUnchangedWhenNoFlagsGiven)
 	EXPECT_FALSE(cli.soft_start);
 	EXPECT_TRUE(cli.data_path.empty());
 	EXPECT_FALSE(cli.help_requested);
-	EXPECT_EQ(a.remaining(), std::vector<std::string>({"IN10dfsd", "-f", "/mnt/1wire"}));
+	EXPECT_EQ(a.remaining(), std::vector<std::string>({"in10dfs", "-f", "/mnt/1wire"}));
 }
 
 TEST_F(CliTest, GpioPinEqualsFormSetsPin)
@@ -66,7 +66,7 @@ TEST_F(CliTest, GpioPinEqualsFormSetsPin)
 	cli.parse(a.argc, a.argv());
 
 	EXPECT_EQ(cli.gpio_pin, 17);
-	EXPECT_EQ(a.remaining(), std::vector<std::string>({"IN10dfsd", "-f", "/mnt/1wire"}));
+	EXPECT_EQ(a.remaining(), std::vector<std::string>({"in10dfs", "-f", "/mnt/1wire"}));
 }
 
 TEST_F(CliTest, GpioPinTwoTokenFormSetsPin)
@@ -75,7 +75,7 @@ TEST_F(CliTest, GpioPinTwoTokenFormSetsPin)
 	cli.parse(a.argc, a.argv());
 
 	EXPECT_EQ(cli.gpio_pin, 12);
-	EXPECT_EQ(a.remaining(), std::vector<std::string>({"IN10dfsd", "-f", "/mnt/1wire"}));
+	EXPECT_EQ(a.remaining(), std::vector<std::string>({"in10dfs", "-f", "/mnt/1wire"}));
 }
 
 TEST_F(CliTest, GpioPinZeroDeactivatesGpio)
@@ -92,7 +92,7 @@ TEST_F(CliTest, GpioPinNonNumericValueIsRejectedButStillConsumed)
 	cli.parse(a.argc, a.argv());
 
 	EXPECT_EQ(cli.gpio_pin, GPIO_LINE_DEFAULT);
-	EXPECT_EQ(a.remaining(), std::vector<std::string>({"IN10dfsd", "/mnt/1wire"}));
+	EXPECT_EQ(a.remaining(), std::vector<std::string>({"in10dfs", "/mnt/1wire"}));
 }
 
 TEST_F(CliTest, GpioPinNegativeValueIsRejected)
@@ -109,7 +109,7 @@ TEST_F(CliTest, GpioPinMissingValueAtEndOfArgvIsRejected)
 	cli.parse(a.argc, a.argv());
 
 	EXPECT_EQ(cli.gpio_pin, GPIO_LINE_DEFAULT);
-	EXPECT_EQ(a.remaining(), std::vector<std::string>({"IN10dfsd", "-f"}));
+	EXPECT_EQ(a.remaining(), std::vector<std::string>({"in10dfs", "-f"}));
 }
 
 TEST_F(CliTest, SimilarlyPrefixedLongFlagIsLeftAlone)
@@ -121,7 +121,7 @@ TEST_F(CliTest, SimilarlyPrefixedLongFlagIsLeftAlone)
 
 	EXPECT_EQ(cli.gpio_pin, GPIO_LINE_DEFAULT);
 	EXPECT_EQ(a.remaining(),
-		std::vector<std::string>({"IN10dfsd", "--gpio-pin-foo", "/mnt/1wire"}));
+		std::vector<std::string>({"in10dfs", "--gpio-pin-foo", "/mnt/1wire"}));
 }
 
 // --- -s / --soft ---------------------------------------------------------
@@ -132,7 +132,7 @@ TEST_F(CliTest, ShortSoftFlagIsRecognized)
 	cli.parse(a.argc, a.argv());
 
 	EXPECT_TRUE(cli.soft_start);
-	EXPECT_EQ(a.remaining(), std::vector<std::string>({"IN10dfsd", "-f", "/mnt/1wire"}));
+	EXPECT_EQ(a.remaining(), std::vector<std::string>({"in10dfs", "-f", "/mnt/1wire"}));
 }
 
 TEST_F(CliTest, LongSoftFlagIsRecognized)
@@ -141,7 +141,7 @@ TEST_F(CliTest, LongSoftFlagIsRecognized)
 	cli.parse(a.argc, a.argv());
 
 	EXPECT_TRUE(cli.soft_start);
-	EXPECT_EQ(a.remaining(), std::vector<std::string>({"IN10dfsd", "-f", "/mnt/1wire"}));
+	EXPECT_EQ(a.remaining(), std::vector<std::string>({"in10dfs", "-f", "/mnt/1wire"}));
 }
 
 TEST_F(CliTest, SoftFlagTakesNoValueEvenIfFollowedByOne)
@@ -152,7 +152,7 @@ TEST_F(CliTest, SoftFlagTakesNoValueEvenIfFollowedByOne)
 	cli.parse(a.argc, a.argv());
 
 	EXPECT_TRUE(cli.soft_start);
-	EXPECT_EQ(a.remaining(), std::vector<std::string>({"IN10dfsd", "/mnt/1wire"}));
+	EXPECT_EQ(a.remaining(), std::vector<std::string>({"in10dfs", "/mnt/1wire"}));
 }
 
 TEST_F(CliTest, SimilarlyPrefixedFlagDoesNotSetSoft)
@@ -162,7 +162,7 @@ TEST_F(CliTest, SimilarlyPrefixedFlagDoesNotSetSoft)
 	cli.parse(a.argc, a.argv());
 
 	EXPECT_FALSE(cli.soft_start);
-	EXPECT_EQ(a.remaining(), std::vector<std::string>({"IN10dfsd", "-soft", "/mnt/1wire"}));
+	EXPECT_EQ(a.remaining(), std::vector<std::string>({"in10dfs", "-soft", "/mnt/1wire"}));
 }
 
 // --- -d / --data ---------------------------------------------------------
@@ -173,7 +173,7 @@ TEST_F(CliTest, ShortDataEqualsFormSetsPath)
 	cli.parse(a.argc, a.argv());
 
 	EXPECT_EQ(cli.data_path, "/etc/in10d/data.json");
-	EXPECT_EQ(a.remaining(), std::vector<std::string>({"IN10dfsd", "/mnt/1wire"}));
+	EXPECT_EQ(a.remaining(), std::vector<std::string>({"in10dfs", "/mnt/1wire"}));
 }
 
 TEST_F(CliTest, ShortDataTwoTokenFormSetsPath)
@@ -182,7 +182,7 @@ TEST_F(CliTest, ShortDataTwoTokenFormSetsPath)
 	cli.parse(a.argc, a.argv());
 
 	EXPECT_EQ(cli.data_path, "/etc/in10d/data.json");
-	EXPECT_EQ(a.remaining(), std::vector<std::string>({"IN10dfsd", "/mnt/1wire"}));
+	EXPECT_EQ(a.remaining(), std::vector<std::string>({"in10dfs", "/mnt/1wire"}));
 }
 
 TEST_F(CliTest, LongDataEqualsFormSetsPath)
@@ -191,7 +191,7 @@ TEST_F(CliTest, LongDataEqualsFormSetsPath)
 	cli.parse(a.argc, a.argv());
 
 	EXPECT_EQ(cli.data_path, "/etc/in10d/data.json");
-	EXPECT_EQ(a.remaining(), std::vector<std::string>({"IN10dfsd", "/mnt/1wire"}));
+	EXPECT_EQ(a.remaining(), std::vector<std::string>({"in10dfs", "/mnt/1wire"}));
 }
 
 TEST_F(CliTest, LongDataTwoTokenFormSetsPath)
@@ -200,7 +200,7 @@ TEST_F(CliTest, LongDataTwoTokenFormSetsPath)
 	cli.parse(a.argc, a.argv());
 
 	EXPECT_EQ(cli.data_path, "/etc/in10d/data.json");
-	EXPECT_EQ(a.remaining(), std::vector<std::string>({"IN10dfsd", "/mnt/1wire"}));
+	EXPECT_EQ(a.remaining(), std::vector<std::string>({"in10dfs", "/mnt/1wire"}));
 }
 
 TEST_F(CliTest, DataMissingValueAtEndOfArgvIsRejected)
@@ -209,7 +209,7 @@ TEST_F(CliTest, DataMissingValueAtEndOfArgvIsRejected)
 	cli.parse(a.argc, a.argv());
 
 	EXPECT_TRUE(cli.data_path.empty());
-	EXPECT_EQ(a.remaining(), std::vector<std::string>({"IN10dfsd", "-f"}));
+	EXPECT_EQ(a.remaining(), std::vector<std::string>({"in10dfs", "-f"}));
 }
 
 // --- -h / --help -----------------------------------------------------
@@ -222,7 +222,7 @@ TEST_F(CliTest, ShortHelpFlagIsRecognizedAndLeftInArgv)
 	cli.parse(a.argc, a.argv());
 
 	EXPECT_TRUE(cli.help_requested);
-	EXPECT_EQ(a.remaining(), std::vector<std::string>({"IN10dfsd", "-h", "-f", "/mnt/1wire"}));
+	EXPECT_EQ(a.remaining(), std::vector<std::string>({"in10dfs", "-h", "-f", "/mnt/1wire"}));
 }
 
 TEST_F(CliTest, LongHelpFlagIsRecognizedAndLeftInArgv)
@@ -231,7 +231,7 @@ TEST_F(CliTest, LongHelpFlagIsRecognizedAndLeftInArgv)
 	cli.parse(a.argc, a.argv());
 
 	EXPECT_TRUE(cli.help_requested);
-	EXPECT_EQ(a.remaining(), std::vector<std::string>({"IN10dfsd", "--help"}));
+	EXPECT_EQ(a.remaining(), std::vector<std::string>({"in10dfs", "--help"}));
 }
 
 TEST_F(CliTest, HelpDoesNotPreventOtherOptionsFromStillBeingParsed)
@@ -243,7 +243,7 @@ TEST_F(CliTest, HelpDoesNotPreventOtherOptionsFromStillBeingParsed)
 	EXPECT_EQ(cli.gpio_pin, 9);
 	EXPECT_TRUE(cli.soft_start);
 	// --gpio-pin and -s are still consumed as usual; only -h stays
-	EXPECT_EQ(a.remaining(), std::vector<std::string>({"IN10dfsd", "-h"}));
+	EXPECT_EQ(a.remaining(), std::vector<std::string>({"in10dfs", "-h"}));
 }
 
 TEST_F(CliTest, PrintHelpMentionsEveryOption)
@@ -261,7 +261,7 @@ TEST_F(CliTest, PrintHelpMentionsEveryOption)
 	fflush(stdout);
 	dup2(fileno(tmp), fileno(stdout));
 
-	cli.print_help("IN10dfsd");
+	cli.print_help("in10dfs");
 
 	fflush(stdout);
 	dup2(saved_stdout, fileno(stdout));
@@ -274,7 +274,7 @@ TEST_F(CliTest, PrintHelpMentionsEveryOption)
 	fclose(tmp);
 
 	std::string text(buf);
-	EXPECT_NE(text.find("IN10dfsd"), std::string::npos);
+	EXPECT_NE(text.find("in10dfs"), std::string::npos);
 	EXPECT_NE(text.find("--gpio-pin"), std::string::npos);
 	EXPECT_NE(text.find("--soft"), std::string::npos);
 	EXPECT_NE(text.find("--data"), std::string::npos);
@@ -293,5 +293,5 @@ TEST_F(CliTest, AllThreeOptionsTogetherInAnyOrder)
 	EXPECT_TRUE(cli.soft_start);
 	EXPECT_EQ(cli.data_path, "/data/cfg.json");
 	EXPECT_EQ(a.remaining(),
-		std::vector<std::string>({"IN10dfsd", "-f", "-o", "allow_other", "/mnt/1wire"}));
+		std::vector<std::string>({"in10dfs", "-f", "-o", "allow_other", "/mnt/1wire"}));
 }
