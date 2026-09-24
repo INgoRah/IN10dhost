@@ -23,7 +23,7 @@ public:
 
 Logger logger;
 DS2482 ds("/dev/i2c-0", 0x18);
-OwDevices ow;
+OwDevices ow(&ds);
 SwitchHandler swHdl (&ow);
 Ard_i2c arduino;
 
@@ -61,7 +61,7 @@ TEST(main, LoadJson)
 		ok = false;
 	}
 	EXPECT_EQ(ok, true);
-	ow.begin(&ds);
+	ow.begin();
 	// set log level back if changed by test
 	logger.set_level(lvl);
 	ow.save(f);
@@ -88,7 +88,7 @@ TEST(main, InitSequence)
 	logger.info("init ow");
 	ow.init();
 	logger.info("begin 1wire");
-	ow.begin(&ds);
+	ow.begin();
 	EXPECT_EQ(ok, true);
 	// set log level back if changed by test
 	logger.set_level(lvl);

@@ -57,9 +57,8 @@ class OwDevices : public IDevices
 		void init_busses();
 
 	public:
-		OwDevices() { ds = nullptr; }
+		OwDevices(DS2482 *ds) { this->ds = ds; }
 		~OwDevices();
-		void begin(DS2482 *ds, bool soft=false);
 		void begin(bool soft=false);
 		void init();
 		void cacheInit();

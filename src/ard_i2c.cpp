@@ -61,6 +61,7 @@ Ard_i2c::Ard_i2c()
 {
 	lastSeq = 0xff;
 	this->type = "ard_i2c";
+	this->mode = 0;
 	this->power = 0;
 }
 
@@ -229,8 +230,8 @@ void Ard_i2c::interrupt() {
 	}
 #if 0
 	events(fd);
-	close(fd);
 #endif
+	close(fd);
 #endif
 }
 

@@ -442,7 +442,7 @@ static int fs_write(const char* path, const char* buf, size_t size,
 	}
 	if (strcmp(path, "/settings/plugins") == 0) {
 		plugins.reload();
-		plugins.action(ACT_INITIALIZED, 0); // initialized
+		plugins.action(ACT_READY, 0); // initialized
 	}
 	string spath(path);
 	spath.erase(0, 1);

@@ -37,7 +37,7 @@ protected:
 		logger.set_level(LogLevel::ERROR);
 		fs_init(&fs_ops);
 		ow.init();
-		ow.begin(&ds);
+		ow.begin();
 		char buf[18];
 		int pos = 3;
 		uint8_t adr[] = { 0x29, 0x02, 0x01, 0xab, 0xbd, 0x66, 0x77, 0xcc };
@@ -58,7 +58,7 @@ protected:
 		// 2.2 crc =d4
 		ow.update_device(adr[2], buf);
 		ow.update_data();
-		ow.begin(&ds);
+		ow.begin();
 		swHdl.begin(&ds);
 	}
 };

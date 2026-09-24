@@ -385,12 +385,15 @@ uint8_t ds2408::reg_read(bool latch_reset)
 		//wdt_reset(); ??
 		/* read latch */
 		std::lock_guard<std::mutex> lock(ds->mtx);
+		// coverity[sleep]
 		ret = ds->selectChannel(bus);
 		if (ds->last_err == 0)
 			ret = ds->reset();
 		if (ret && ds->last_err == 0)
+			// coverity[sleep]
 			ds->select(addr);
 		if (ds->last_err == 0)
+			// coverity[sleep]
 			ds->write (buf, 3, 0);
 		// 3 cmd bytes, 6 data bytes, 2 0xFF, 2 CRC16
 		// 1:
@@ -398,6 +401,7 @@ uint8_t ds2408::reg_read(bool latch_reset)
 		// on the slave
 		// if (ds->last_err == 0)
 #ifdef USE_I2C
+		// coverity[sleep]
 		ds->read (data, 10);
 #else
 		uint8_t dummy[10];
@@ -430,17 +434,19 @@ int ds2408::cfg_read()
 
 #ifdef USE_I2C
 	int i;
-	// coverity[sleep] - bus mutex must be held for the whole 1-Wire
-	// transaction
-	std::lock_guard<std::mutex> lock(ds->mtx);
 
+	std::lock_guard<std::mutex> lock(ds->mtx);
+	// coverity[sleep]
 	if (!ds->selectChannel(bus))
 		return -1;
 	ds->reset();
+	// coverity[sleep]
 	ds->select(addr);
+	// coverity[sleep]
 	ds->write (0x85);
 
 	for (i = 0; i < CFG_SIZE - 1; i++)
+		// coverity[sleep]
 		cfg[i] = ds->read ();
 #endif
 	return len;

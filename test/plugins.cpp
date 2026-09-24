@@ -42,7 +42,7 @@ TEST(plugins, LoadPlugin)
 		ow.load(f.c_str());
 		logger.set_level(lvl);
 		logger.error("begin with plugin");
-		ow.begin(&ds);
+		ow.begin();
 		ok = true;
 	}
 	catch (const std::exception& e) {
@@ -254,7 +254,7 @@ TEST(plugins, PluginSave)
 	// set log level back if changed by test
 	// check plugin actually saved config
 	ow.save(f);
-	ow.begin(&ds);
+	ow.begin();
 }
 
 TEST(plugins, LoadPluginCopyFailure)
@@ -282,11 +282,102 @@ TEST(plugins, LoadPluginCopyFailure)
 	std::filesystem::remove(broken, ec);
 }
 
-TEST(plugins, UnusedManagementStubs)
+TEST(plugins, AddAndRemove)
 {
-	// reload/add/remove are currently unimplemented no-ops; exercised
-	// here so a real implementation later has a place to add behavior
-	EXPECT_EQ(plugins.reload(), 0);
-	EXPECT_EQ(plugins.add("example"), 0);
+	ensure_example_loaded();
+	size_t before = plugins.count();
+
+	// already loaded, so nothing to do
+	EXPECT_EQ(plugins.add("example"), 1);
+	EXPECT_EQ(plugins.count(), before);
+
+	// unloading really detaches it: the action no longer reaches it
+	int with = plugins.action(ACT_READY);
 	EXPECT_EQ(plugins.remove("example"), 0);
+	EXPECT_EQ(plugins.count(), before - 1);
+	EXPECT_EQ(plugins.action(ACT_READY), with - 1);
+
+	// removing something that is not loaded is an error, not a crash
+	EXPECT_EQ(plugins.remove("example"), -1);
+	EXPECT_EQ(plugins.remove("never_existed"), -1);
+
+	// and it can be brought back
+	EXPECT_EQ(plugins.add("example"), 0);
+	EXPECT_EQ(plugins.count(), before);
+	EXPECT_EQ(plugins.action(ACT_READY), with);
+}
+
+TEST(plugins, AddMissingPluginFails)
+{
+	LogLevel lvl = logger.get_level();
+	logger.set_level(LogLevel::NONE);
+	EXPECT_EQ(plugins.add("no_such_plugin"), -1);
+	logger.set_level(lvl);
+}
+
+TEST(plugins, ReloadIgnoresUnchangedLibrary)
+{
+	ensure_example_loaded();
+	int before = plugins.action(ACT_READY);
+
+	// touching the library changes its mtime but not its contents, and
+	// the hash is what decides - so nothing must be reloaded
+	std::filesystem::path lib = exec_path() / "libexample.so";
+	std::filesystem::last_write_time(lib, std::filesystem::file_time_type::clock::now());
+
+	EXPECT_EQ(plugins.reload(), 0);
+	// still loaded and still working
+	EXPECT_EQ(plugins.action(ACT_READY), before);
+}
+
+TEST(plugins, ReloadReplacesChangedLibrary)
+{
+	ensure_example_loaded();
+	std::filesystem::path lib = exec_path() / "libexample.so";
+	std::filesystem::path backup = exec_path() / "libexample.so.orig";
+	int before = plugins.action(ACT_READY);
+	size_t count = plugins.count();
+
+	// stand in for a rebuilt plugin: a trailing byte changes the
+	// content hash without stopping the ELF from loading
+	std::filesystem::copy_file(lib, backup,
+		std::filesystem::copy_options::overwrite_existing);
+	{
+		std::ofstream out(lib, std::ios::binary | std::ios::app);
+		out.put('\0');
+	}
+
+	EXPECT_EQ(plugins.reload(), 1);                 // exactly one reloaded
+	EXPECT_EQ(plugins.count(), count);              // still registered
+	EXPECT_EQ(plugins.action(ACT_READY), before);   // and still working
+
+	std::filesystem::copy_file(backup, lib,
+		std::filesystem::copy_options::overwrite_existing);
+	std::filesystem::remove(backup);
+	plugins.reload();  // pick the original back up
+}
+
+TEST(plugins, ReloadPicksUpEditedScript)
+{
+	if (!jsengine_available())
+		GTEST_SKIP() << "built without quickjs";
+
+	load_js_once();
+	std::string path = (std::filesystem::current_path() / "test_engine.js").string();
+	int before = plugins.action(ACT_READY);
+
+	// an untouched script must not be re-evaluated, so the result stays
+	EXPECT_EQ(plugins.reload(), 0);
+	EXPECT_EQ(plugins.action(ACT_READY), before);
+
+	// now edit it: the library is unchanged, so reload() reports no
+	// library reloads, but handing the config back makes the engine
+	// notice the new contents and re-evaluate them
+	std::ofstream(path) << R"JS(
+		function onAction(code, val, data) {
+			return code == 3 ? 9 : 0;
+		}
+	)JS";
+	EXPECT_EQ(plugins.reload(), 0);
+	EXPECT_EQ(plugins.action(ACT_READY), before - 7 + 9);
 }

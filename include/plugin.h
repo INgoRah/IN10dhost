@@ -1,11 +1,40 @@
 #pragma once
 
+#include <filesystem>
+#include <fstream>
 #include "nlohmann/json.hpp"
 #include "logger.h"
 #include "interface/devices.h"
 
 using json = nlohmann::json;
 using std::string;
+
+/* FNV-1a over a file's contents, used to tell a rebuilt plugin or an
+   edited script from an unchanged one. Not a security check - it only
+   has to notice our own rebuilds - so no crypto dependency. Unlike
+   mtime it also does not fire on every scp, which rewrites timestamps
+   even when the bytes are identical. Returns 0 if the file cannot be
+   read. Header only so plugins can use it as well as the loader. */
+inline uint64_t file_hash(const std::filesystem::path& p)
+{
+	std::ifstream f(p, std::ios::binary);
+	uint64_t h = 0xcbf29ce484222325ULL;
+	char buf[4096];
+
+	if (!f)
+		return 0;
+	while (f.read(buf, sizeof(buf)) || f.gcount()) {
+		std::streamsize n = f.gcount();
+		for (std::streamsize i = 0; i < n; i++) {
+			h ^= (uint8_t)buf[i];
+			h *= 0x100000001b3ULL;
+		}
+		if (!f)
+			break;
+	}
+
+	return h;
+}
 
 enum action_code {
 	ACT_CFG_LOAD = 0,

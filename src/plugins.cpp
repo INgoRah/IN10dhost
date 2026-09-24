@@ -35,20 +35,41 @@ int Plugins::init()
 	return 0;
 }
 
+std::filesystem::path Plugins::find_lib(const string& name) const
+{
+	std::filesystem::path f;
+
+	f = exec_path / std::filesystem::path(std::string("lib") + name + ".so");
+	if (fs::exists(f))
+		return f;
+	f = "/opt/lib/in10dfsd" / std::filesystem::path(std::string("lib") + name + ".so");
+	if (fs::exists(f))
+		return f;
+
+	return std::filesystem::path();
+}
+
+size_t Plugins::count()
+{
+	std::lock_guard<std::recursive_mutex> lock(mtx);
+
+	return plugins.size();
+}
+
 Plugin* Plugins::plugin_init(string name)
 {
+	std::lock_guard<std::recursive_mutex> lock(mtx);
 	std::filesystem::path f;
 	Plugin* instance;
 	void* handle;
 	std::filesystem::path lib_path;
 
-	f = exec_path / std::filesystem::path(std::string("lib") + name + ".so");
-	if (!fs::exists(f)) {
-		f = "/opt/lib/in10dfsd" / std::filesystem::path(std::string("lib") + name + ".so");
-		if (!fs::exists(f)) {
-			return nullptr;
-		}
-	}
+	f = find_lib(name);
+	if (f.empty())
+		return nullptr;
+	/* remember what we loaded so reload() can tell whether the library
+	   on disk has been replaced since */
+	hashes[name] = file_hash(f);
 	std::string timestamp = std::to_string(std::chrono::duration_cast<std::chrono::microseconds>(
     std::chrono::high_resolution_clock::now().time_since_epoch()).count());
 	std::string shadow_path = "/tmp/lib" + name + "." + timestamp + ".so";
@@ -93,34 +114,131 @@ Plugin* Plugins::plugin_init(string name)
 	return instance;
 }
 
+/* Tears one plugin down. The caller owns removing it from the plugins
+   vector; this only releases the instance, the library and the shadow
+   copy. exit() runs inside the plugin, so it is guarded like action(). */
+void Plugins::unload(Plugin* plugin_ptr)
+{
+	// remember the lib path before destroying the plugin instance
+	std::filesystem::path lib_path = plugin_ptr->lib_path;
+
+	logger.info(std::format("Cleaning up plugin {}...", plugin_ptr->name));
+	try {
+		plugin_ptr->exit();
+	}
+	catch (const std::exception& e) {
+		logger.error(std::format("plugin {} exit failed: {}", plugin_ptr->name, e.what()));
+	}
+	catch (...) {
+		logger.error(std::format("plugin {} exit failed", plugin_ptr->name));
+	}
+	if (plugin_ptr->handle) {
+		void* handle = plugin_ptr->handle;
+		destroy_t destroy_plugin = (destroy_t) dlsym(handle, "destroy_plugin");
+		destroy_plugin(plugin_ptr);
+		logger.info(std::format("destroying plugin..."));
+		dlclose(handle);
+	}
+	logger.info("destroyed plugin");
+	try {
+		if (fs::exists(lib_path))
+			fs::remove(lib_path);
+		logger.info("deleted tmp file");
+	} catch (const fs::filesystem_error& e) {
+		std::cerr << "Failed to clean up old temp files: " << e.what() << std::endl;
+	}
+}
+
 int Plugins::cleanup()
 {
-	std::filesystem::path lib_path;
+	std::lock_guard<std::recursive_mutex> lock(mtx);
 
-	for (auto plugin_ptr : plugins) {
-		logger.info(std::format("Cleaning up plugin {}...", plugin_ptr->name));
-		plugin_ptr->exit();
-		// remember the lib path before destroying the plugin instance
-		lib_path = plugin_ptr->lib_path;
-		if (plugin_ptr->handle) {
-			void* handle = plugin_ptr->handle;
-			destroy_t destroy_plugin = (destroy_t) dlsym(handle, "destroy_plugin");
-			destroy_plugin(plugin_ptr);
-			logger.info(std::format("destroying plugin..."));
-			dlclose(handle);
-		}
-		logger.info("destroyed plugin");
-		try {
-			if (fs::exists(lib_path))
-				fs::remove(lib_path);
-			logger.info("deleted tmp file");
-		} catch (const fs::filesystem_error& e) {
-			std::cerr << "Failed to clean up old temp files: " << e.what() << std::endl;
-		}
-	}
+	for (auto plugin_ptr : plugins)
+		unload(plugin_ptr);
 	plugins.clear();
+	hashes.clear();
 
 	return 0;
+}
+
+/* Loads a plugin that is not loaded yet. Returns 0 on success, -1 when
+   the library is missing or failed to load, 1 when it was already
+   there (nothing to do). */
+int Plugins::add(string name)
+{
+	std::lock_guard<std::recursive_mutex> lock(mtx);
+
+	for (auto plugin_ptr : plugins)
+		if (plugin_ptr->name == name)
+			return 1;
+
+	return plugin_init(name) ? 0 : -1;
+}
+
+/* Unloads a single plugin by name. Returns 0 when it was unloaded, -1
+   when no such plugin is loaded. */
+int Plugins::remove(string name)
+{
+	std::lock_guard<std::recursive_mutex> lock(mtx);
+
+	for (auto it = plugins.begin(); it != plugins.end(); ++it) {
+		if ((*it)->name != name)
+			continue;
+		unload(*it);
+		plugins.erase(it);
+		hashes.erase(name);
+		return 0;
+	}
+
+	return -1;
+}
+
+/* Reloads plugins whose library on disk differs from the one that was
+   loaded, carrying their config across. Plugins that did not change
+   just get their config re-applied, which is what makes the scripting
+   plugin pick up an edited script. Returns the number reloaded. */
+int Plugins::reload()
+{
+	std::lock_guard<std::recursive_mutex> lock(mtx);
+	std::vector<std::pair<string, json>> changed;
+	int cnt = 0;
+
+	for (auto plugin_ptr : plugins) {
+		const string& name = plugin_ptr->name;
+		uint64_t now = file_hash(find_lib(name));
+
+		if (now != 0 && now != hashes[name]) {
+			logger.info(std::format("plugin {} changed on disk, reloading", name));
+			// keep its config so the reloaded instance starts up the same
+			changed.push_back({ name, plugin_ptr->config_get() });
+			continue;
+		}
+		/* unchanged library: hand the config back so a plugin that
+		   reads external files (a script, a table) can re-read them */
+		try {
+			plugin_ptr->config_set(plugin_ptr->config_get());
+		}
+		catch (const std::exception& e) {
+			logger.error(std::format("plugin {} config reload failed: {}", name, e.what()));
+		}
+		catch (...) {
+			logger.error(std::format("plugin {} config reload failed", name));
+		}
+	}
+
+	for (const auto& [name, cfg] : changed) {
+		if (remove(name) != 0)
+			continue;
+		Plugin* p = plugin_init(name);
+		if (p == nullptr) {
+			logger.error(std::format("plugin {} failed to reload", name));
+			continue;
+		}
+		p->config_set(cfg);
+		cnt++;
+	}
+
+	return cnt;
 }
 
 int Plugins::load(json j)
@@ -188,21 +306,4 @@ int Plugins::action(int code, int val, const json* data)
 		}
 	}
 	return ret;
-}
-
-int Plugins::reload()
-{
-	return 0;
-}
-
-int Plugins::add(string name)
-{
-	(void)name;
-	return 0;
-}
-
-int Plugins::remove(string name)
-{
-	(void)name;
-	return 0;
 }

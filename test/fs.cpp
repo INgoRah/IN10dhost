@@ -40,7 +40,7 @@ protected:
 	void SetUp() override {
 		fs_init(&fs_ops);
 		ow.init();
-		ow.begin(&ds);
+		ow.begin();
 	}
 };
 
@@ -133,7 +133,7 @@ TEST_F(FsTest, GetDS1820Devices) {
 	EXPECT_TRUE(S_ISREG(st.st_mode));
 	logger.error("read");
 	// uncached is accessing the device
-	ow.begin(&ds);
+	ow.begin();
 	res = fs_ops.read("/uncached/28.0501FAFE6677A0/temperature", buf, 32, 0, nullptr);
 	// set log level back if changed by test
 	logger.set_level(lvl);
@@ -252,7 +252,7 @@ TEST_F(FsTest, DevDirs) {
 	res = fs_ops.read("/29.0701F8FE6677F4/cfg", buf, 32, 0, nullptr);
 	EXPECT_GE(res, 0);
 	// uncached is accessing the device
-	ow.begin(&ds);
+	ow.begin();
 	res = fs_ops.read("/uncached/29.0701F8FE6677F4/cfg", buf, 32, 0, nullptr);
 	EXPECT_GE(res, 0);
 
@@ -576,7 +576,7 @@ TEST_F(FsTest, PseudoArduinoDev) {
 
 	ow.update_device(1, "AD.0900F8FF6677E2");
 	ow.update_data();
-	ow.begin(&ds);
+	ow.begin();
 	res = fs_ops.getattr("/AD.0900F8FF6677E2", &st, nullptr);
 	EXPECT_EQ(res, 0);
 	EXPECT_TRUE(S_ISDIR(st.st_mode));

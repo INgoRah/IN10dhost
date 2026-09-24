@@ -49,7 +49,7 @@ extern void fs_init(fuse_operations* fs_ops);
 
 struct fuse_operations fs_ops = {};
 DS2482 ds("/dev/i2c-0", 0x18);
-OwDevices ow;
+OwDevices ow(&ds);
 SwitchHandler swHdl (&ow);
 
 using HrClock = std::chrono::high_resolution_clock;
@@ -218,7 +218,7 @@ string setup()
 		printf("loading failed %s\n" , e.what());
 		// create default config
 	}
-	ow.begin(&ds, cli.soft_start);
+	ow.begin(cli.soft_start);
 	swHdl.begin(&ds);
 
 	return f;

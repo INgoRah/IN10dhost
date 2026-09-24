@@ -127,10 +127,8 @@ void OwDevices::init()
 	last_alarm_poll = last_sec;
 }
 
-void OwDevices::begin(DS2482 *ds, bool soft)
+void OwDevices::begin(bool soft)
 {
-	this->ds = ds;
-
     if (!ds->init()) {
         printf("Failed to initialize DS2482\n");
 		return;
@@ -141,11 +139,6 @@ void OwDevices::begin(DS2482 *ds, bool soft)
 #endif
 	// bus controller is up; safe to start hardware access on every
 	// already-loaded device (init() has already run on all of them)
-	begin(soft);
-}
-
-void OwDevices::begin(bool soft)
-{
 	for (auto& dev : cache.devices)
 		dev->begin(ds, soft);
 	plugins.action(DS_RUNNING, 0); // loaded
@@ -510,8 +503,11 @@ int OwDevices::alarm_poll()
 	ds->log_event('5',0);
 
 	auto now = HrClock::now();
-	auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_alarm_poll).count();
-	if (elapsed < cache.poll * 1000)
+	/* compare the durations directly instead of converting to a
+	   millisecond count: "cache.poll * 1000" would be computed in 32 bit
+	   and only then widened for the comparison, so a large poll interval
+	   could overflow it (Coverity OVERFLOW_BEFORE_WIDEN) */
+	if (now - last_alarm_poll < std::chrono::seconds(cache.poll))
 		return 0;
 	last_alarm_poll = now;
 

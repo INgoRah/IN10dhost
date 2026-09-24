@@ -41,6 +41,9 @@ private:
 	JSRuntime* rt;
 	JSContext* ctx;
 	std::string script;
+	/* contents of the script as last loaded, so a reload with an
+	   unedited file is a no-op instead of wiping the script's state */
+	uint64_t script_hash;
 	/* QuickJS is single threaded, but action() is reached both from the
 	   FUSE threads and from the background poll worker */
 	std::recursive_mutex mtx;
@@ -190,6 +193,27 @@ private:
 		JS_FreeValue(ctx, global);
 	}
 
+	/* Throws away the context and builds a fresh one, so a reloaded
+	   script starts from a clean global object instead of inheriting
+	   whatever the previous version defined. The runtime is kept. */
+	bool reset_context()
+	{
+		if (ctx) {
+			JS_FreeContext(ctx);
+			ctx = nullptr;
+		}
+		ctx = JS_NewContext(rt);
+		if (ctx == nullptr) {
+			if (logger)
+				logger->error("jsengine: cannot create context");
+			return false;
+		}
+		JS_SetContextOpaque(ctx, this);
+		register_globals();
+
+		return true;
+	}
+
 	void load_script()
 	{
 		std::ifstream f(script);
@@ -218,7 +242,8 @@ private:
 	}
 
 public:
-	JsEngine() : logger(nullptr), devices(nullptr), rt(nullptr), ctx(nullptr), depth(0) {}
+	JsEngine() : logger(nullptr), devices(nullptr), rt(nullptr), ctx(nullptr),
+		script_hash(0), depth(0) {}
 
 	void info() override {
 		std::cout << "QuickJS engine " << JS_GetVersion() << std::endl;
@@ -271,12 +296,23 @@ public:
 		return j;
 	}
 
+	/* Also the reload path: Plugins::reload() hands an unchanged
+	   plugin its own config back so it can re-read external files. */
 	void config_set(const json& j) override
 	{
 		std::lock_guard<std::recursive_mutex> lock(mtx);
+		std::string want = j.value("script", "");
+		uint64_t hash = file_hash(want);
 
-		script = j.value("script", "");
-		if (ctx && !script.empty())
+		if (rt == nullptr || want.empty())
+			return;
+		/* same file, same contents: leave the running script and its
+		   state alone rather than re-evaluating it for nothing */
+		if (ctx && want == script && hash == script_hash)
+			return;
+		script = want;
+		script_hash = hash;
+		if (reset_context())
 			load_script();
 	}
 
