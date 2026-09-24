@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include <algorithm>
 #include <vector>
+#include <fstream>
 #include <fuse3/fuse.h>
 
 #include <gtest/gtest.h>
@@ -15,9 +16,13 @@
 #include "ds2408.h"
 #include "ds1820.h"
 #include "ard_i2c.h"
+#include "plugins.h"
 
 extern OwDevices ow;
 extern DS2482 ds;
+extern Plugins plugins;
+// defined in test/plugins.cpp
+extern std::filesystem::path exec_path();
 extern void fs_init(fuse_operations* fs_ops);
 
 static struct fuse_operations fs_ops = {};
@@ -706,11 +711,162 @@ TEST_F(FsTest, SettingsWriteErrors) {
 	res = fs_ops.write("/settings/poll", (char*)"nope", 4, 0, nullptr);
 	EXPECT_EQ(res, -EINVAL);
 
-	// triggers Plugins::reload() + action(ACT_INITIALIZED); the write then
-	// falls through to the generic device/switch handling below, which
-	// doesn't recognize this path either
+	// /settings/plugins is a directory, so it is not a write target
+	// itself - the write falls through to the generic device/switch
+	// handling, which does not recognize this path either
 	res = fs_ops.write("/settings/plugins", (char*)"", 0, 0, nullptr);
 	EXPECT_EQ(res, -ENOENT);
+}
+
+TEST_F(FsTest, PluginDirLists) {
+	struct stat st;
+	std::vector<std::string> seen;
+	auto record = [](void* buf, const char* name, const struct stat*,
+					 off_t, enum fuse_fill_dir_flags) {
+		static_cast<std::vector<std::string>*>(buf)->push_back(name);
+		return 0;
+	};
+
+	// the plugins entry is a directory now, not a 1024 byte file
+	int res = fs_ops.getattr("/settings/plugins", &st, nullptr);
+	EXPECT_EQ(res, 0);
+	EXPECT_TRUE(S_ISDIR(st.st_mode));
+
+	plugins.add("example");
+	res = fs_ops.readdir("/settings/plugins", &seen, record, 0, nullptr,
+		(enum fuse_readdir_flags)0);
+	EXPECT_EQ(res, 0);
+	EXPECT_NE(std::find(seen.begin(), seen.end(), "example"), seen.end());
+}
+
+TEST_F(FsTest, PluginFileAttrAndRead) {
+	struct stat st;
+	char buf[1024];
+
+	plugins.add("example");
+
+	// a loaded plugin shows up as a regular file ...
+	int res = fs_ops.getattr("/settings/plugins/example", &st, nullptr);
+	EXPECT_EQ(res, 0);
+	EXPECT_TRUE(S_ISREG(st.st_mode));
+	EXPECT_GT(st.st_size, 0);
+	EXPECT_EQ(fs_ops.open("/settings/plugins/example", nullptr), 0);
+
+	// ... whose contents are its config
+	res = fs_ops.read("/settings/plugins/example", buf, sizeof(buf), 0, nullptr);
+	ASSERT_GT(res, 0);
+	EXPECT_NE(std::string(buf, res).find("enabled"), std::string::npos);
+
+	// one that is not loaded does not exist
+	res = fs_ops.getattr("/settings/plugins/no_such_plugin", &st, nullptr);
+	EXPECT_EQ(res, -ENOENT);
+	// and neither does anything nested below a plugin
+	res = fs_ops.getattr("/settings/plugins/example/deeper", &st, nullptr);
+	EXPECT_EQ(res, -ENOENT);
+}
+
+TEST_F(FsTest, PluginCreateLoadsAndRmUnloads) {
+	struct stat st;
+
+	// start from a known state: not loaded
+	plugins.remove("example");
+	EXPECT_EQ(fs_ops.getattr("/settings/plugins/example", &st, nullptr), -ENOENT);
+
+	// touch loads it (create + utimens are what touch actually calls)
+	EXPECT_EQ(fs_ops.create("/settings/plugins/example", 0666, nullptr), 0);
+	EXPECT_EQ(fs_ops.utimens("/settings/plugins/example", nullptr, nullptr), 0);
+	EXPECT_EQ(fs_ops.getattr("/settings/plugins/example", &st, nullptr), 0);
+	// touching it again is harmless
+	EXPECT_EQ(fs_ops.create("/settings/plugins/example", 0666, nullptr), 0);
+
+	// writing rm unloads it again, newline from a shell redirect included
+	int res = fs_ops.write("/settings/plugins/example", (char*)"rm\n", 3, 0, nullptr);
+	EXPECT_GT(res, 0);
+	EXPECT_EQ(fs_ops.getattr("/settings/plugins/example", &st, nullptr), -ENOENT);
+
+	// removing it twice reports the second as missing
+	EXPECT_EQ(fs_ops.write("/settings/plugins/example", (char*)"rm", 2, 0, nullptr), -ENOENT);
+
+	plugins.add("example"); // restore for the other tests
+}
+
+TEST_F(FsTest, PluginTouchReloadsExisting) {
+	struct stat st;
+
+	plugins.add("example");
+	ASSERT_EQ(fs_ops.getattr("/settings/plugins/example", &st, nullptr), 0);
+
+	// give the reload something to find: a trailing byte changes the
+	// library's content hash without stopping the ELF from loading
+	std::filesystem::path lib = exec_path() / "libexample.so";
+	std::filesystem::path backup = exec_path() / "libexample.so.orig";
+	std::filesystem::copy_file(lib, backup,
+		std::filesystem::copy_options::overwrite_existing);
+	{
+		std::ofstream out(lib, std::ios::binary | std::ios::app);
+		out.put('\0');
+	}
+
+	// touch on a file that already exists never reaches create(): the
+	// kernel resolves it and calls open()+utimens(), so utimens is what
+	// has to perform the reload
+	EXPECT_EQ(fs_ops.utimens("/settings/plugins/example", nullptr, nullptr), 0);
+
+	// it really reloaded: an explicit reload now finds nothing left to
+	// do, whereas it would report one if utimens had skipped it
+	EXPECT_EQ(plugins.reload(), 0);
+	// and the plugin is still loaded and working
+	EXPECT_EQ(fs_ops.getattr("/settings/plugins/example", &st, nullptr), 0);
+	EXPECT_EQ(plugins.action(ACT_READY), 1);
+
+	std::filesystem::copy_file(backup, lib,
+		std::filesystem::copy_options::overwrite_existing);
+	std::filesystem::remove(backup);
+	plugins.reload();
+
+	// touching anything else is still just a no-op success, so plain
+	// touch on the rest of the filesystem keeps working
+	EXPECT_EQ(fs_ops.utimens("/settings/poll", nullptr, nullptr), 0);
+}
+
+TEST_F(FsTest, PluginUnlinkUnloads) {
+	struct stat st;
+
+	plugins.add("example");
+	ASSERT_EQ(fs_ops.getattr("/settings/plugins/example", &st, nullptr), 0);
+
+	// rm on the plugin file unloads it
+	EXPECT_EQ(fs_ops.unlink("/settings/plugins/example"), 0);
+	EXPECT_EQ(fs_ops.getattr("/settings/plugins/example", &st, nullptr), -ENOENT);
+	// a second rm has nothing left to remove
+	EXPECT_EQ(fs_ops.unlink("/settings/plugins/example"), -ENOENT);
+
+	// nothing outside the plugins directory may be deleted
+	EXPECT_EQ(fs_ops.unlink("/settings/poll"), -EPERM);
+	EXPECT_EQ(fs_ops.unlink("/29.0701F8FE6677F4/name"), -EPERM);
+
+	plugins.add("example"); // restore for the other tests
+}
+
+TEST_F(FsTest, PluginWriteErrors) {
+	plugins.add("example");
+
+	LogLevel lvl = logger.get_level();
+	logger.set_level(LogLevel::NONE);
+	// only rm and reload are understood
+	EXPECT_EQ(fs_ops.write("/settings/plugins/example", (char*)"wat", 3, 0, nullptr), -EINVAL);
+	logger.set_level(lvl);
+
+	// reload is accepted
+	EXPECT_GT(fs_ops.write("/settings/plugins/example", (char*)"reload\n", 7, 0, nullptr), 0);
+
+	// creating is only allowed under the plugins directory
+	EXPECT_EQ(fs_ops.create("/settings/poll", 0666, nullptr), -EPERM);
+	EXPECT_EQ(fs_ops.create("/29.0701F8FE6677F4/name", 0666, nullptr), -EPERM);
+	// and only for a library that actually exists
+	logger.set_level(LogLevel::NONE);
+	EXPECT_EQ(fs_ops.create("/settings/plugins/no_such_plugin", 0666, nullptr), -ENOENT);
+	logger.set_level(lvl);
 }
 
 TEST_F(FsTest, SettingsWriteOutOfRange) {

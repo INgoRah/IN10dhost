@@ -257,6 +257,175 @@ TEST(plugins, PluginSave)
 	ow.begin();
 }
 
+// Reloads the fault injection plugin with a given mode. load() skips a
+// plugin that is already loaded, so it has to be removed first.
+static void load_faulty(const string& mode)
+{
+	plugins.remove("faulty");
+	plugins.load(json{ { "faulty", { { "mode", mode } } } });
+}
+
+TEST(plugins, FaultyPluginActionThrows)
+{
+	LogLevel lvl = logger.get_level();
+	logger.set_level(LogLevel::NONE); // the failures are the point
+
+	// a std::exception out of action() is caught and the other plugins
+	// still run, so the result is whatever they returned
+	ensure_example_loaded();
+	load_faulty("action");
+	int expect = plugins.action(ACT_READY);   // faulty contributes 0
+	EXPECT_NO_THROW(plugins.action(ACT_READY));
+
+	// something that is not a std::exception at all has to be stopped by
+	// the catch(...) rather than reaching the daemon
+	load_faulty("action_odd");
+	int ret = -1;
+	EXPECT_NO_THROW(ret = plugins.action(ACT_READY));
+	EXPECT_EQ(ret, expect);
+
+	logger.set_level(lvl);
+	plugins.remove("faulty");
+}
+
+TEST(plugins, FaultyPluginExitThrows)
+{
+	LogLevel lvl = logger.get_level();
+	logger.set_level(LogLevel::NONE);
+
+	// exit() runs while unloading; throwing there must not stop the
+	// unload from completing
+	load_faulty("exit");
+	size_t before = plugins.count();
+	EXPECT_NO_THROW(EXPECT_EQ(plugins.remove("faulty"), 0));
+	EXPECT_EQ(plugins.count(), before - 1);
+
+	logger.set_level(lvl);
+}
+
+TEST(plugins, FaultyPluginConfigGetThrows)
+{
+	LogLevel lvl = logger.get_level();
+	logger.set_level(LogLevel::NONE);
+
+	// config_of() is what serves a read of settings/plugins/<name>, so a
+	// throwing config_get() must degrade to an empty object, not escape
+	load_faulty("config_get");
+	json cfg;
+	EXPECT_NO_THROW(cfg = plugins.config_of("faulty"));
+	EXPECT_TRUE(cfg.is_object());
+	EXPECT_TRUE(cfg.empty());
+
+	logger.set_level(lvl);
+	plugins.remove("faulty");
+}
+
+TEST(plugins, FaultyPluginConfigSetThrows)
+{
+	LogLevel lvl = logger.get_level();
+	logger.set_level(LogLevel::NONE);
+
+	// reload() hands an unchanged plugin its config back; throwing from
+	// config_set() there must not abort the whole reload
+	load_faulty("config_set");
+	ensure_example_loaded();
+	EXPECT_NO_THROW(plugins.reload());
+	// the rest of the plugins are still loaded and working
+	EXPECT_EQ(plugins.action(ACT_READY), plugins.action(ACT_READY));
+
+	logger.set_level(lvl);
+	plugins.remove("faulty");
+}
+
+TEST(plugins, FaultyPluginThrowsNonException)
+{
+	LogLevel lvl = logger.get_level();
+	logger.set_level(LogLevel::NONE);
+
+	// Everything that crosses into a plugin has a catch(...) behind the
+	// catch(std::exception); these drive that second arm by throwing
+	// something that is not derived from std::exception at all.
+	load_faulty("config_get_odd");
+	json cfg;
+	EXPECT_NO_THROW(cfg = plugins.config_of("faulty"));
+	EXPECT_TRUE(cfg.is_object());
+	EXPECT_TRUE(cfg.empty());
+
+	// config_set: reload() re-applies the config of an unchanged plugin
+	load_faulty("config_set_odd");
+	EXPECT_NO_THROW(plugins.reload("faulty"));
+
+	// exit: thrown while unloading, the unload still has to finish
+	load_faulty("exit_odd");
+	size_t before = plugins.count();
+	EXPECT_NO_THROW(EXPECT_EQ(plugins.remove("faulty"), 0));
+	EXPECT_EQ(plugins.count(), before - 1);
+
+	logger.set_level(lvl);
+}
+
+TEST(plugins, ReloadOnlyTouchesTheNamedPlugin)
+{
+	ensure_example_loaded();
+	load_faulty("");
+
+	// with a name, every other loaded plugin is skipped outright
+	EXPECT_EQ(plugins.reload("example"), 0);
+	EXPECT_EQ(plugins.count(), plugins.names().size());
+	// a name that is not loaded reloads nothing at all
+	EXPECT_EQ(plugins.reload("no_such_plugin"), 0);
+
+	plugins.remove("faulty");
+}
+
+TEST(plugins, LoadPluginMissingSymbols)
+{
+	// A valid shared object with no create_plugin/destroy_plugin in it:
+	// dlopen() succeeds and dlsym() is what fails, which is a different
+	// path from libinvalid.so above (that one fails in dlopen).
+	std::filesystem::path so = exec_path() / "libnosym.so";
+	string cmd = std::format(
+		"echo 'int dummy;' | g++ -shared -fPIC -x c++ - -o {} 2>/dev/null",
+		so.string());
+	if (std::system(cmd.c_str()) != 0 || !std::filesystem::exists(so))
+		GTEST_SKIP() << "could not build the stub library";
+
+	LogLevel lvl = logger.get_level();
+	logger.set_level(LogLevel::NONE);
+	EXPECT_EQ(plugins.add("nosym"), -1);
+	logger.set_level(lvl);
+
+	// nothing was registered
+	EXPECT_FALSE(plugins.save().contains("nosym"));
+	std::filesystem::remove(so);
+}
+
+TEST(plugins, ReloadFailureDropsPlugin)
+{
+	ensure_example_loaded();
+	std::filesystem::path lib = exec_path() / "libexample.so";
+	std::filesystem::path backup = exec_path() / "libexample.so.orig";
+	std::filesystem::copy_file(lib, backup,
+		std::filesystem::copy_options::overwrite_existing);
+
+	// replace it with something that is not loadable at all: the hash
+	// differs so reload() tries, the unload succeeds, and loading the
+	// replacement fails
+	std::ofstream(lib, std::ios::binary | std::ios::trunc) << "not an ELF";
+
+	LogLevel lvl = logger.get_level();
+	logger.set_level(LogLevel::NONE);
+	EXPECT_EQ(plugins.reload("example"), 0);   // nothing came back
+	logger.set_level(lvl);
+	EXPECT_FALSE(plugins.save().contains("example"));
+
+	std::filesystem::copy_file(backup, lib,
+		std::filesystem::copy_options::overwrite_existing);
+	std::filesystem::remove(backup);
+	ensure_example_loaded();                   // restore for other tests
+	EXPECT_TRUE(plugins.save().contains("example"));
+}
+
 TEST(plugins, LoadPluginCopyFailure)
 {
 	// plugin_init() locates the plugin via fs::exists(), which is also

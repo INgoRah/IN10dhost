@@ -9,6 +9,13 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(QJS qjs)
 
 file(GLOB PLUGIN_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/*.cpp")
+
+# faulty.cpp exists only to drive the loader's error handling from the
+# tests; it must never end up on a target
+if(NOT TESTING)
+    list(REMOVE_ITEM PLUGIN_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/faulty.cpp")
+endif()
+
 if(QJS_FOUND)
     message(STATUS "Using quickjs: ${QJS_VERSION}")
 else()
@@ -55,9 +62,12 @@ foreach(SOURCE_FILE ${PLUGIN_SOURCES})
         PREFIX "lib"
         LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
     )
-    install(TARGETS ${PLUGIN_NAME}
-        LIBRARY DESTINATION /opt/lib/IN10dfsd/
-    )
+    # the fault injection fixture stays in the build tree
+    if(NOT PLUGIN_NAME STREQUAL "faulty")
+        install(TARGETS ${PLUGIN_NAME}
+            LIBRARY DESTINATION /opt/lib/IN10dfsd/
+        )
+    endif()
 
 endforeach()
 

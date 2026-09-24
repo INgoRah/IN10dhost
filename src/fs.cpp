@@ -29,8 +29,30 @@ static struct filetype settings[] = {
 	{ "log", 1 },
 	{ "mode", 3 },
 	{ "poll", 3 },
-	{ "plugins", 1024 },
+	/* a directory: one file per loaded plugin, see plugin_name() */
+	{ "plugins", 0 },
 };
+
+/* Plugin management lives under here: the directory lists one regular
+   file per loaded plugin, creating a file loads that plugin, and
+   writing to one controls it (see fs_write). */
+static const char plugin_dir[] = "/settings/plugins";
+
+/* Returns the plugin name for a "/settings/plugins/<name>" path, or an
+   empty string for anything else - including the directory itself and
+   any attempt to nest further below a plugin. */
+static string plugin_name(const char* path)
+{
+	size_t len = strlen(plugin_dir);
+
+	if (strncmp(path, plugin_dir, len) != 0 || path[len] != '/')
+		return string();
+	string name(path + len + 1);
+	if (name.empty() || name.find('/') != string::npos)
+		return string();
+
+	return name;
+}
 
 static void fs_dir_devs(fuse_fill_dir_t filler, void *buf, bool alarm = false);
 
@@ -188,6 +210,19 @@ static int fs_getattr(const char* path, struct stat* st, struct fuse_file_info*)
 		if (check_path(spath, s, st))
 			return 0;
 	}
+	// one file per loaded plugin. Checked against the raw path before
+	// the settings block below, which rewrites spath as it matches.
+	string pname = plugin_name(path);
+	if (!pname.empty()) {
+		json cfg = plugins.config_of(pname);
+		if (cfg.is_null())
+			// no such plugin loaded; fs_create() is what adds one
+			return -ENOENT;
+		st->st_mode = S_IFREG | 0666;
+		st->st_nlink = 1;
+		st->st_size = cfg.dump().size() + 1;
+		return 0;
+	}
 	if (extract_subpath(spath, "settings")) {
 		for (const auto& s : settings)
 			if (check_path(spath, s, st))
@@ -294,6 +329,14 @@ static int fs_readdir(const char* path, void* buf, fuse_fill_dir_t filler,
 			filler(buf, s.name, nullptr, 0, static_cast<fuse_fill_dir_flags>(0));
 		return 0;
 	}
+	if (strcmp(path, plugin_dir) == 0) {
+		for (const auto& name : plugins.names())
+			filler(buf, name.c_str(), nullptr, 0,
+				static_cast<fuse_fill_dir_flags>(0));
+		filler(buf, ".", nullptr, 0, static_cast<fuse_fill_dir_flags>(0));
+		filler(buf, "..", nullptr, 0, static_cast<fuse_fill_dir_flags>(0));
+		return 0;
+	}
 	if (strcmp(path, "/log") == 0) {
 		filler(buf, "1wire.vcd", nullptr, 0, static_cast<fuse_fill_dir_flags>(0));
 		filler(buf, ".", nullptr, 0, static_cast<fuse_fill_dir_flags>(0));
@@ -356,6 +399,10 @@ static int fs_open(const char* path, struct fuse_file_info*)
 		return 0;
 	if (strcmp(path, "/log/1wire.vcd") == 0)
 		return 0;
+	// a loaded plugin's control file; explicit rather than relying on
+	// the SwitchHandler fallback at the end to wave it through
+	if (!plugin_name(path).empty())
+		return 0;
 
 	int bus;
 	extractBusNumber(spath, bus);
@@ -390,6 +437,18 @@ static int fs_read(const char* path, char* buf, size_t size, off_t offset,
 	}
 	if (strcmp(path, "/log/1wire.vcd") == 0) {
 		return ow.log_dump(buf, size);
+	}
+	// reading a plugin file reports that plugin's config
+	string pname = plugin_name(path);
+	if (!pname.empty()) {
+		json cfg = plugins.config_of(pname);
+		if (cfg.is_null())
+			return -ENOENT;
+		string s = cfg.dump() + "\n";
+		if (s.size() > size)
+			return -EINVAL;
+		memcpy(buf, s.c_str(), s.size());
+		return s.size();
 	}
 	if (extract_subpath(spath, "switches"))
 		return swHdl.fs_read(spath, buf, size);
@@ -440,9 +499,25 @@ static int fs_write(const char* path, const char* buf, size_t size,
 			return -EINVAL;
 		}
 	}
-	if (strcmp(path, "/settings/plugins") == 0) {
-		plugins.reload();
-		plugins.action(ACT_READY, 0); // initialized
+	// Commands written to a plugin file. "/settings/plugins" itself is a
+	// directory now, so it cannot be the target of a write any more -
+	// the kernel refuses to open a directory for writing.
+	string pname = plugin_name(path);
+	if (!pname.empty()) {
+		string cmd(buf, size);
+		// trim the newline a shell redirect adds
+		while (!cmd.empty() && (cmd.back() == '\n' || cmd.back() == '\r'))
+			cmd.pop_back();
+
+		if (cmd == "rm")
+			return plugins.remove(pname) == 0 ? (int)size : -ENOENT;
+		if (cmd == "reload") {
+			plugins.reload();
+			plugins.action(ACT_READY, 0);
+			return size;
+		}
+		logger.warn("plugins: unknown command '" + cmd + "', expected rm or reload");
+		return -EINVAL;
 	}
 	string spath(path);
 	spath.erase(0, 1);
@@ -463,6 +538,63 @@ static int fs_write(const char* path, const char* buf, size_t size,
 	return -ENOENT;
 }
 
+/* Creating a file under the plugins directory loads that plugin, which
+   is what makes "touch /settings/plugins/<name>" the way to add one.
+   Nothing else in this filesystem is creatable. */
+static int fs_create(const char* path, mode_t, struct fuse_file_info*)
+{
+	string pname = plugin_name(path);
+
+	if (pname.empty())
+		return -EPERM;
+	switch (plugins.add(pname)) {
+		case 0:
+			logger.info("plugins: loaded " + pname);
+			return 0;
+		case 1:
+			// already loaded, treat as success so touch stays idempotent
+			return 0;
+		default:
+			// no such library, or it failed to load
+			return -ENOENT;
+	}
+}
+
+/* Deleting a plugin file unloads that plugin, making
+   "rm /settings/plugins/<name>" the counterpart of the touch above.
+   Nothing else in this filesystem is removable. */
+static int fs_unlink(const char* path)
+{
+	string pname = plugin_name(path);
+
+	if (pname.empty())
+		return -EPERM;
+	if (plugins.remove(pname) != 0)
+		return -ENOENT;
+	logger.info("plugins: unloaded " + pname);
+
+	return 0;
+}
+
+/* touch() sets the timestamps right after opening the file; without
+   this it would fail on that step even though the plugin did load.
+   Timestamps are not stored, so this only has to succeed.
+ *
+ * It is also how "touch" on an *existing* plugin reloads it: because
+ * the file is already there the kernel resolves it and calls open() +
+ * utimens(), never create(), so this is the only hook that sees it. */
+static int fs_utimens(const char* path, const struct timespec[2], struct fuse_file_info*)
+{
+	string pname = plugin_name(path);
+
+	if (!pname.empty()) {
+		plugins.reload(pname);
+		plugins.action(ACT_READY, 0);
+	}
+
+	return 0;
+}
+
 static void* init(struct fuse_conn_info*, struct fuse_config*)
 {
 	g_fuse = fuse_get_context()->fuse;
@@ -472,6 +604,9 @@ static void* init(struct fuse_conn_info*, struct fuse_config*)
 void fs_init(fuse_operations* fs_ops) {
 	fs_ops->getattr = fs_getattr;
 	fs_ops->readdir = fs_readdir;
+	fs_ops->create	= fs_create;
+	fs_ops->unlink	= fs_unlink;
+	fs_ops->utimens = fs_utimens;
 	fs_ops->open	= fs_open;
 	fs_ops->read	= fs_read;
 	fs_ops->write   = fs_write;
