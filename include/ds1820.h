@@ -1,11 +1,17 @@
 #include "ow_devices.h"
 #include "interface/ds1820.h"
+#include "fs_table.h"
 
 class ds1820 : public OwDev, public IDS1820 {
 	private:
 		uint8_t scratchPad[9];
 		float temp;
 		uint8_t hum;
+		// fs_table.h handlers
+		int r_temperature(char* buf, size_t size, bool uncached, int idx);
+		int r_humidity(char* buf, size_t size, bool uncached, int idx);
+		static const FsEntry<ds1820> table[];
+		static const size_t n_table;
 
 	public:
 		using OwDev::OwDev;

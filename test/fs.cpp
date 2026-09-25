@@ -16,6 +16,7 @@
 #include "ds2408.h"
 #include "ds1820.h"
 #include "ard_i2c.h"
+#include "fs_table.h"
 #include "plugins.h"
 
 extern OwDevices ow;
@@ -441,6 +442,156 @@ TEST_F(FsTest, WriteReadDevPio) {
 	dev->data[PIO_OUT] = 222;
 	res = fs_ops.read("/uncached/29.0701F8FE6677F4/BYTE", buf, 3, 0, nullptr);
 	EXPECT_STREQ(buf, "222");
+}
+
+// Standalone check of fs_table.h's alpha wildcard mapping (A -> 0,
+// B -> 1, ...), decoupled from any real device: ds2450's own volt_a..
+// volt_d are private with no test setter, and the simulated 1-Wire bus
+// does not differentiate its canned response by channel, so neither
+// can prove the letter-to-index mapping is actually correct end to
+// end. This exercises fs_table::read()/write() directly against a
+// throwaway table instead.
+namespace {
+struct AlphaProbe {
+	int seen_idx[4] = { -1, -1, -1, -1 };
+	int r_ch(char* buf, size_t, bool, int idx)
+	{
+		std::sprintf(buf, "%d", idx);
+		return std::strlen(buf);
+	}
+	int w_ch(const char* buf, size_t size, int idx)
+	{
+		if (idx >= 0 && idx < 4)
+			seen_idx[idx] = std::atoi(buf);
+		return size;
+	}
+	static const FsEntry<AlphaProbe> table[];
+	static const size_t n_table;
+};
+const FsEntry<AlphaProbe> AlphaProbe::table[] = {
+	{ "ch.*", 2, 4, /* alpha */ true, nullptr, nullptr, &AlphaProbe::r_ch, &AlphaProbe::w_ch },
+};
+const size_t AlphaProbe::n_table = sizeof(AlphaProbe::table) / sizeof(AlphaProbe::table[0]);
+}
+
+TEST(FsTableAlpha, LettersMapToZeroBasedIndex) {
+	AlphaProbe p;
+	char buf[8];
+
+	// A -> 0, B -> 1, C -> 2, D -> 3, and each stays independent of
+	// the others - a wrong mapping (e.g. an off-by-one, or all four
+	// letters aliasing to the same idx) would show up here
+	const char* letters = "ABCD";
+	for (int i = 0; i < 4; i++) {
+		std::string path = std::string("ch.") + letters[i];
+		int r = fs_table::read(p, AlphaProbe::table, AlphaProbe::n_table, path, buf, sizeof(buf), false);
+		EXPECT_GE(r, 0);
+		EXPECT_EQ(std::string(buf, r), std::to_string(i));
+	}
+
+	// and the same mapping applies to write()
+	for (int i = 0; i < 4; i++) {
+		std::string path = std::string("ch.") + letters[i];
+		std::string val = std::to_string(100 + i);
+		int r = fs_table::write(p, AlphaProbe::table, AlphaProbe::n_table, path, val.c_str(), val.size());
+		EXPECT_GE(r, 0);
+	}
+	EXPECT_EQ(p.seen_idx[0], 100);
+	EXPECT_EQ(p.seen_idx[1], 101);
+	EXPECT_EQ(p.seen_idx[2], 102);
+	EXPECT_EQ(p.seen_idx[3], 103);
+}
+
+TEST_F(FsTest, Ds2408PioVisibility) {
+	std::vector<std::string> seen;
+	auto record = [](void* buf, const char* name, const struct stat*,
+					 off_t, enum fuse_fill_dir_flags) {
+		static_cast<std::vector<std::string>*>(buf)->push_back(name);
+		return 0;
+	};
+
+	ow.update_device(1, "29.0701F8FE6677F4");
+	ow.update_data();
+	ds2408* dev = (ds2408*)ow.find(0x290701F8FE6677F4);
+	ASSERT_NE(dev, nullptr);
+
+	// pin 0 not yet configured as an output/input: PIO.0 and sensed.0
+	// are reachable directly (fs_attr/fs_read never gate on cfg) but
+	// must not appear in the directory listing
+	dev->cfg[CFG_PIN_ID] = 0;
+	seen.clear();
+	fs_ops.readdir("/29.0701F8FE6677F4", &seen, record, 0, nullptr, (enum fuse_readdir_flags)0);
+	EXPECT_EQ(std::find(seen.begin(), seen.end(), "PIO.0"), seen.end());
+	EXPECT_EQ(std::find(seen.begin(), seen.end(), "sensed.0"), seen.end());
+	struct stat st;
+	EXPECT_EQ(fs_ops.getattr("/29.0701F8FE6677F4/PIO.0", &st, nullptr), 0);
+
+	// configure pin 0 as an output: PIO.0 must now be listed, sensed.0
+	// (an input-only concept) still must not
+	dev->cfg[CFG_PIN_ID] = CFG_OUT_LOW;
+	seen.clear();
+	fs_ops.readdir("/29.0701F8FE6677F4", &seen, record, 0, nullptr, (enum fuse_readdir_flags)0);
+	EXPECT_NE(std::find(seen.begin(), seen.end(), "PIO.0"), seen.end());
+	EXPECT_EQ(std::find(seen.begin(), seen.end(), "sensed.0"), seen.end());
+
+	// configure pin 0 as an input/button: sensed.0 now listed, PIO.0 not
+	dev->cfg[CFG_PIN_ID] = CFG_BTN;
+	seen.clear();
+	fs_ops.readdir("/29.0701F8FE6677F4", &seen, record, 0, nullptr, (enum fuse_readdir_flags)0);
+	EXPECT_NE(std::find(seen.begin(), seen.end(), "sensed.0"), seen.end());
+	EXPECT_EQ(std::find(seen.begin(), seen.end(), "PIO.0"), seen.end());
+
+	// latched.* and pin.* are unconditional regardless of cfg
+	EXPECT_NE(std::find(seen.begin(), seen.end(), "latched.0"), seen.end());
+	EXPECT_NE(std::find(seen.begin(), seen.end(), "pin.0"), seen.end());
+}
+
+TEST_F(FsTest, Ds2408PinInstanceDirLists) {
+	std::vector<std::string> seen;
+	auto record = [](void* buf, const char* name, const struct stat*,
+					 off_t, enum fuse_fill_dir_flags) {
+		static_cast<std::vector<std::string>*>(buf)->push_back(name);
+		return 0;
+	};
+
+	ow.update_device(1, "29.0701F8FE6677F4");
+	ow.update_data();
+
+	// browsing into a pin instance returns exactly its two children,
+	// not the device's own top-level files mixed in
+	fs_ops.readdir("/29.0701F8FE6677F4/pin.0", &seen, record, 0, nullptr, (enum fuse_readdir_flags)0);
+	ASSERT_EQ(seen.size(), 2u);
+	EXPECT_NE(std::find(seen.begin(), seen.end(), "name"), seen.end());
+	EXPECT_NE(std::find(seen.begin(), seen.end(), "func"), seen.end());
+}
+
+TEST_F(FsTest, Ds2408WriteDoesNotCrossContaminate) {
+	char buf[32];
+	int res;
+
+	ow.update_device(1, "29.0701F8FE6677F4");
+	ow.update_data();
+	ds2408* dev = (ds2408*)ow.find(0x290701F8FE6677F4);
+	ASSERT_NE(dev, nullptr);
+
+	// writing to a pin's "name" file must not fall through to the
+	// device's own name field (both paths contain the substring "name")
+	dev->name = "original";
+	res = fs_ops.write("/29.0701F8FE6677F4/pin.0/name", (char*)"hijack", 6, 0, nullptr);
+	EXPECT_GT(res, 0);
+	EXPECT_EQ(dev->name, "original");
+
+	// writing to sensed.0 (a read-only sensor value) must not reset the
+	// activity latches the way writing to latched.0 deliberately does
+	dev->data[PIO_LATCH] = 0xAB;
+	res = fs_ops.write("/29.0701F8FE6677F4/sensed.0", (char*)"1", 1, 0, nullptr);
+	EXPECT_GE(res, 0);
+	EXPECT_EQ(dev->data[PIO_LATCH], 0xAB);
+
+	// read confirms buf untouched by the write-to-name call above
+	res = fs_ops.read("/29.0701F8FE6677F4/name", buf, sizeof(buf), 0, nullptr);
+	EXPECT_GT(res, 0);
+	EXPECT_STREQ(buf, "original");
 }
 
 TEST_F(FsTest, Ds2408Gaps) {
