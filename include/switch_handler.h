@@ -6,6 +6,7 @@
 #include "ds2482.h"
 #include "ds2408.h"
 #include "fs.h"
+#include "fs_table.h"
 
 using std::string;
 
@@ -141,6 +142,12 @@ class SwitchHandler : IFs {
 		uint8_t dimLevel(union pio dst, uint8_t* id);
 		uint8_t dimLevel(union d_adr_8 dst, uint8_t* id);
 		uint16_t getLen(uint8_t max, uint16_t elSize);
+		// fs_table.h handlers
+		int r_list(char* buf, size_t size, bool uncached, int idx);
+		int w_add(const char* buf, size_t size, int idx);
+		int w_del(const char* buf, size_t size, int idx);
+		static const FsEntry<SwitchHandler> table[];
+		static const size_t n_table;
 #ifdef TESTING
 		// GTest testing support
 		FRIEND_TEST(LLSwTest, ll_funcs);

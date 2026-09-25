@@ -116,6 +116,7 @@ add_executable(in10dfs
     src/logger.cpp
     src/cli.cpp
     src/fs.cpp
+    src/fs_leaf.cpp
     src/ard_i2c.cpp
     src/ds2482.cpp
     src/ow_dev.cpp

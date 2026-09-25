@@ -3,8 +3,12 @@
 #include <cerrno>
 #include <unistd.h>
 #include <fuse3/fuse.h>
+#include <string>
+#include <cctype>
 #include "main.h"
 #include "fs.h"
+#include "fs_table.h"
+#include "fs_leaf.h"
 #include "ow_devices.h"
 #include "plugins.h"
 #include "switch_handler.h"
@@ -12,23 +16,24 @@
 
 using std::string;
 extern Plugins plugins;
+class OwDevices;
+extern OwDevices ow;
+class SwitchHandler;
+extern SwitchHandler swHdl;
+
+static struct fuse* g_fuse = nullptr;
 
 static struct filetype root_dir[] = {
 	{ ".", 0 },
 	{ "..", 0 },
 	{ "alarm", 0 },
 	{ "uncached", 0 },
-	{ "settings", 0 },
 	{ "switches", 0 },
-	{ "log", 0 },
 };
 
 static struct filetype settings[] = {
 	{ ".", 0 },
 	{ "..", 0 },
-	{ "log", 1 },
-	{ "mode", 3 },
-	{ "poll", 3 },
 	/* a directory: one file per loaded plugin, see plugin_name() */
 	{ "plugins", 0 },
 };
@@ -55,20 +60,7 @@ static string plugin_name(const char* path)
 }
 
 static void fs_dir_devs(fuse_fill_dir_t filler, void *buf, bool alarm = false);
-
 static bool check_path(std::string &spath, const filetype &s, struct stat *st);
-
-static string file_content = "Hello from FUSE!\n";
-static string f_buf = "\n";
-static struct fuse* g_fuse = nullptr;
-
-class OwDevices;
-extern OwDevices ow;
-class SwitchHandler;
-extern SwitchHandler swHdl;
-
-#include <string>
-#include <cctype>
 
 static bool extractBusNumber(string& path, int& busNumber)
 {
@@ -223,22 +215,24 @@ static int fs_getattr(const char* path, struct stat* st, struct fuse_file_info*)
 		st->st_size = cfg.dump().size() + 1;
 		return 0;
 	}
+	{
+		int attr = fsLeaf.attr(spath);
+		if (attr > 0) {
+			st->st_mode = S_IFREG | 0666;
+			st->st_size = attr;
+			st->st_nlink = 1;
+			return 0;
+		}
+		if (attr == 0) {
+			st->st_mode = S_IFDIR | 0755;
+			st->st_nlink = 2;
+			return 0;
+		}
+	}
 	if (extract_subpath(spath, "settings")) {
 		for (const auto& s : settings)
 			if (check_path(spath, s, st))
 				return 0;
-	}
-	if (strcmp(path, "/log") == 0) {
-		st->st_mode = S_IFDIR | 0755;
-		st->st_nlink = 2;
-		return 0;
-	}
-	if (strcmp(path, "/log/1wire.vcd") == 0) {
-		st->st_mode = S_IFREG | 0666;
-		// TODO query real size ow.log_size()
-		st->st_size = 218 + (1024 * 30);
-		st->st_nlink = 1;
-		return 0;
 	}
 
 	int bus;
@@ -322,11 +316,15 @@ static int fs_readdir(const char* path, void* buf, fuse_fill_dir_t filler,
 		// standard entries
 		for (const auto& s : root_dir)
 			filler(buf, s.name, nullptr, 0, static_cast<fuse_fill_dir_flags>(0));
+		for (const auto& n : fsLeaf.dir(string("")))
+			filler(buf, n.c_str(), nullptr, 0, static_cast<fuse_fill_dir_flags>(0));
 		return 0;
 	}
 	if (strcmp(path, "/settings") == 0) {
 		for (const auto& s : settings)
 			filler(buf, s.name, nullptr, 0, static_cast<fuse_fill_dir_flags>(0));
+		for (const auto& n : fsLeaf.dir(string("settings")))
+			filler(buf, n.c_str(), nullptr, 0, static_cast<fuse_fill_dir_flags>(0));
 		return 0;
 	}
 	if (strcmp(path, plugin_dir) == 0) {
@@ -338,7 +336,8 @@ static int fs_readdir(const char* path, void* buf, fuse_fill_dir_t filler,
 		return 0;
 	}
 	if (strcmp(path, "/log") == 0) {
-		filler(buf, "1wire.vcd", nullptr, 0, static_cast<fuse_fill_dir_flags>(0));
+		for (const auto& n : fsLeaf.dir(string("log")))
+			filler(buf, n.c_str(), nullptr, 0, static_cast<fuse_fill_dir_flags>(0));
 		filler(buf, ".", nullptr, 0, static_cast<fuse_fill_dir_flags>(0));
 		filler(buf, "..", nullptr, 0, static_cast<fuse_fill_dir_flags>(0));
 		return 0;
@@ -393,11 +392,7 @@ static int fs_open(const char* path, struct fuse_file_info*)
 	string spath(path);
 	spath.erase(0, 1);
 
-	if (strcmp(path, "/settings/log") == 0)
-		return 0;
-	if (strcmp(path, "/settings/poll") == 0)
-		return 0;
-	if (strcmp(path, "/log/1wire.vcd") == 0)
+	if (fsLeaf.open(spath) == 0)
 		return 0;
 	// a loaded plugin's control file; explicit rather than relying on
 	// the SwitchHandler fallback at the end to wave it through
@@ -427,16 +422,10 @@ static int fs_read(const char* path, char* buf, size_t size, off_t offset,
 	string spath(path);
 	spath.erase(0, 1);
 	(void)offset;
-	if (strcmp(path, "/settings/log") == 0) {
-		std::sprintf(buf, "%d", (int)logger.get_level());
-			return std::strlen(buf);
-	}
-	if (strcmp(path, "/settings/poll") == 0) {
-		std::sprintf(buf, "%d", ow.get_poll());
-		return std::strlen(buf);
-	}
-	if (strcmp(path, "/log/1wire.vcd") == 0) {
-		return ow.log_dump(buf, size);
+	{
+		int res = fsLeaf.read(spath, buf, size, false);
+		if (res != fs_table::NOT_FOUND)
+			return res;
 	}
 	// reading a plugin file reports that plugin's config
 	string pname = plugin_name(path);
@@ -474,30 +463,12 @@ static int fs_write(const char* path, const char* buf, size_t size,
 					off_t offset, struct fuse_file_info*)
 {
 	(void)offset;
-	if (strcmp(path, "/settings/log") == 0) {
-		try {
-			int tmp = std::stoi(buf);
-			if (tmp < 0 || tmp > 8)
-				return -EINVAL;
-		} catch (const std::invalid_argument&) {
-			return -EINVAL;
-		} catch (const std::out_of_range&) {
-			return -EINVAL;
-		}
-		uint8_t tmp = (uint8_t)(std::stoi(buf));
-		logger.set_level((LogLevel)tmp);
-		return size;
-	}
-	if (strcmp(path, "/settings/poll") == 0) {
-		try {
-			uint8_t tmp = (uint8_t)(std::stoi(buf));
-			ow.set_poll(tmp);
-			return size;
-		} catch (const std::invalid_argument&) {
-			return -EINVAL;
-		} catch (const std::out_of_range&) {
-			return -EINVAL;
-		}
+	string spath(path);
+	spath.erase(0, 1);
+	{
+		int res = fsLeaf.write(spath, buf, size);
+		if (res != fs_table::NOT_FOUND)
+			return res;
 	}
 	// Commands written to a plugin file. "/settings/plugins" itself is a
 	// directory now, so it cannot be the target of a write any more -
@@ -519,8 +490,6 @@ static int fs_write(const char* path, const char* buf, size_t size,
 		logger.warn("plugins: unknown command '" + cmd + "', expected rm or reload");
 		return -EINVAL;
 	}
-	string spath(path);
-	spath.erase(0, 1);
 	int bus;
 	extractBusNumber(spath, bus);
 	string rom;

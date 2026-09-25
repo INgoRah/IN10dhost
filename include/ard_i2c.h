@@ -1,5 +1,6 @@
 #include <stdint.h>
 #include "ow_devices.h"
+#include "fs_table.h"
 
 int i2c_write(int fd, uint8_t cmd);
 int i2c_write_data(int fd, uint8_t* buf, uint16_t size);
@@ -22,6 +23,16 @@ class Ard_i2c : public OwDev{
 		void write(uint8_t cmd);
 		void write_data(uint8_t cmd, uint8_t data);
 		int read_buffer(uint8_t* buf, int len);
+		// fs_table.h handlers
+		int r_mode(char* buf, size_t size, bool uncached, int idx);
+		int w_mode(const char* buf, size_t size, int idx);
+		int r_power(char* buf, size_t size, bool uncached, int idx);
+		int w_test(const char* buf, size_t size, int idx);
+		int r_int_min(char* buf, size_t size, bool uncached, int idx);
+		int r_int_max(char* buf, size_t size, bool uncached, int idx);
+		int r_int_avg(char* buf, size_t size, bool uncached, int idx);
+		static const FsEntry<Ard_i2c> table[];
+		static const size_t n_table;
 	public:
 		using OwDev::OwDev;
 		using OwDev::type;
