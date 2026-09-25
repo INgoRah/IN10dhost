@@ -40,12 +40,12 @@ Plugins listed in the config file (`data.json`) are loaded at startup:
 ```json
 "plugins": {
     "example":  { "enabled": true },
-    "jsengine": { "script": "/opt/lib/in10dfsd/example.js" }
+    "jsengine": { "script": "/opt/lib/in10dfs/example.js" }
 }
 ```
 
 The key is the plugin name; the daemon loads `lib<name>.so`, looking
-first next to the executable and then in `/opt/lib/in10dfsd`. The value
+first next to the executable and then in `/opt/lib/in10dfs`. The value
 is handed to the plugin's `config_set()` and comes back out of
 `config_get()` when the config is saved.
 

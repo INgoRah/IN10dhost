@@ -1,4 +1,4 @@
-Source: in10dfsd
+Source: in10dfs
 Section: misc
 Priority: optional
 Maintainer: Your Name <INgo.Rah@gmx.net>
@@ -14,7 +14,7 @@ Build-Depends:
 Standards-Version: 4.6.2
 Rules-Requires-Root: no
 
-Package: in10dfsd
+Package: in10dfs
 Architecture: any
 Depends:
  fuse3,

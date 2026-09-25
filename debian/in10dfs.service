@@ -5,7 +5,7 @@ After=network.target
 [Service]
 Type=simple
 User=root
-ExecStart=/opt/IN10dfsd -d /opt/in10d.json -o allow_other -f /mnt/1wire
+ExecStart=/usr/bin/in10dfs -d /opt/in10d.json -o allow_other -f /mnt/1wire
 ExecStop=/usr/bin/fusermount -u /mnt/1wire
 Restart=on-failure
 RestartSec=3s
