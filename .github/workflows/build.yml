@@ -70,6 +70,20 @@ jobs:
       with:
         coverage-file: coverage.info # Path to your LCOV file
         minimum-coverage: 80              # Fails if below 80%
+    - name: Clang Static Analyzer
+      run: |
+        sudo apt-get install -y clang clang-tools
+        mkdir -p build-analyze
+        cmake -DUSE_GPIO=NO -DUSE_I2C=NO -DTESTING=OFF -DCMAKE_BUILD_TYPE=Debug -S . -B build-analyze
+        SCAN_BUILD=$(command -v scan-build || ls /usr/bin/scan-build-* | sort -V | tail -n1)
+        "$SCAN_BUILD" --use-cc=clang --use-c++=clang++ --status-bugs -o scan-report cmake --build build-analyze
+    - name: Upload Clang Analysis Report
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: clang-analysis-report
+        path: scan-report/
+        if-no-files-found: ignore
     - name: configure for coverity
       run: |
         mkdir -p build-cov

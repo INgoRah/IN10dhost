@@ -159,6 +159,10 @@ TEST_F(FsTest, DS1820SetAlarms) {
 	ow.update_data();
 	ds1820* dev = (ds1820*)ow.find(1, 5, 0x28);
 	ASSERT_NE(dev, nullptr);
+	// temp_read() locks ds->mtx; ds is only assigned by begin(), which
+	// update_device() deliberately skips (see its comment) - without
+	// this, dev->ds is still nullptr and temp_read() segfaults
+	ow.begin();
 	EXPECT_EQ(dev->temp_read(2), 0);
 }
 
@@ -169,6 +173,10 @@ TEST_F(FsTest, GetDS2450Devices) {
 
 	ow.update_device(0, "20.0200F8FE66771E");
 	ow.update_data();
+	// the loop below reads "/uncached/...", which needs dev->ds; only
+	// begin() assigns it, and update_device() deliberately doesn't call
+	// it (see its comment)
+	ow.begin();
 	res = fs_ops.readdir("/20.0200F8FE66771E", buf, filler, 0, nullptr, (enum fuse_readdir_flags)0);
 	EXPECT_EQ(res, 0);
 	for (char c = 'A'; c <= 'D'; c++) {
@@ -376,6 +384,10 @@ TEST_F(FsTest, WriteReadDevPio) {
 
 	ow.update_device(1, "29.0701F8FE6677F4");
 	ow.update_data();
+	// the uncached BYTE read below needs dev->ds; only begin() assigns
+	// it, and update_device() deliberately doesn't call it (see its
+	// comment)
+	ow.begin();
 
 	ds2408* dev = (ds2408*)ow.find(0x290701F8FE6677F4);
 	// read all pios
@@ -600,6 +612,9 @@ TEST_F(FsTest, Ds2408Gaps) {
 
 	ow.update_device(1, "29.0701F8FE6677F4");
 	ow.update_data();
+	// cfg_write() below needs dev->ds; only begin() assigns it, and
+	// update_device() deliberately doesn't call it (see its comment)
+	ow.begin();
 	ds2408* dev = (ds2408*)ow.find(0x290701F8FE6677F4);
 	ASSERT_NE(dev, nullptr);
 
@@ -611,6 +626,24 @@ TEST_F(FsTest, Ds2408Gaps) {
 
 	// non-numeric BYTE write
 	res = fs_ops.write("/29.0701F8FE6677F4/BYTE", (char*)"nope", 4, 0, nullptr);
+	EXPECT_EQ(res, -EINVAL);
+
+	// BYTE write that parses but doesn't fit in an int: w_byte()'s
+	// std::out_of_range branch, unlike its std::invalid_argument one
+	// above, was never exercised
+	res = fs_ops.write("/29.0701F8FE6677F4/BYTE", (char*)"99999999999999999999", 21, 0, nullptr);
+	EXPECT_EQ(res, -EINVAL);
+
+	// same two exceptions on w_pio(), neither previously exercised
+	res = fs_ops.write("/29.0701F8FE6677F4/PIO.0", (char*)"nope", 4, 0, nullptr);
+	EXPECT_EQ(res, -EINVAL);
+	res = fs_ops.write("/29.0701F8FE6677F4/PIO.0", (char*)"99999999999999999999", 21, 0, nullptr);
+	EXPECT_EQ(res, -EINVAL);
+
+	// same two exceptions on w_pin_func(), neither previously exercised
+	res = fs_ops.write("/29.0701F8FE6677F4/pin.0/func", (char*)"nope", 4, 0, nullptr);
+	EXPECT_EQ(res, -EINVAL);
+	res = fs_ops.write("/29.0701F8FE6677F4/pin.0/func", (char*)"99999999999999999999", 21, 0, nullptr);
 	EXPECT_EQ(res, -EINVAL);
 
 	// never exercised: writes the device's cfg block back over the bus
@@ -640,6 +673,10 @@ TEST_F(FsTest, WriteReadDevLevel) {
 
 	ow.update_device(1, "29.0701F8FE6677F4");
 	ow.update_data();
+	// writing BYTE/PIO.* below goes over the (simulated) bus via
+	// pio_set(), which needs dev->ds; only begin() assigns it, and
+	// update_device() deliberately doesn't call it (see its comment)
+	ow.begin();
 	buf[0] = '3';
 	buf[1] = '5';
 	buf[2] = '\0';

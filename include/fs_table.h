@@ -101,6 +101,23 @@ namespace detail {
 		return nullptr;
 	}
 
+	// True when "path" is exactly "prefix", found anywhere (the usual
+	// convention in this file) but with nothing after it besides
+	// maybe one trailing slash. This is what tells a real directory
+	// query ("pin.0", or readdir's "pin.0/") apart from a path that
+	// merely starts with the same text but continues with something
+	// this table never claimed, such as "settings/mode" next to
+	// entries "settings/log" and "settings/poll": both start with
+	// "settings", but only a bare "settings" names that directory.
+	inline bool names_dir(const std::string &path, const std::string &prefix)
+	{
+		size_t pos = path.find(prefix);
+		if (pos == std::string::npos)
+			return false;
+		size_t end = pos + prefix.size();
+		return end == path.size() || (end + 1 == path.size() && path[end] == '/');
+	}
+
 	// True when "path" names an *implied* directory: not any entry
 	// itself, but a prefix that some entry's name has before its '/'.
 	// "pin.*/name" implies that pin.0, pin.1, ... are directories,
@@ -117,7 +134,7 @@ namespace detail {
 			for (int j = 0; j < std::max(e.count, 1); j++) {
 				int idx = e.count ? j : -1;
 				std::string prefix = instance_name(name.substr(0, slash).c_str(), idx, e.alpha);
-				if (path.find(prefix) != std::string::npos)
+				if (names_dir(path, prefix))
 					return true;
 			}
 		}
@@ -153,7 +170,7 @@ std::vector<std::string> dir(const T &self, const FsEntry<T> *table, size_t n,
 		for (int j = 0; j < std::max(e.count, 1); j++) {
 			int idx = e.count ? j : -1;
 			std::string prefix = detail::instance_name(name.substr(0, slash).c_str(), idx, e.alpha);
-			if (path.find(prefix) != std::string::npos)
+			if (detail::names_dir(path, prefix))
 				out.push_back(detail::instance_name(name.substr(slash + 1).c_str(), idx, e.alpha));
 		}
 	}
@@ -188,6 +205,22 @@ int attr(const T &self, const FsEntry<T> *table, size_t n, const std::string &pa
 	if (e)
 		return e->size_cb ? (self.*e->size_cb)(idx) : e->suglen;
 	if (detail::implied_dir(table, n, path))
+		return 0;
+	return NOT_FOUND;
+}
+
+// open(): 0 for an entry with a read handler, NOT_FOUND otherwise (be
+// it no match at all, or a write-only entry such as a command file).
+// Most IFs implementers do not need this - OwDev's own fs_open() just
+// unconditionally succeeds - so use it only where individual entries
+// genuinely differ in whether they can be opened.
+template <class T>
+int open(const FsEntry<T> *table, size_t n, const std::string &path)
+{
+	int idx;
+	const FsEntry<T> *e = detail::match(table, n, path, idx);
+
+	if (e && e->read)
 		return 0;
 	return NOT_FOUND;
 }
