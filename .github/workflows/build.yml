@@ -25,6 +25,29 @@ jobs:
     - name: install dependencies on Linux
       if: runner.os == 'Linux'
       run: sudo apt-get install -y fuse3 libfuse3-dev nlohmann-json3-dev libgtest-dev libgmock-dev lcov
+
+    - name: Cache quickjs-ng
+      id: qjs-cache
+      uses: actions/cache@v4
+      with:
+        path: ~/qjs-install
+        key: quickjs-ng-v0.15.1-${{ runner.os }}
+
+    - name: Build quickjs-ng
+      if: steps.qjs-cache.outputs.cache-hit != 'true'
+      run: |
+        git clone --depth 1 --branch v0.15.1 https://github.com/quickjs-ng/quickjs.git /tmp/quickjs
+        cmake -S /tmp/quickjs -B /tmp/quickjs/build \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DBUILD_SHARED_LIBS=ON \
+          -DCMAKE_INSTALL_PREFIX=$HOME/qjs-install
+        cmake --build /tmp/quickjs/build -j"$(nproc)"
+        cmake --install /tmp/quickjs/build
+
+    - name: Install quickjs-ng
+      run: |
+        sudo cp -r ~/qjs-install/. /usr/local/
+        sudo ldconfig
     - name: configure
       run: ${{ matrix.cc }} mkdir build;cmake -DUSE_GPIO=NO -DUSE_I2C=NO -DTESTING=ON -DNO_TERM=ON -DCMAKE_BUILD_TYPE=Debug -S . -B build
     - name: make

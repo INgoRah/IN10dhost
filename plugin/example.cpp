@@ -42,10 +42,9 @@ public:
 		// or if using a struct: this->mySettingsStruct = j.get<MySettingsStruct>();
 	}
 
-	int action(int action, int val)
+	int action(const ActionEvent& ev) override
 	{
-		logger->info(std::format("Example plugin action={}, val={}", action, val));
-		switch (action) {
+		switch (ev.code) {
 			case ACT_READY:
 			{
 				IDev* dev = devices->get_dev(0x290200FDFF6677F8);
@@ -53,12 +52,37 @@ public:
 					IDS2408* d = dynamic_cast<IDS2408*>(dev);
 					if (d) {
 						//d->pio_set(1);
+						logger->info(std::format("Example plugin action={}, val={}", ev.code, ev.val));
 					}
 					d = nullptr;
 				}
 				dev = nullptr;
-				return 0;
+				// 1 = handled, see the action() contract in plugin.h
+				return 1;
 			}
+			case ACT_ALARM_AFTER:
+			 {
+				// ev.val is the bus, the alarming device is in ev.data
+				if (ev.data)
+					logger->info(std::format("Example plugin alarm on bus {} dev {}",
+						ev.val, ev.data->value("rom", "?")));
+				return 1;
+			 }
+			case ACT_DEV_CHANGE:
+			 {
+				// the changed device is in ev.data
+				if (ev.data) {
+					// dump() renders the whole object as a string;
+					// the json itself has no std::format support
+					logger->info(std::format("Example plugin change {}", ev.data->dump()));
+					// the default handed to value() also picks the type
+					// it is read back as - "pio" is a number, so asking
+					// for it with a string default throws type_error
+					logger->info(std::format("Example plugin dev {} PIO={}",
+						ev.data->value("rom", "?"), ev.data->value("pio", 0xff)));
+					}
+				return 1;
+			 }
 			default:
 				return 0;
 		}

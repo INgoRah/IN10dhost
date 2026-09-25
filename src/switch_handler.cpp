@@ -120,9 +120,9 @@ uint8_t SwitchHandler::bitnumber()
 	return 0xff;
 }
 
-void SwitchHandler::begin(DS2482 *ow)
+void SwitchHandler::begin(DS2482 *ds)
 {
-	this->ds = ow;
+	this->ds = ds;
 	logger.info("starting switch handler");
 }
 
@@ -267,63 +267,6 @@ bool SwitchHandler::dev_alarm(uint8_t bus, uint8_t adr[8])
 		}
 	}
 	return true;
-}
-
-bool SwitchHandler::alarmHandler(uint8_t busNr)
-{
-#ifdef USE_I2C
-	uint8_t adr[8];
-	uint8_t j = 0;
-	uint8_t cnt = 10;
-	bool ret, srch;
-
-	if (ds == nullptr)
-		return false;
-	{
-		// coverity[sleep] - bus mutex must be held for the whole 1-Wire
-		// transaction
-		std::lock_guard<std::mutex> lock(ds->mtx);
-
-		ret = ds->selectChannel(busNr);
-		if (!ret)
-			// this could be a timeout or other issue
-			// must be repeated
-			return false;
-		ds->target_search(0x29);
-		// improve time by 1 ms with a familiy search for 0x29 only
-		// with custom addresses using one byte ID only
-		// at the second byte and the remaining according a
-		// defined scheme, we could stop even after one byte search
-		srch = ds->search(adr, false);
-	}
-	while (srch && cnt > 0) {
-		j++;
-		logger.debug(std::format("Alarm {}.{} {}", busNr, adr[1], adr[2]));
-		try {
-			dev_alarm(busNr, adr);
-		}
-		catch (const std::system_error& e) {
-			std::cerr << "Caught system error: " << e.what() << '\n';
-			std::cerr << "Error code: " << e.code() << '\n';
-		}
-		cnt--;
-#ifdef USE_DEBUG
-		if (ds->last_err || cnt == 0)
-			printf("Error searching = %d\n", ds->last_err);
-#endif
-		{
-			// coverity[sleep] - bus mutex must be held for the whole
-			// 1-Wire search step
-			std::lock_guard<std::mutex> lock(ds->mtx);
-			srch = ds->search(adr, false);
-		}
-	}
-
-	return j > 0 ? true : false;
-#else
-	(void)busNr;
-	return false;
-#endif
 }
 
 // FS entries

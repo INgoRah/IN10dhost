@@ -1,6 +1,7 @@
 #include <fstream>
 #include <iostream>
 #include <string>
+#include <system_error> // for std::system_error in alarmHandler()
 #include <algorithm> // for std::max,min...
 #include <fuse3/fuse.h>
 #include "main.h"
@@ -126,27 +127,20 @@ void OwDevices::init()
 	last_alarm_poll = last_sec;
 }
 
-void OwDevices::begin(DS2482 *ds, bool soft)
+void OwDevices::begin(bool soft)
 {
-	ow = ds;
-
     if (!ds->init()) {
         printf("Failed to initialize DS2482\n");
 		return;
 	}
 #ifdef USE_I2C_EXCLUSIVE
-	ow->resetDev();
-	ow->configureDev(DS2482_CONFIG_APU);
+	ds->resetDev();
+	ds->configureDev(DS2482_CONFIG_APU);
 #endif
 	// bus controller is up; safe to start hardware access on every
 	// already-loaded device (init() has already run on all of them)
-	begin(soft);
-}
-
-void OwDevices::begin(bool soft)
-{
 	for (auto& dev : cache.devices)
-		dev->begin(ow, soft);
+		dev->begin(ds, soft);
 	plugins.action(DS_RUNNING, 0); // loaded
 }
 
@@ -160,7 +154,7 @@ void OwDevices::init_busses()
 
 int OwDevices::log_dump(char* buf, size_t size)
 {
-	return ow->log_dump(buf, size);
+	return ds->log_dump(buf, size);
 }
 
 void OwDevices::load(const std::string& path) {
@@ -387,15 +381,15 @@ void OwDevices::search(bool mode)
 	for (bus = 0; bus < 4; bus++) {
 		// coverity[sleep] - bus mutex must be held for the whole scan of
 		// this bus (potentially many devices deep)
-		std::lock_guard<std::mutex> lock(ow->mtx);
-		ret = ow->selectChannel(bus);
+		std::lock_guard<std::mutex> lock(ds->mtx);
+		ret = ds->selectChannel(bus);
 		if (!ret) {
 			logger.error(std::format("bus {} not present", bus));
 			continue;
 		}
-		ow->reset_search();
+		ds->reset_search();
 #ifdef USE_I2C
-		while (ow->search(adr, mode)) {
+		while (ds->search(adr, mode)) {
 				res++;
 				if (mode) {
 					sprintf(buf, "%02X.", adr[0]);
@@ -475,12 +469,12 @@ int OwDevices::dev_poll()
 	if (elapsed >= 1000) {
 		last_sec = now;
 		cnt = plugins.action(ACT_PERIODIC_SECOND);
-		ow->log_event('3',cnt);
+		ds->log_event('3',cnt);
 	}
 	for (auto& dev : cache.devices) {
 		int check = dev->poll_check();
 		if (check == 1) {
-			ow->log_event('4',0);
+			ds->log_event('4',0);
 			dev->poll();
 			cnt++; // at least one device polled
 		} else if (check == 0) {
@@ -506,18 +500,95 @@ int OwDevices::alarm_poll()
 		return -1;
 	if (!(swHdl.mode & MODE_ALRAM_POLLING))
 		return -1;
-	ow->log_event('5',0);
+	ds->log_event('5',0);
 
 	auto now = HrClock::now();
-	auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_alarm_poll).count();
-	if (elapsed < cache.poll * 1000)
+	/* compare the durations directly instead of converting to a
+	   millisecond count: "cache.poll * 1000" would be computed in 32 bit
+	   and only then widened for the comparison, so a large poll interval
+	   could overflow it (Coverity OVERFLOW_BEFORE_WIDEN) */
+	if (now - last_alarm_poll < std::chrono::seconds(cache.poll))
 		return 0;
 	last_alarm_poll = now;
 
 	int cnt = 0;
 	for (int bus = 0; bus < 4; bus++) {
-		if (swHdl.alarmHandler(bus))
+		if (alarmHandler(bus))
 			cnt++;
 	}
 	return cnt;
+}
+
+// Conditional (alarm) search of one bus: every 0x29 device currently
+// pulling alarm is handed to SwitchHandler::dev_alarm() in turn.
+// Returns true when at least one alarming device was handled.
+bool OwDevices::alarmHandler(uint8_t busNr)
+{
+#ifdef USE_I2C
+	uint8_t adr[8];
+	uint8_t j = 0;
+	uint8_t cnt = 10;
+	bool ret, srch;
+
+	if (ds == nullptr)
+		return false;
+	{
+		// coverity[sleep] - bus mutex must be held for the whole 1-Wire
+		// transaction
+		std::lock_guard<std::mutex> lock(ds->mtx);
+
+		ret = ds->selectChannel(busNr);
+		if (!ret)
+			// this could be a timeout or other issue
+			// must be repeated
+			return false;
+		ds->target_search(0x29);
+		// improve time by 1 ms with a familiy search for 0x29 only
+		// with custom addresses using one byte ID only
+		// at the second byte and the remaining according a
+		// defined scheme, we could stop even after one byte search
+		srch = ds->search(adr, false);
+	}
+	while (srch && cnt > 0) {
+		j++;
+		logger.debug(std::format("Alarm {}.{} {}", busNr, adr[1], adr[2]));
+		try {
+			swHdl.dev_alarm(busNr, adr);
+		}
+		catch (const std::system_error& e) {
+			std::cerr << "Caught system error: " << e.what() << '\n';
+			std::cerr << "Error code: " << e.code() << '\n';
+		}
+		// hand the plugins the full device address; the bus number
+		// stays in val to match the documented ACT_ALARM_* contract
+		string rom = std::format("{:02X}.", adr[0]);
+		for (int i = 0; i < 8; i++) {
+			// same packing OwDev::rom_code uses, so a plugin can feed
+			// this straight into IDevices::get_dev()
+			if (i > 0)
+				rom += std::format("{:02X}", adr[i]);
+		}
+		json data = {
+			{"bus", busNr},
+			{"rom", rom}
+		};
+		plugins.action(ACT_ALARM_AFTER, busNr, &data);
+		cnt--;
+#ifdef USE_DEBUG
+		if (ds->last_err || cnt == 0)
+			printf("Error searching = %d\n", ds->last_err);
+#endif
+		{
+			// coverity[sleep] - bus mutex must be held for the whole
+			// 1-Wire search step
+			std::lock_guard<std::mutex> lock(ds->mtx);
+			srch = ds->search(adr, false);
+		}
+	}
+
+	return j > 0 ? true : false;
+#else
+	(void)busNr;
+	return false;
+#endif
 }

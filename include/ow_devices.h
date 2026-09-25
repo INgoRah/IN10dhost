@@ -45,7 +45,7 @@ extern Config cache;
 class OwDevices : public IDevices
 {
 	private:
-		DS2482 *ow;
+		DS2482 *ds;
 #if 0
 		uint8_t	pio_data[MAX_BUS][MAX_ADR];
 		uint8_t dev_vers[MAX_BUS][MAX_ADR];
@@ -57,9 +57,8 @@ class OwDevices : public IDevices
 		void init_busses();
 
 	public:
-		OwDevices() { ow = nullptr; }
+		OwDevices(DS2482 *ds) { this->ds = ds; }
 		~OwDevices();
-		void begin(DS2482 *ds, bool soft=false);
 		void begin(bool soft=false);
 		void init();
 		void cacheInit();
@@ -100,6 +99,7 @@ class OwDevices : public IDevices
 		std::vector<OwDev*> list_devices(int bus);
 
 		int log_dump(char* buf, size_t size);
+		bool alarmHandler(uint8_t busNr);
 #if 0
 		uint8_t getVersion(uint8_t bus, uint8_t id);
 		void versionUpdate(uint8_t bus, uint8_t id);

@@ -2,6 +2,7 @@
 #include <cstring>
 #include <string>
 #include <stdexcept>
+#include <utility> // for std::move
 #include "cli.h"
 
 Cli cli;
@@ -84,7 +85,9 @@ void Cli::parse(int& argc, char* argv[])
 			if (value.empty())
 				fprintf(stderr, "--data requires a value, keeping '%s'\n", data_path.c_str());
 			else
-				data_path = value;
+				// last use of value in this iteration - it is
+				// re-created at the top of every loop pass
+				data_path = std::move(value);
 		} else {
 			continue;
 		}

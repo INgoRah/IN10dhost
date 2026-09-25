@@ -35,7 +35,7 @@ protected:
     void SetUp() override {
 		fs_init(&fs_ops);
         ow.init();
-		ow.begin(&ds);
+		ow.begin();
     }
 };
 
@@ -116,7 +116,7 @@ TEST_F(DevTest, add_devices)
 	// add again and check no duplicates
 	ow.update_device(0, "29.0200FDFF6677F8");
 	ow.update_data();
-	ow.begin(&ds);
+	ow.begin();
 	devs = ow.list_devices(0);
 	EXPECT_EQ(devs.size(), 2);
 
@@ -139,7 +139,7 @@ TEST_F(DevTest, Polling)
 	ow.update_device(0, "28.0501FAFE6677A0");
 	ow.update_data();
 	// uncached is accessing the device
-	ow.begin(&ds);
+	ow.begin();
 	res = fs_ops.read("/28.0501FAFE6677A0/poll", buf, 5, 0, nullptr);
 	EXPECT_GT(res, 0);
 	EXPECT_STREQ(buf, "0");
@@ -370,7 +370,7 @@ TEST_F(DevTest, ds2450)
 	EXPECT_STREQ(buf2, "adc");
 
 	// uncached is accessing the device
-	ow.begin(&ds);
+	ow.begin();
 	// drive the device-level polling: no interval set yet -> poll_check()
 	// reports "no polling" (-1), so poll() is never called
 	EXPECT_EQ(dev->poll_check(), -1);
@@ -419,7 +419,7 @@ TEST_F(DevTest, LoadAllDeviceTypesFromJson)
 	// which ow.load() does at the end of every call
 	ow.init();
 	ow.load(path);
-	ow.begin(&ds);
+	ow.begin();
 
 	EXPECT_NE(ow.find(0, 4, 0x29), nullptr);
 	EXPECT_NE(ow.find(0, 5, 0x28), nullptr);

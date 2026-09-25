@@ -20,7 +20,7 @@
 
 #define ARD_I2C_ADDR 0x2f
 
-extern SwitchHandler swHdl;
+extern OwDevices ow;
 
 enum {
 	SRC_CHANGE = 0,
@@ -61,6 +61,7 @@ Ard_i2c::Ard_i2c()
 {
 	lastSeq = 0xff;
 	this->type = "ard_i2c";
+	this->mode = 0;
 	this->power = 0;
 }
 
@@ -211,9 +212,9 @@ void Ard_i2c::interrupt() {
 		if ((status & 0x3) == 0) {
 			// call switch handler
 			for (int bus = 0; bus < MAX_BUS; bus++)
-				swHdl.alarmHandler(bus);
+				ow.alarmHandler(bus);
 		} else {
-			swHdl.alarmHandler((status & 0x3) - 1);
+			ow.alarmHandler((status & 0x3) - 1);
 			auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(HrClock::now() - tp);
 			if (duration < min_dur)
 				min_dur = duration;
@@ -229,8 +230,8 @@ void Ard_i2c::interrupt() {
 	}
 #if 0
 	events(fd);
-	close(fd);
 #endif
+	close(fd);
 #endif
 }
 

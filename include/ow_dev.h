@@ -20,7 +20,7 @@ enum dev_states {
 
 class OwDev : IFs, public IDev {
 	protected:
-		DS2482 *ow;
+		DS2482 *ds;
 		// Default-initialized (not just set in the OwDev(string) ctor):
 		// devices created via the default ctor + from_json() (the
 		// load() path) must also start out well-defined, or init()'s
