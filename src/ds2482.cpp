@@ -740,9 +740,10 @@ bool DS2482::search(uint8_t *newAddr, bool search_mode)
 		else
 			searchAddress[romByte] &= (uint8_t)~romBit;
 		/* if only interested in max 2 bytes we can stop here
-		   could save 50 ms */
+		   could save 50 ms
 		if (!search_mode && searchAddress[0] == 0x29 && i == 16)
 			break;
+		*/
 	}
 
 	searchLastDisrepancy = last_zero;

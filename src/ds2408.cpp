@@ -29,12 +29,17 @@ const FsEntry<ds2408> ds2408::table[] = {
 	{ "cfg", 3 * CFG_SIZE, 0, false, nullptr, nullptr, &ds2408::r_cfg, nullptr },
 	{ "pin.*/name", 20, 8, false, nullptr, nullptr, &ds2408::r_pin_name, &ds2408::w_pin_name },
 	{ "pin.*/func", 20, 8, false, nullptr, nullptr, &ds2408::r_pin_func, &ds2408::w_pin_func },
+	{ "threshold", 3, 0, false, nullptr, nullptr, &ds2408::r_threshold, &ds2408::w_threshold },
+	{ "brightness", 3, 0, false, nullptr, nullptr, &ds2408::r_brightness, &ds2408::w_brightness },
 };
 const size_t ds2408::n_table = sizeof(ds2408::table) / sizeof(ds2408::table[0]);
 
 json ds2408::to_json() const {
 	json j = OwDev::to_json(); // Get base class fields
-	j["cfg"] = cfg; // Add ds2408 specific field
+	// Add ds2408 specific fields
+	j["cfg"] = cfg;
+	j["threshold"] = threshold;
+	j["brightness"] = brightness;
 
 	return j;
 };
@@ -43,6 +48,12 @@ void ds2408::from_json(const json& j) {
 	OwDev::from_json(j); // Delegate common fields to base
 	if (j.contains("cfg")) {
 		j.at("cfg").get_to(cfg);
+	}
+	if (j.contains("threshold")) {
+		j.at("threshold").get_to(threshold);
+	}
+	if (j.contains("brightness")) {
+		j.at("brightness").get_to(brightness);
 	}
 }
 
@@ -160,6 +171,36 @@ int ds2408::w_pin_func(const char* buf, size_t size, int idx)
 	} catch (const std::out_of_range&) {
 		return -EINVAL;
 	}
+}
+
+int ds2408::r_threshold(char* buf, size_t, bool, int)
+{
+	std::sprintf(buf, "%d", threshold);
+	return std::strlen(buf);
+}
+
+int ds2408::w_threshold(const char* buf, size_t, int)
+{
+	uint8_t tmp = (uint8_t)(std::stoi(buf) & 0xff);
+	if (threshold_set(tmp) == 0)
+		return std::strlen(buf);
+
+	return -EAGAIN;
+}
+
+int ds2408::r_brightness(char* buf, size_t, bool, int)
+{
+	std::sprintf(buf, "%d", brightness);
+	return std::strlen(buf);
+}
+
+int ds2408::w_brightness(const char* buf, size_t, int)
+{
+	uint8_t tmp = (uint8_t)(std::stoi(buf) & 0xff);
+	if (brightness_set(tmp) == 0)
+		return std::strlen(buf);
+
+	return -EAGAIN;
 }
 
 bool ds2408::vis_pio(int idx) const
@@ -320,7 +361,6 @@ uint8_t ds2408::pio_set(uint8_t pio)
 			r = 0xAA;
 #endif
 			if (r == 0xAA) {
-				data[PIO_OUT] = pio;
 				break;
 			}
 			if (err == 0)
@@ -333,13 +373,16 @@ uint8_t ds2408::pio_set(uint8_t pio)
 			latch_reset();
 		}
 	}
-	json data = {
-		{"bus", bus},
-		{"rom", rom.c_str()},
-		{"pio", pio}
-	};
-	plugins.action(ACT_DEV_CHANGE, 0, &data);
-
+	if (r == 0xAA && data[PIO_OUT] != pio) {
+		data[PIO_OUT] = pio;
+		json data = {
+			{"bus", bus},
+			{"type", type},
+			{"rom", rom.c_str()},
+			{"pio", pio}
+		};
+		plugins.action(ACT_DEV_CHANGE, 0, &data);
+	}
 	return r;
 }
 
@@ -511,4 +554,20 @@ uint8_t ds2408::level_set(uint8_t pio, uint8_t level, uint8_t cmd, uint8_t val)
 
 	return 0xff;
 #endif
+}
+
+int ds2408::brightness_set(uint8_t brightness)
+{
+	this->brightness = brightness;
+	if (level_set(0, 0, TMR_TYPE_BRIGHTNESS, brightness) != 0xAA)
+		return -EAGAIN;
+	return 0;
+}
+
+int ds2408::threshold_set(uint8_t threshold)
+{
+	this->threshold = threshold;
+	if (level_set(0, 0, TMR_TYPE_THRESHOLD, threshold) != 0xAA)
+		return -EAGAIN;
+	return 0;
 }

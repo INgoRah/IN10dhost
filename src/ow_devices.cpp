@@ -522,7 +522,7 @@ int OwDevices::alarm_poll()
 // Conditional (alarm) search of one bus: every 0x29 device currently
 // pulling alarm is handed to SwitchHandler::dev_alarm() in turn.
 // Returns true when at least one alarming device was handled.
-bool OwDevices::alarmHandler(uint8_t busNr)
+bool OwDevices::alarmHandler(uint8_t busNr, uint8_t target)
 {
 #ifdef USE_I2C
 	uint8_t adr[8];
@@ -542,7 +542,10 @@ bool OwDevices::alarmHandler(uint8_t busNr)
 			// this could be a timeout or other issue
 			// must be repeated
 			return false;
-		ds->target_search(0x29);
+		if (target != 0xff)
+			ds->target_search(target);
+		else
+			ds->reset_search();
 		// improve time by 1 ms with a familiy search for 0x29 only
 		// with custom addresses using one byte ID only
 		// at the second byte and the remaining according a
@@ -551,7 +554,7 @@ bool OwDevices::alarmHandler(uint8_t busNr)
 	}
 	while (srch && cnt > 0) {
 		j++;
-		logger.debug(std::format("Alarm {}.{} {}", busNr, adr[1], adr[2]));
+		logger.debug(std::format("Alarm ({}) {}.{} {}", adr[0], busNr, adr[1], adr[2]));
 		try {
 			swHdl.dev_alarm(busNr, adr);
 		}
@@ -589,6 +592,7 @@ bool OwDevices::alarmHandler(uint8_t busNr)
 	return j > 0 ? true : false;
 #else
 	(void)busNr;
+	(void)target;
 	return false;
 #endif
 }

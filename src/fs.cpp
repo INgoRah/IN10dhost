@@ -215,19 +215,17 @@ static int fs_getattr(const char* path, struct stat* st, struct fuse_file_info*)
 		st->st_size = cfg.dump().size() + 1;
 		return 0;
 	}
-	{
-		int attr = fsLeaf.attr(spath);
-		if (attr > 0) {
-			st->st_mode = S_IFREG | 0666;
-			st->st_size = attr;
-			st->st_nlink = 1;
-			return 0;
-		}
-		if (attr == 0) {
-			st->st_mode = S_IFDIR | 0755;
-			st->st_nlink = 2;
-			return 0;
-		}
+	int attr = fsLeaf.attr(spath);
+	if (attr > 0) {
+		st->st_mode = S_IFREG | 0666;
+		st->st_size = attr;
+		st->st_nlink = 1;
+		return 0;
+	}
+	if (attr == 0) {
+		st->st_mode = S_IFDIR | 0755;
+		st->st_nlink = 2;
+		return 0;
 	}
 	if (extract_subpath(spath, "settings")) {
 		for (const auto& s : settings)

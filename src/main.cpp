@@ -66,11 +66,12 @@ int wake_fd;
 
 void background_worker()
 {
+	Ard_i2c* arduino = nullptr;
 #ifdef USE_GPIO
 	struct pollfd fds[2];
-	Ard_i2c* arduino = nullptr;
 	struct gpiod_edge_event_buffer *event_buffer = nullptr;
 	nfds_t nfds = 1;
+#endif
 	// cli.gpio_pin == 0 (--gpio-pin=0), a failed setup_gpio(), or no Arduino
 	// device configured on the bus all mean "no GPIO edge fd to watch";
 	// the device-polling loop below is identical either way, it just
@@ -78,6 +79,7 @@ void background_worker()
 	arduino = (Ard_i2c*)ow.find(0, 9, 0xAD);
 	if (arduino)
 		arduino->set_mode(0x10);
+#ifdef USE_GPIO
 	if (cli.gpio_pin != 0 && line != nullptr) {
 		if (!arduino) {
 			// TODO restart working after search
@@ -131,6 +133,8 @@ void background_worker()
 			gpiod_line_request_read_edge_events(line, event_buffer, 16);
 		}
 #endif
+		if (line == nullptr)
+			arduino->interrupt();
 		if (ret == 0) {
 			ds.log_event(STATE_POLL, tm);
 			ow.dev_poll();
@@ -271,17 +275,20 @@ int main(int argc, char* argv[])
 	}catch (const std::exception& e) {
 		printf("worker stopping failed with an exception: %s\n", e.what());
 	}
+	try {
+		ow.save(f.c_str());
+	} catch (const std::exception& e) {
+		printf("Failed to save config: %s\n", e.what());
+	}
 #ifdef USE_GPIO
 	if (line)
 		gpiod_line_request_release(line);
 	if (chip)
 		gpiod_chip_close(chip);
 #endif
-	try {
-		ow.save(f.c_str());
-	} catch (const std::exception& e) {
-		printf("Failed to save config: %s\n", e.what());
-	}
+	auto arduino = (Ard_i2c*)ow.find(0, 9, 0xAD);
+	if (arduino)
+		arduino->set_mode(MODE_ALRAM_POLLING | MODE_ALRAM_HANDLING | MODE_AUTO_SWITCH);
 
 	return ret;
 }

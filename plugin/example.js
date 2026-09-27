@@ -45,8 +45,12 @@ function onAction(code, val, data)
     /* a device changed state - note this also fires for changes this
        script causes itself, so guard against driving in a loop */
     case ACT_DEV_CHANGE:
-        if (data)
-            ow.log(data.rom + " pio is now 0x" + data.pio.toString(16));
+        if (data) {
+            if (data.type == "ds2408")
+                ow.log(data.rom + " pio is now 0x" + data.pio.toString(16));
+            if (data.type == "ds2450")
+                ow.log(data.rom + " brightness is now " + data.volt_a);
+        }
         return 1;
 
     /* once a second: read a sensor and switch the lamp on when it gets

@@ -45,7 +45,7 @@ enum {
 const FsEntry<Ard_i2c> Ard_i2c::table[] = {
 	{ "mode", 3, 0, false, nullptr, nullptr, &Ard_i2c::r_mode, &Ard_i2c::w_mode },
 	{ "power", 3, 0, false, nullptr, nullptr, &Ard_i2c::r_power, nullptr },
-	{ "pwr_total", 3, 0, false, nullptr, nullptr, nullptr, nullptr },
+	{ "power_total", 3, 0, false, nullptr, nullptr, &Ard_i2c::r_pow_total, nullptr },
 	{ "test", 2, 0, false, nullptr, nullptr, nullptr, &Ard_i2c::w_test },
 	{ "int_min", 6, 0, false, nullptr, nullptr, &Ard_i2c::r_int_min, nullptr },
 	{ "int_max", 6, 0, false, nullptr, nullptr, &Ard_i2c::r_int_max, nullptr },
@@ -56,6 +56,7 @@ const size_t Ard_i2c::n_table = sizeof(Ard_i2c::table) / sizeof(Ard_i2c::table[0
 json Ard_i2c::to_json() const {
 	json j = OwDev::to_json(); // Get base class fields
 	j["mode"] = mode; // Add specific field
+	j["power_total"] = power_total; // Add specific field
 
 	return j;
 };
@@ -65,6 +66,9 @@ void Ard_i2c::from_json(const json& j) {
 	if (j.contains("mode")) {
 		j.at("mode").get_to(mode);
 	}
+	if (j.contains("power_total")) {
+		j.at("power_total").get_to(power_total);
+	}
 }
 
 Ard_i2c::Ard_i2c()
@@ -73,6 +77,7 @@ Ard_i2c::Ard_i2c()
 	this->type = "ard_i2c";
 	this->mode = 0;
 	this->power = 0;
+	this->power_total = 0;
 }
 
 Ard_i2c::Ard_i2c(std::string rom) : OwDev(rom)
@@ -81,6 +86,7 @@ Ard_i2c::Ard_i2c(std::string rom) : OwDev(rom)
 	lastSeq = 0xff;
 	this->type = "ard_i2c";
 	this->power = 0;
+	this->power_total = 0;
 }
 
 #ifdef USE_I2C
@@ -217,14 +223,11 @@ void Ard_i2c::interrupt() {
 	if (mode == 0x10) {
 		// read status which clears the gpio ("interrupts")
 		uint8_t status = i2c_read(fd);
+		uint8_t bus = status & 0x3;
 		close(fd);
 		//logger.verbose(std::format("AD Stat={:#x}", status));
-		if ((status & 0x3) == 0) {
-			// call switch handler
-			for (int bus = 0; bus < MAX_BUS; bus++)
-				ow.alarmHandler(bus);
-		} else {
-			ow.alarmHandler((status & 0x3) - 1);
+		if (bus != 0) {
+			ow.alarmHandler(bus - 1);
 			auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(HrClock::now() - tp);
 			if (duration < min_dur)
 				min_dur = duration;
@@ -232,9 +235,28 @@ void Ard_i2c::interrupt() {
 				max_dur = duration;
 			sum_dur += duration;
 			dur_count++;
+			ow.alarmHandler(bus - 1, 0x28);
 			/*logger.info(std::format("used {} (min={} max={} avg={}ms over {} calls)",
 				duration, min_dur, max_dur, sum_dur.count() / dur_count, dur_count));*/
 		}
+		if (status & 0x10) {
+			// power interval
+			power_total += 2;
+			// store time ...
+			HrClock::time_point now = HrClock::now();
+			double diff = std::chrono::duration<double>(now - last_imp).count(); // in seconds
+			last_imp = now;
+			/*
+			We receive 500 impulses per 1 kWh
+			With the diff in seconds to the previous impulse we
+			can estimated the usage
+			*/
+			power = (int)(1000 * (3600 / diff) / 500);
+			logger.verbose(std::format("Estimated usage: {} Watt", power));
+		}
+		// call switch handler
+		for (int i = 0; i < MAX_BUS; i++)
+			ow.alarmHandler(i, 0xff);
 
 		return;
 	}
@@ -421,6 +443,12 @@ int Ard_i2c::w_mode(const char* buf, size_t size, int)
 int Ard_i2c::r_power(char* buf, size_t, bool, int)
 {
 	std::sprintf(buf, "%d", power);
+	return std::strlen(buf);
+}
+
+int Ard_i2c::r_pow_total(char* buf, size_t, bool, int)
+{
+	std::sprintf(buf, "%d", power_total);
 	return std::strlen(buf);
 }
 

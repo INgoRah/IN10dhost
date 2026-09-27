@@ -13,6 +13,10 @@ class Ard_i2c : public OwDev{
 		uint8_t lastSeq;
 		int power;
 		int mode;
+		int power_total;
+		// timestamp of the last power-meter impulse, used to turn the
+		// interval between impulses into an estimated wattage
+		HrClock::time_point last_imp{};
 		// running min/max/average of how long interrupt handling takes,
 		// tracked across the lifetime of the daemon; exposed via fs_read
 		std::chrono::milliseconds min_dur{std::chrono::milliseconds::max()};
@@ -27,6 +31,7 @@ class Ard_i2c : public OwDev{
 		int r_mode(char* buf, size_t size, bool uncached, int idx);
 		int w_mode(const char* buf, size_t size, int idx);
 		int r_power(char* buf, size_t size, bool uncached, int idx);
+		int r_pow_total(char* buf, size_t size, bool uncached, int idx);
 		int w_test(const char* buf, size_t size, int idx);
 		int r_int_min(char* buf, size_t size, bool uncached, int idx);
 		int r_int_max(char* buf, size_t size, bool uncached, int idx);

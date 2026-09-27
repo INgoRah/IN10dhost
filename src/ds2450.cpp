@@ -3,9 +3,12 @@
 #include <string>
 #include <fuse3/fuse.h>
 #include "main.h"
+#include "plugins.h"
 #include "fs.h"
 #include "ow_devices.h"
 #include "ds2450.h"
+
+extern Plugins plugins;
 
 // Pio.a-d and memory below are documented but were never implemented
 // (no fs_read/fs_write case ever handled them); left undisturbed here.
@@ -166,6 +169,16 @@ int ds2450::poll()
 {
 	if (adc_read(0, 0) != 0)
 		return EAGAIN;
-	volt_a = adc_read(0, 1);
+	auto tmp = adc_read(0, 1);
+	if (tmp != volt_a) {
+		volt_a = tmp;
+		json data = {
+			{"bus", bus},
+			{"type", type},
+			{"rom", rom.c_str()},
+			{"volt_a", volt_a}
+		};
+		plugins.action(ACT_DEV_CHANGE, 0, &data);
+	}
 	return 1;
 }

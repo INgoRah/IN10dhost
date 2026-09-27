@@ -209,8 +209,11 @@ int attr(const T &self, const FsEntry<T> *table, size_t n, const std::string &pa
 	return NOT_FOUND;
 }
 
-// open(): 0 for an entry with a read handler, NOT_FOUND otherwise (be
-// it no match at all, or a write-only entry such as a command file).
+// open(): 0 for an entry with a read or a write handler, NOT_FOUND
+// otherwise (i.e. no match at all). A write-only entry such as a
+// command file still has to open successfully - the write() itself
+// never runs if open() refuses it first - so this does not gate on
+// which of the two handlers the entry has, only on it having either.
 // Most IFs implementers do not need this - OwDev's own fs_open() just
 // unconditionally succeeds - so use it only where individual entries
 // genuinely differ in whether they can be opened.
@@ -220,7 +223,7 @@ int open(const FsEntry<T> *table, size_t n, const std::string &path)
 	int idx;
 	const FsEntry<T> *e = detail::match(table, n, path, idx);
 
-	if (e && e->read)
+	if (e && (e->read || e->write))
 		return 0;
 	return NOT_FOUND;
 }

@@ -873,6 +873,41 @@ TEST_F(FsTest, ReaddirBusLevel) {
 	EXPECT_EQ(res, 0);
 }
 
+TEST_F(FsTest, ReaddirBusLevelFiltersByBus) {
+	// readdir("/bus.N") must list only devices whose own bus is N -
+	// ReaddirBusLevel above only checks the return code, not which
+	// devices actually show up, so it would miss a device from another
+	// bus leaking into the listing
+	ow.update_device(0, "29.0600FDFF6677F0");
+	ow.update_device(1, "29.0700FDFF6677F1");
+	ow.update_data();
+	// update() overwrites the ROM's last byte with a real CRC8 (see
+	// OwDev::update()), so the string above is not what ends up
+	// registered - look the devices up instead of assuming it
+	OwDev* dev0 = ow.find(0, 0x06, 0x29);
+	OwDev* dev1 = ow.find(1, 0x07, 0x29);
+	ASSERT_NE(dev0, nullptr);
+	ASSERT_NE(dev1, nullptr);
+
+	auto record_filler = [](void* buf, const char* name, const struct stat*,
+							 off_t, enum fuse_fill_dir_flags) {
+		static_cast<std::vector<std::string>*>(buf)->push_back(name);
+		return 0;
+	};
+
+	std::vector<std::string> seen0;
+	int res = fs_ops.readdir("/bus.0", &seen0, record_filler, 0, nullptr, (enum fuse_readdir_flags)0);
+	EXPECT_EQ(res, 0);
+	EXPECT_NE(std::find(seen0.begin(), seen0.end(), dev0->rom), seen0.end());
+	EXPECT_EQ(std::find(seen0.begin(), seen0.end(), dev1->rom), seen0.end());
+
+	std::vector<std::string> seen1;
+	res = fs_ops.readdir("/bus.1", &seen1, record_filler, 0, nullptr, (enum fuse_readdir_flags)0);
+	EXPECT_EQ(res, 0);
+	EXPECT_NE(std::find(seen1.begin(), seen1.end(), dev1->rom), seen1.end());
+	EXPECT_EQ(std::find(seen1.begin(), seen1.end(), dev0->rom), seen1.end());
+}
+
 TEST_F(FsTest, ReaddirDeviceLevelErrors) {
 	int res;
 
