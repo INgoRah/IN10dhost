@@ -33,15 +33,25 @@ enum {
 	SYS_START = 7
 };
 
-static struct filetype ArdI2c[] = {
-	{ "mode", 3 },
-	{ "power", 3 },
-	{ "pwr_total", 3 },
-	{ "test", 2 },
-	{ "int_min", 6 },
-	{ "int_max", 6 },
-	{ "int_avg", 6 },
+// pwr_total has never had a read/write handler (no case for it ever
+// matched here, and OwDev's own fs_read/fs_write do not recognize it
+// either), so its row has no callbacks - it still shows up in
+// getattr()/readdir() the same as before, reads/writes still fall
+// through to OwDev::fs_read()/fs_write() same as before
+//
+// out-of-line definition of the private static members declared in
+// ard_i2c.h; this counts as class scope for access control, so it can
+// take the address of the private handlers below directly
+const FsEntry<Ard_i2c> Ard_i2c::table[] = {
+	{ "mode", 3, 0, false, nullptr, nullptr, &Ard_i2c::r_mode, &Ard_i2c::w_mode },
+	{ "power", 3, 0, false, nullptr, nullptr, &Ard_i2c::r_power, nullptr },
+	{ "pwr_total", 3, 0, false, nullptr, nullptr, nullptr, nullptr },
+	{ "test", 2, 0, false, nullptr, nullptr, nullptr, &Ard_i2c::w_test },
+	{ "int_min", 6, 0, false, nullptr, nullptr, &Ard_i2c::r_int_min, nullptr },
+	{ "int_max", 6, 0, false, nullptr, nullptr, &Ard_i2c::r_int_max, nullptr },
+	{ "int_avg", 6, 0, false, nullptr, nullptr, &Ard_i2c::r_int_avg, nullptr },
 };
+const size_t Ard_i2c::n_table = sizeof(Ard_i2c::table) / sizeof(Ard_i2c::table[0]);
 
 json Ard_i2c::to_json() const {
 	json j = OwDev::to_json(); // Get base class fields
@@ -374,79 +384,98 @@ void Ard_i2c::events(int fd, OwDevices* ow)
 
 std::vector<std::string> Ard_i2c::fs_dir(string& path) const
 {
-	// add standards
 	std::vector<std::string> dir = OwDev::fs_dir(path);
-
-	for (const auto& s : ArdI2c)
-		dir.push_back(s.name);
-
+	std::vector<std::string> extra = fs_table::dir(*this, table, n_table, path);
+	dir.insert(dir.end(), extra.begin(), extra.end());
 	return dir;
 }
 
 int Ard_i2c::fs_attr(std::string& path) const
 {
-	for (const auto& s : ArdI2c) {
-		if (path.find(s.name) != std::string::npos) {
-			return s.suglen;
-		}
-	}
-
-	// add standards
+	int r = fs_table::attr(*this, table, n_table, path);
+	if (r != fs_table::NOT_FOUND)
+		return r;
 	return OwDev::fs_attr(path);
 }
 
-int Ard_i2c::fs_read(string& path, char* buf, size_t size, bool uncached)
+int Ard_i2c::r_mode(char* buf, size_t, bool, int)
 {
-	//printf ("reading %s %s = %d ...\n", path.c_str(),rom.c_str(), val);
-	if (path.find("mode") != string::npos) {
-		std::sprintf(buf, "%d", mode);
-		goto out;
-	}
-	if (path.find("power") != string::npos) {
-		std::sprintf(buf, "%d", power);
-		goto out;
-	}
-	if (path.find("int_min") != string::npos) {
-		// min_dur sits at its ::max() sentinel until the first sample
-		std::sprintf(buf, "%d", dur_count ? (int)min_dur.count() : 0);
-		goto out;
-	}
-	if (path.find("int_max") != string::npos) {
-		std::sprintf(buf, "%d", (int)max_dur.count());
-		goto out;
-	}
-	if (path.find("int_avg") != string::npos) {
-		std::sprintf(buf, "%d", dur_count ? (int)(sum_dur.count() / dur_count) : 0);
-		goto out;
-	}
-	return OwDev::fs_read(path, buf, size, uncached);
-out:
+	std::sprintf(buf, "%d", mode);
 	return std::strlen(buf);
 }
 
-int Ard_i2c::fs_write(string& path, const char* buf, size_t size)
+int Ard_i2c::w_mode(const char* buf, size_t size, int)
 {
-	if (path.find("mode") != string::npos) {
+	try {
 		uint8_t tmp = (uint8_t)(std::stoi(buf) & 0xff);
-		logger.log(LogLevel::DEBUG, "write " + path + ", set val=" + std::to_string(tmp));
+		logger.log(LogLevel::DEBUG, "write mode, set val=" + std::to_string(tmp));
 		set_mode(tmp);
-
 		return size;
+	} catch (const std::invalid_argument&) {
+		return -EINVAL;
+	} catch (const std::out_of_range&) {
+		return -EINVAL;
 	}
-	if (path.find("test") != string::npos) {
+}
+
+int Ard_i2c::r_power(char* buf, size_t, bool, int)
+{
+	std::sprintf(buf, "%d", power);
+	return std::strlen(buf);
+}
+
+int Ard_i2c::w_test(const char* buf, size_t size, int)
+{
+	try {
 		uint8_t tmp = (uint8_t)(std::stoi(buf) & 0xff);
-		logger.log(LogLevel::DEBUG, "write " + path + ", set val=" + std::to_string(tmp));
+		logger.log(LogLevel::DEBUG, "write test, set val=" + std::to_string(tmp));
 #ifdef USE_I2C
 		int fd = open("/dev/i2c-0", O_RDWR);
 		if (fd < 0)
 			return 0;
-		uint8_t buf[] = { 0xde, (uint8_t)(tmp & 0xff) };
-		i2c_write_data(fd, buf, 2);
+		uint8_t out[] = { 0xde, (uint8_t)(tmp & 0xff) };
+		i2c_write_data(fd, out, 2);
 		close(fd);
 #endif
 		return size;
+	} catch (const std::invalid_argument&) {
+		return -EINVAL;
+	} catch (const std::out_of_range&) {
+		return -EINVAL;
 	}
+}
 
-	// add standards
+int Ard_i2c::r_int_min(char* buf, size_t, bool, int)
+{
+	// min_dur sits at its ::max() sentinel until the first sample
+	std::sprintf(buf, "%d", dur_count ? (int)min_dur.count() : 0);
+	return std::strlen(buf);
+}
+
+int Ard_i2c::r_int_max(char* buf, size_t, bool, int)
+{
+	std::sprintf(buf, "%d", (int)max_dur.count());
+	return std::strlen(buf);
+}
+
+int Ard_i2c::r_int_avg(char* buf, size_t, bool, int)
+{
+	std::sprintf(buf, "%d", dur_count ? (int)(sum_dur.count() / dur_count) : 0);
+	return std::strlen(buf);
+}
+
+int Ard_i2c::fs_read(string& path, char* buf, size_t size, bool uncached)
+{
+	int r = fs_table::read(*this, table, n_table, path, buf, size, uncached);
+	if (r != fs_table::NOT_FOUND)
+		return r;
+	return OwDev::fs_read(path, buf, size, uncached);
+}
+
+int Ard_i2c::fs_write(string& path, const char* buf, size_t size)
+{
+	int r = fs_table::write(*this, table, n_table, path, buf, size);
+	if (r != fs_table::NOT_FOUND)
+		return r;
 	return OwDev::fs_write(path, buf, size);
 }

@@ -20,7 +20,11 @@ enum dev_states {
 
 class OwDev : IFs, public IDev {
 	protected:
-		DS2482 *ds;
+		// nullptr until begin() runs; a device method that dereferences
+		// it without begin() having run first is a bug in that caller,
+		// not something to paper over here, but the pointer itself must
+		// still start out well-defined for the same reason state does.
+		DS2482 *ds = nullptr;
 		// Default-initialized (not just set in the OwDev(string) ctor):
 		// devices created via the default ctor + from_json() (the
 		// load() path) must also start out well-defined, or init()'s

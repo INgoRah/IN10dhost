@@ -2,11 +2,37 @@
 #define _DS2408_H
 #include "ow_dev.h"
 #include "interface/ds2408.h"
+#include "fs_table.h"
 
 #define CFG_SIZE 26
 
 class ds2408 : public OwDev, public IDS2408 {
 	private:
+		// fs_table.h handlers, bound to the entries of the private
+		// `table` member below (defined out-of-line in ds2408.cpp).
+		// Not meant to be called directly.
+		int r_byte(char* buf, size_t size, bool uncached, int idx);
+		int w_byte(const char* buf, size_t size, int idx);
+		int r_pio(char* buf, size_t size, bool uncached, int idx);
+		int w_pio(const char* buf, size_t size, int idx);
+		int r_sensed(char* buf, size_t size, bool uncached, int idx);
+		int r_latched(char* buf, size_t size, bool uncached, int idx);
+		int w_latched(const char* buf, size_t size, int idx);
+		int r_cfg(char* buf, size_t size, bool uncached, int idx);
+		int r_pin_name(char* buf, size_t size, bool uncached, int idx);
+		int w_pin_name(const char* buf, size_t size, int idx);
+		int r_pin_func(char* buf, size_t size, bool uncached, int idx);
+		int w_pin_func(const char* buf, size_t size, int idx);
+		// PIO.* only lists the pins currently configured as an output,
+		// sensed.* only the ones configured as an input/button
+		bool vis_pio(int idx) const;
+		bool vis_sensed(int idx) const;
+		// pin.0 .. pin.7 are directories purely because two of these
+		// rows exist - see the "pin dot star slash ..." comment on
+		// FsEntry in fs_table.h. There is no separate "pin.*" row for
+		// the directory itself.
+		static const FsEntry<ds2408> table[];
+		static const size_t n_table;
 	public:
 		/* [0] PIO Logic State  = sensed
 		 * [1] Output latch = PIO

@@ -19,52 +19,56 @@
 #define HIGH_ALARM_TEMP 2
 #define LOW_ALARM_TEMP  3
 
-static struct filetype DS18S20[] = {
-	{ "temperature", 5 },
-	{ "humidity", 4 }
+// out-of-line definition of the private static members declared in
+// ds1820.h; this counts as class scope for access control, so it can
+// take the address of the private handlers below directly
+const FsEntry<ds1820> ds1820::table[] = {
+	{ "temperature", 5, 0, false, nullptr, nullptr, &ds1820::r_temperature, nullptr },
+	{ "humidity", 4, 0, false, nullptr, nullptr, &ds1820::r_humidity, nullptr },
 };
+const size_t ds1820::n_table = sizeof(ds1820::table) / sizeof(ds1820::table[0]);
 
 std::vector<std::string> ds1820::fs_dir(string& path) const
 {
-	// add standards
 	std::vector<std::string> dir = OwDev::fs_dir(path);
-
-	for (const auto& s : DS18S20)
-		dir.push_back(s.name);
-
+	std::vector<std::string> extra = fs_table::dir(*this, table, n_table, path);
+	dir.insert(dir.end(), extra.begin(), extra.end());
 	return dir;
 }
 
 int ds1820::fs_attr(std::string& path) const
 {
-	for (const auto& s : DS18S20) {
-		if (path.find(s.name) != std::string::npos) {
-			return s.suglen;
-		}
-	}
-
-	// add standards
+	int r = fs_table::attr(*this, table, n_table, path);
+	if (r != fs_table::NOT_FOUND)
+		return r;
 	return OwDev::fs_attr(path);
+}
+
+int ds1820::r_temperature(char* buf, size_t, bool uncached, int)
+{
+	//std::unique_lock<std::mutex> mtx(ds->mtx, std::defer_lock);
+	//std::unique_lock<std::mutex> mtx(ds->mtx);
+	if (uncached) {
+		temp_read(0);
+		//logger.info ("#1 reading %s/%s %d ...\n", rom.c_str(), path.c_str(), ret);
+		temp_read(1);
+		logger.info ("DS1820 reading temp " +  std::to_string(temp) + "° " + std::to_string(hum) + " %");
+	}
+	std::sprintf(buf, "%1.2f", temp);
+	return std::strlen(buf);
+}
+
+int ds1820::r_humidity(char* buf, size_t, bool, int)
+{
+	std::sprintf(buf, "%d", hum);
+	return std::strlen(buf);
 }
 
 int ds1820::fs_read(string& path, char* buf, size_t size, bool uncached)
 {
-	if (path.find("humidity") != string::npos) {
-		std::sprintf(buf, "%d", hum);
-		return std::strlen(buf);
-	}
-	if (path.find("temperature") != string::npos) {
-		//std::unique_lock<std::mutex> mtx(ds->mtx, std::defer_lock);
-		//std::unique_lock<std::mutex> mtx(ds->mtx);
-		if (uncached) {
-			temp_read(0);
-			//logger.info ("#1 reading %s/%s %d ...\n", rom.c_str(), path.c_str(), ret);
-			temp_read(1);
-			logger.info ("DS1820 reading temp " +  std::to_string(temp) + "° " + std::to_string(hum) + " %");
-		}
-		std::sprintf(buf, "%1.2f", temp);
-		return std::strlen(buf);
-	}
+	int r = fs_table::read(*this, table, n_table, path, buf, size, uncached);
+	if (r != fs_table::NOT_FOUND)
+		return r;
 	return OwDev::fs_read(path, buf, size, uncached);
 }
 

@@ -1,4 +1,10 @@
-in10dfs (0.2.0) trixie; urgency=medium
+in10dfs (0.2.1) trixie; urgency=medium
+
+  * rework internal fs handling
+
+ -- INgo Rah <INgo.Rah@gmx.net>  Wed, 24 Sep 2026 12:00:00 +0000
+
+ in10dfs (0.2.0) trixie; urgency=medium
 
   * plugin support reworked adding scripting
 

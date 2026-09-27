@@ -15,11 +15,18 @@
 
 struct _sw_tbl sw_tbl[MAX_SWITCHES];
 
-static struct filetype Switches[] = {
-	{ "add", 32 },
-	{ "del", 32 },
-	{ "list", 1024 },
+// out-of-line definition of the private static members declared in
+// switch_handler.h; this counts as class scope for access control, so
+// it can take the address of the private handlers below directly.
+// "add"/"del" are write-only (no read handler), which is what makes
+// fs_table::open() below refuse to open them, matching this class's
+// original fs_open().
+const FsEntry<SwitchHandler> SwitchHandler::table[] = {
+	{ "add", 32, 0, false, nullptr, nullptr, nullptr, &SwitchHandler::w_add },
+	{ "del", 32, 0, false, nullptr, nullptr, nullptr, &SwitchHandler::w_del },
+	{ "list", 1024, 0, false, nullptr, nullptr, &SwitchHandler::r_list, nullptr },
 };
+const size_t SwitchHandler::n_table = sizeof(SwitchHandler::table) / sizeof(SwitchHandler::table[0]);
 
 void to_json(json& j, const _sw_tbl& b) {
 	j = json{
@@ -65,6 +72,12 @@ bool parse_buf(std::string_view buf, struct _sw_tbl& sw)
 	const char* ptr = buf.data();
 	const char* end = buf.data() + buf.size();
 
+	// zero first: src.sa.res and dst.da.type are never assigned below,
+	// so without this sw.src.data/sw.dst.data (used for equality
+	// elsewhere, e.g. deleting a switch) would compare whatever
+	// garbage those bits held on the caller's stack instead of being
+	// deterministic
+	sw = {};
 	if (buf.size() < (5 + 5)) {
 		logger.warn (std::format("size mismatch {}", buf));
 		return false;
@@ -272,50 +285,64 @@ bool SwitchHandler::dev_alarm(uint8_t bus, uint8_t adr[8])
 // FS entries
 std::vector<string> SwitchHandler::fs_dir(string& path) const
 {
-	(void)path;
-	std::vector<std::string> dir;
-	for (const auto& s : Switches)
-		dir.push_back(s.name);
-
-	return dir;
+	return fs_table::dir(*this, table, n_table, path);
 }
 
 int SwitchHandler::fs_attr(string& path) const
 {
-	(void)path;
-	for (const auto& s : Switches)
-		if (path.find(s.name) != std::string::npos)
-			return s.suglen;
-
-	return -1;
+	int r = fs_table::attr(*this, table, n_table, path);
+	return r == fs_table::NOT_FOUND ? -1 : r;
 }
 
 int SwitchHandler::fs_open(string& path) const
 {
-	if (path.find("list") != string::npos)
-		return 0;
-	return -ENOENT;
+	int r = fs_table::open(table, n_table, path);
+	return r == fs_table::NOT_FOUND ? -ENOENT : r;
+}
+
+int SwitchHandler::r_list(char* buf, size_t size, bool, int)
+{
+	std::string list;
+	list += std::format("{} switches\n", cache.switches.size());
+	for (const auto& sw : cache.switches) {
+		list += std::format("{}.{}.{} {}.{}.{} ({} {})\n",
+			sw.src.sa.bus, sw.src.sa.adr, sw.src.sa.latch,
+			sw.dst.da.bus, sw.dst.da.adr, sw.dst.da.pio,
+			sw.src.data, sw.dst.data);
+	}
+	std::strncpy(buf, list.c_str(), size);
+	return std::strlen(buf);
 }
 
 int SwitchHandler::fs_read(string& path, char* buf, size_t size, bool uncached)
 {
-	(void)uncached;
-	if (path.find("list") != string::npos) {
-		std::string list;
-		list += std::format("{} switches\n", cache.switches.size());
-		for (const auto& sw : cache.switches) {
-			list += std::format("{}.{}.{} {}.{}.{} ({} {})\n",
-				sw.src.sa.bus, sw.src.sa.adr, sw.src.sa.latch,
-				sw.dst.da.bus, sw.dst.da.adr, sw.dst.da.pio,
-				sw.src.data, sw.dst.data);
-		}
-		std::strncpy(buf, list.c_str(), size);
-		return std::strlen(buf);
-	}
-	return 0;
+	int r = fs_table::read(*this, table, n_table, path, buf, size, uncached);
+	// unmatched (e.g. "add"/"del", both write-only) reads as empty,
+	// same as this class's own fs_read() always did
+	return r == fs_table::NOT_FOUND ? 0 : r;
 }
 
-int SwitchHandler::fs_write(string& path, const char* buf, size_t size)
+int SwitchHandler::w_add(const char* buf, size_t size, int)
+{
+	int start = 0;
+
+	for (size_t i = 0; i < size; i++) {
+		if (buf[i] == '\n' || buf[i] == '\0') {
+			struct _sw_tbl sw;
+			logger.verbose(std::format("adding? {}", std::string(buf)));
+			if (parse_buf(std::string_view(&buf[start], i - start), sw)) {
+				start = i + 1;
+				cache.switches.push_back(sw);
+				logger.verbose(std::format("added switch {}.{}.{} -> {}.{}.{}",
+					(int)sw.src.sa.bus, (int)sw.src.sa.adr, (int)sw.src.sa.latch,
+					(int)sw.dst.da.bus, (int)sw.dst.da.adr, (int)sw.dst.da.pio));
+			}
+		}
+	}
+	return size;
+}
+
+int SwitchHandler::w_del(const char* buf, size_t size, int)
 {
 	int start = 0;
 	bool found = false;
@@ -326,37 +353,36 @@ int SwitchHandler::fs_write(string& path, const char* buf, size_t size)
 			logger.verbose(std::format("adding? {}", std::string(buf)));
 			if (parse_buf(std::string_view(&buf[start], i - start), sw)) {
 				start = i + 1;
-				if (path.find("add") != string::npos) {
-					cache.switches.push_back(sw);
-					logger.verbose(std::format("added switch {}.{}.{} -> {}.{}.{}",
-						(int)sw.src.sa.bus, (int)sw.src.sa.adr, (int)sw.src.sa.latch,
-						(int)sw.dst.da.bus, (int)sw.dst.da.adr, (int)sw.dst.da.pio));
-					found = true;
-				}
-				if (path.find("del") != string::npos) {
-					for (auto it = cache.switches.begin();
-						it != cache.switches.end();) {
-						const auto& sw_i = *it;
-						if (sw.src.data == sw_i.src.data &&
-							sw.dst.data == sw_i.dst.data) {
-							// remove; erase() invalidates it, so the
-							// returned (still valid) iterator must be
-							// what we continue from
-							it = cache.switches.erase(it);
-							logger.verbose(std::format("deleted switch {}.{}.{} -> {}.{}.{}",
-								(int)sw.src.sa.bus, (int)sw.src.sa.adr, (int)sw.src.sa.latch,
-								(int)sw.dst.da.bus, (int)sw.dst.da.adr, (int)sw.dst.da.pio));
-							found = true;
-						} else
-							++it; // Only increment if we didn't erase
-					}
+				for (auto it = cache.switches.begin();
+					it != cache.switches.end();) {
+					const auto& sw_i = *it;
+					if (sw.src.data == sw_i.src.data &&
+						sw.dst.data == sw_i.dst.data) {
+						// remove; erase() invalidates it, so the
+						// returned (still valid) iterator must be
+						// what we continue from
+						it = cache.switches.erase(it);
+						logger.verbose(std::format("deleted switch {}.{}.{} -> {}.{}.{}",
+							(int)sw.src.sa.bus, (int)sw.src.sa.adr, (int)sw.src.sa.latch,
+							(int)sw.dst.da.bus, (int)sw.dst.da.adr, (int)sw.dst.da.pio));
+						found = true;
+					} else
+						++it; // Only increment if we didn't erase
 				}
 			}
 		}
 	}
-	if (path.find("del") != string::npos && !found) {
+	if (!found) {
 		logger.warn("switch entry not found");
 		return 0;
 	}
 	return size;
+}
+
+int SwitchHandler::fs_write(string& path, const char* buf, size_t size)
+{
+	int r = fs_table::write(*this, table, n_table, path, buf, size);
+	// unmatched (e.g. "list", read-only) silently accepts the write,
+	// same as this class's own fs_write() always did
+	return r == fs_table::NOT_FOUND ? (int)size : r;
 }

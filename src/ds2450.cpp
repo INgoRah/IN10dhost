@@ -7,6 +7,8 @@
 #include "ow_devices.h"
 #include "ds2450.h"
 
+// Pio.a-d and memory below are documented but were never implemented
+// (no fs_read/fs_write case ever handled them); left undisturbed here.
 /*
 ├── volt.A                   (r)  Alias shortcut to read Channel A (0-5.10V scale)
 ├── volt.B                   (r)  Alias shortcut to read Channel B (0-5.10V scale)
@@ -23,33 +25,37 @@
 ├── memory                   (rw) Raw binary dump of internal 32-byte chip memory
 
 */
-static struct filetype DS2450[] = {
-	{ "volt.A", 4 },
-	{ "volt.B", 4 },
-	{ "volt.C", 4 },
-	{ "volt.D", 4 }
+// out-of-line definition of the private static members declared in
+// ds2450.h; this counts as class scope for access control, so it can
+// take the address of the private r_volt() handler directly
+const FsEntry<ds2450> ds2450::table[] = {
+	{ "volt.*", 4, 4, /* alpha */ true, nullptr, nullptr, &ds2450::r_volt, nullptr },
 };
+const size_t ds2450::n_table = sizeof(ds2450::table) / sizeof(ds2450::table[0]);
 
 std::vector<std::string> ds2450::fs_dir(string& path) const
 {
-	// add standards
 	std::vector<std::string> dir = OwDev::fs_dir(path);
-
-	for (const auto& s : DS2450)
-		dir.push_back(s.name);
-
+	std::vector<std::string> extra = fs_table::dir(*this, table, n_table, path);
+	dir.insert(dir.end(), extra.begin(), extra.end());
 	return dir;
 }
 
 int ds2450::fs_attr(std::string& path) const
 {
-	for (const auto& s : DS2450) {
-		if (path.find(s.name) != std::string::npos) {
-			return s.suglen;
-		}
-	}
-	// add standards
+	int r = fs_table::attr(*this, table, n_table, path);
+	if (r != fs_table::NOT_FOUND)
+		return r;
 	return OwDev::fs_attr(path);
+}
+
+// only ever called with idx 0..3 (A..D), once fs_table.h has already
+// matched "volt.*" in path
+int ds2450::r_volt(char* buf, size_t size, bool uncached, int idx)
+{
+	if (size < 5)
+		return -EINVAL;
+	return fs_read_volt((uint8_t)idx, buf, uncached);
 }
 
 int ds2450::fs_read_volt(uint8_t ch, char* buf, bool uncached)
@@ -84,20 +90,9 @@ int ds2450::fs_read_volt(uint8_t ch, char* buf, bool uncached)
 
 int ds2450::fs_read(string& path, char* buf, size_t size, bool uncached)
 {
-	uint8_t ch = 0xff;
-	if (path.find("volt.A") != string::npos)
-		ch = 0;
-	else if (path.find("volt.B") != string::npos)
-		ch = 1;
-	else if (path.find("volt.C") != string::npos)
-		ch = 2;
-	else if (path.find("volt.D") != string::npos)
-		ch = 3;
-	if (ch != 0xff) {
-		if (size < 5)
-			return -EINVAL;
-		return fs_read_volt(ch, buf, uncached);
-	}
+	int r = fs_table::read(*this, table, n_table, path, buf, size, uncached);
+	if (r != fs_table::NOT_FOUND)
+		return r;
 	return OwDev::fs_read(path, buf, size, uncached);
 }
 

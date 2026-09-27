@@ -18,14 +18,19 @@
 
 extern Plugins plugins;
 
-static struct filetype DS2408[] = {
-	{ "BYTE", 3 },
-	{ "PIO.*", 3 },
-	{ "sensed.*", 2 },
-	{ "latched.*", 2 },
-	{ "cfg", 3 * CFG_SIZE },
-	{ "pin.*", 0 },
+// out-of-line definition of the private static members declared in
+// ds2408.h; this counts as class scope for access control, so it can
+// take the address of the private handlers below directly
+const FsEntry<ds2408> ds2408::table[] = {
+	{ "BYTE", 3, 0, false, nullptr, nullptr, &ds2408::r_byte, &ds2408::w_byte },
+	{ "PIO.*", 3, 8, false, &ds2408::vis_pio, nullptr, &ds2408::r_pio, &ds2408::w_pio },
+	{ "sensed.*", 2, 8, false, &ds2408::vis_sensed, nullptr, &ds2408::r_sensed, nullptr },
+	{ "latched.*", 2, 8, false, nullptr, nullptr, &ds2408::r_latched, &ds2408::w_latched },
+	{ "cfg", 3 * CFG_SIZE, 0, false, nullptr, nullptr, &ds2408::r_cfg, nullptr },
+	{ "pin.*/name", 20, 8, false, nullptr, nullptr, &ds2408::r_pin_name, &ds2408::w_pin_name },
+	{ "pin.*/func", 20, 8, false, nullptr, nullptr, &ds2408::r_pin_func, &ds2408::w_pin_func },
 };
+const size_t ds2408::n_table = sizeof(ds2408::table) / sizeof(ds2408::table[0]);
 
 json ds2408::to_json() const {
 	json j = OwDev::to_json(); // Get base class fields
@@ -41,188 +46,169 @@ void ds2408::from_json(const json& j) {
 	}
 }
 
+// --- fs_table.h handlers -----------------------------------------------
+
+int ds2408::r_byte(char* buf, size_t, bool uncached, int)
+{
+	if (uncached)
+		reg_read(false);
+	std::sprintf(buf, "%d", data[PIO_OUT]);
+	return std::strlen(buf);
+}
+
+int ds2408::w_byte(const char* buf, size_t size, int)
+{
+	try {
+		uint8_t tmp = (uint8_t)(std::stoi(buf) & 0xff);
+		pio_set(tmp);
+		return size;
+	} catch (const std::invalid_argument&) {
+		return -EINVAL;
+	} catch (const std::out_of_range&) {
+		return -EINVAL;
+	}
+}
+
+int ds2408::r_pio(char* buf, size_t, bool, int idx)
+{
+	if (cfg[CFG_PIN_ID + idx] == CFG_OUT_PWM)
+		std::sprintf(buf, "%d", level);
+	else
+		std::sprintf(buf, "%d", (data[PIO_OUT] & (0x1 << idx)) ? 1 : 0);
+	return std::strlen(buf);
+}
+
+int ds2408::w_pio(const char* buf, size_t size, int idx)
+{
+	try {
+		uint8_t tmp = (uint8_t)(std::stoi(buf) & 0xff);
+		logger.verbose(std::format("set PIO.{} = {}", idx, tmp));
+		pin_switch(idx, (tmp == 0 ? OFF : ON), tmp);
+		return size;
+	} catch (const std::invalid_argument&) {
+		return -EINVAL;
+	} catch (const std::out_of_range&) {
+		return -EINVAL;
+	}
+}
+
+int ds2408::r_sensed(char* buf, size_t, bool, int idx)
+{
+	/* sensed from register 0x88 */
+	std::sprintf(buf, "%d", (data[PIO_LS] & (0x1 << idx)) ? 1 : 0);
+	return std::strlen(buf);
+}
+
+int ds2408::r_latched(char* buf, size_t, bool, int idx)
+{
+	/* read activity latch from register 0x8A */
+	std::sprintf(buf, "%d", (data[PIO_LATCH] & (0x1 << idx)) ? 1 : 0);
+	return std::strlen(buf);
+}
+
+int ds2408::w_latched(const char*, size_t size, int)
+{
+	// writing anything here clears the activity latches
+	// coverity[sleep] - bus mutex must be held for the whole 1-Wire
+	// transaction; see latch_reset()
+	std::lock_guard<std::mutex> lock(ds->mtx);
+	latch_reset();
+	data[PIO_LATCH] = 0;
+	return size;
+}
+
+int ds2408::r_cfg(char* buf, size_t size, bool uncached, int)
+{
+	if (uncached)
+		if (cfg_read() == -1)
+			return -EAGAIN;
+	//   |CRC |  RES    |SW   1    2    3    4    5    6    7   | CFG  1    2    3    4    5    6    7  |FEA |OFF |MAJ |MIN |TYP |   OFF   |   FACT  |S   |IO  |TH  |TL  |TYP |THR |DIMD|DIMU|DIF |TM1 |TM2 |SWA0|SWA1|SWA2|SWA3|SWA4|SWA5|SWA6.
+	for (int i = 0; i < CFG_SIZE && (size_t)((i + 1) * 3) < size - 1; i++) {
+		std::sprintf(buf + i * 3, "%02X ", cfg[i]);
+	}
+	return std::strlen(buf);
+}
+
+int ds2408::r_pin_name(char* buf, size_t, bool, int idx)
+{
+	std::sprintf(buf, "n.%d", idx);
+	return std::strlen(buf);
+}
+
+int ds2408::w_pin_name(const char*, size_t size, int)
+{
+	// per-pin names are not implemented yet; accept and discard rather
+	// than falling through to the base class, whose fs_write() matches
+	// "name" as a substring and would silently rename the device itself
+	return size;
+}
+
+int ds2408::r_pin_func(char* buf, size_t, bool, int idx)
+{
+	std::sprintf(buf, "%X", cfg[CFG_PIN_ID + idx]);
+	return std::strlen(buf);
+}
+
+int ds2408::w_pin_func(const char* buf, size_t size, int idx)
+{
+	try {
+		uint8_t tmp = (uint8_t)(std::stoi(buf) & 0xff);
+		cfg[CFG_PIN_ID + idx] = tmp;
+		return size;
+	} catch (const std::invalid_argument&) {
+		return -EINVAL;
+	} catch (const std::out_of_range&) {
+		return -EINVAL;
+	}
+}
+
+bool ds2408::vis_pio(int idx) const
+{
+	return (cfg[CFG_PIN_ID + idx] & CFG_OUT_MASK) != 0;
+}
+
+bool ds2408::vis_sensed(int idx) const
+{
+	return (cfg[CFG_PIN_ID + idx] & CFG_BTN_MASK) != 0;
+}
+
+// --- IFs, all table-driven ----------------------------------------------
+
 std::vector<std::string> ds2408::fs_dir(string& path) const
 {
-	// add standards
-	for (int i = 0; i < 8; i++) {
-		if (path.find("pin." + std::to_string(i)) != string::npos) {
-			std::vector<std::string> dir;
-			dir.push_back("name");
-			dir.push_back("func");
-			return dir;
-		}
-	}
+	if (fs_table::in_instance_dir(table, n_table, path))
+		return fs_table::dir(*this, table, n_table, path);
+
 	std::vector<std::string> dir = OwDev::fs_dir(path);
-	for (const auto& s : DS2408) {
-		string sname = s.name;
-		size_t pos = sname.find(".*");
-		if (pos != std::string::npos) {
-			for (int i = 0; i < 8; i++) {
-				if (sname.find("PIO") != string::npos) {
-					if (cfg[CFG_PIN_ID + i] & 0x20) {
-						sname.replace(pos + 1, 1, std::to_string(i));
-						dir.push_back(sname.c_str());
-					}
-					continue;
-				}
-				if (sname.find("sensed") != string::npos) {
-					if (cfg[CFG_PIN_ID + i] & 0x10) {
-						sname.replace(pos + 1, 1, std::to_string(i));
-						dir.push_back(sname.c_str());
-					}
-					continue;
-				}
-				sname.replace(pos + 1, 1, std::to_string(i));
-				dir.push_back(sname.c_str());
-			}
-		} else {
-			dir.push_back(s.name);
-		}
-	}
+	std::vector<std::string> extra = fs_table::dir(*this, table, n_table, path);
+	dir.insert(dir.end(), extra.begin(), extra.end());
 	return dir;
 }
 
 int ds2408::fs_attr(std::string& path) const
 {
-	for (const auto& s : DS2408) {
-		string sname = s.name;
-		size_t pos = sname.find(".*");
-		if (pos != std::string::npos) {
-			for (int i = 0; i < 8; i++) {
-				sname.replace(pos + 1, 1, std::to_string(i));
-				if (path.find("PIO." + std::to_string(i)) != string::npos)
-					return 1;
-				if (path.find("sensed." + std::to_string(i)) != string::npos)
-					return 1;
-				if (path.find("latched." + std::to_string(i)) != string::npos)
-					return 1;
-				if (path.find("pin." + std::to_string(i) + "/name") != string::npos)
-					return 20;
-				if (path.find("pin." + std::to_string(i) + "/func") != string::npos)
-					return 20;
-				if (path.find("pin." + std::to_string(i)) != string::npos) {
-					return 0;
-				}
-			}
-		} else {
-			if (path.find(s.name) != std::string::npos)
-				return s.suglen;
-		}
-	}
-
-	// add standards
+	int r = fs_table::attr(*this, table, n_table, path);
+	if (r != fs_table::NOT_FOUND)
+		return r;
 	return OwDev::fs_attr(path);
 }
 
 int ds2408::fs_read(string& path, char* buf, size_t size, bool uncached)
 {
 	logger.verbose("DS2408 read " + path + " " + rom);
-	if (path.find("BYTE") != string::npos) {
-		if (uncached)
-			reg_read(false);
-		std::sprintf(buf, "%d", data[PIO_OUT]);
-		goto out;
-	}
-	if (path.find("cfg") != string::npos) {
-		if (uncached)
-			if (cfg_read() == -1)
-				return -EAGAIN;
-		//   |CRC |  RES    |SW   1    2    3    4    5    6    7   | CFG  1    2    3    4    5    6    7  |FEA |OFF |MAJ |MIN |TYP |   OFF   |   FACT  |S   |IO  |TH  |TL  |TYP |THR |DIMD|DIMU|DIF |TM1 |TM2 |SWA0|SWA1|SWA2|SWA3|SWA4|SWA5|SWA6.
-		for (int i = 0; i < CFG_SIZE && (size_t)((i + 1) * 3) < size - 1; i++) {
-			std::sprintf(buf + i * 3, "%02X ", cfg[i]);
-		}
-		goto out;
-	}
-	for (const auto& s : DS2408) {
-		string sname = s.name;
-		size_t pos = sname.find(".*");
-		if (pos != std::string::npos) {
-			for (int i = 0; i < 8; i++) {
-				sname.replace(pos + 1, 1, std::to_string(i));
-				if (path.find(sname) != std::string::npos) {
-					if (path.find(std::format("pin.{}/func", i)) != string::npos) {
-						std::sprintf(buf, "%X", cfg[CFG_PIN_ID + i]);
-						goto out;
-					}
-					if (path.find(std::format("pin.{}/name", i)) != string::npos) {
-						std::sprintf(buf, "n.%d", i);
-						goto out;
-					}
-					// read at 1 << i;
-					if (path.find("PIO") != string::npos) {
-						if (cfg[CFG_PIN_ID + i] == CFG_OUT_PWM)
-							std::sprintf(buf, "%d", level);
-						else
-							std::sprintf(buf, "%d", (data[PIO_OUT] & (0x1 << i)) ? 1 : 0);
-						goto out;
-					}
-					if (path.find("sensed") != string::npos) {
-						/* sensed from register 0x88 */
-						std::sprintf(buf, "%d", (data[PIO_LS] & (0x1 << i)) ? 1 : 0);
-						goto out;
-					}
-					if (path.find("latched") != string::npos) {
-						/* read activity latch from register 0x8A */
-						std::sprintf(buf, "%d", (data[PIO_LATCH] & (0x1 << i)) ? 1 : 0);
-						goto out;
-					}
-				}
-			}
-		}
+	int r = fs_table::read(*this, table, n_table, path, buf, size, uncached);
+	if (r != fs_table::NOT_FOUND) {
+		logger.log(LogLevel::DEBUG, "reading " + path + " -> " + std::string(buf) + "...");
+		return r;
 	}
 	return OwDev::fs_read(path, buf, size, uncached);
-out:
-	logger.log(LogLevel::DEBUG, "reading " + path + " -> " + std::string(buf) + "...");
-	return std::strlen(buf);
 }
 
 int ds2408::fs_write(string& path, const char* buf, size_t size)
 {
-	string s;
-
-	if (path.find("BYTE") != string::npos) {
-		try {
-			uint8_t tmp = (uint8_t)(std::stoi(buf) & 0xff);
-			pio_set(tmp);
-			return size;
-		} catch (const std::invalid_argument&) {
-			return -EINVAL;
-		} catch (const std::out_of_range&) {
-			return -EINVAL;
-		}
-	}
-	for (const auto& s : DS2408) {
-		string sname = s.name;
-		size_t pos = sname.find(".*");
-		if (pos != std::string::npos) {
-			for (int i = 0; i < 8; i++) {
-				sname.replace(pos + 1, 1, std::to_string(i));
-				if (path.find(sname) != std::string::npos) {
-					if (path.find(std::format("pin.{}/func", i)) != string::npos) {
-						uint8_t tmp = (uint8_t)(std::stoi(buf) & 0xff);
-						cfg[CFG_PIN_ID + i] = tmp;
-						return size;
-					}
-					if (path.find("PIO") != string::npos) {
-						uint8_t tmp = (uint8_t)(std::stoi(buf) & 0xff);
-						logger.verbose(std::format("set PIO.{} = {}", i, tmp));
-						pin_switch(i, (tmp == 0 ? OFF : ON), tmp);
-						return size;
-					}
-					if (path.find(sname) != string::npos) {
-						// coverity[sleep] - bus mutex must be held for the
-						// whole 1-Wire transaction; see latch_reset()
-						std::lock_guard<std::mutex> lock(ds->mtx);
-						// reset the latches
-						latch_reset();
-						data[PIO_LATCH] = 0;
-					}
-				}
-			}
-		}
-	}
-
-	// add standards
+	int r = fs_table::write(*this, table, n_table, path, buf, size);
+	if (r != fs_table::NOT_FOUND)
+		return r;
 	return OwDev::fs_write(path, buf, size);
 }
 
@@ -330,9 +316,9 @@ uint8_t ds2408::pio_set(uint8_t pio)
 			// lets try a pseudo read at least to avoid
 			// a hung dev
 			r = ds->read();
-	#ifndef USE_I2C
+#ifndef USE_I2C
 			r = 0xAA;
-	#endif
+#endif
 			if (r == 0xAA) {
 				data[PIO_OUT] = pio;
 				break;
