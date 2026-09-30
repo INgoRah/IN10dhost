@@ -15,6 +15,7 @@
 #include "ow_devices.h"
 #include "ds2408.h"
 #include "ds1820.h"
+#include "ds2450.h"
 #include "ard_i2c.h"
 #include "fs_table.h"
 #include "plugins.h"
@@ -309,8 +310,7 @@ TEST_F(FsTest, DevPinDirs) {
 	buf[2] = '\0';
 	res = fs_ops.write("/29.0701F8FE6677F4/pin.0/name", buf, 3, 0, nullptr);
 	res = fs_ops.read("/29.0701F8FE6677F4/pin.0/name", buf, 32, 0, nullptr);
-	// not yet supported, should be n.0
-	//EXPECT_STREQ(buf, "te");
+	EXPECT_STREQ(buf, "te");
 
 	res = fs_ops.getattr("/29.0701F8FE6677F4/pin.0", &st, nullptr);
 	EXPECT_TRUE(S_ISDIR(st.st_mode));
@@ -342,6 +342,43 @@ TEST_F(FsTest, DevPinDirs) {
 	EXPECT_EQ(res, 0);
 	res = fs_ops.read("/29.0701F8FE6677F4/PIO.0", buf, 2, 0, nullptr);
 	//EXPECT_EQ(res, -1);
+
+	// func reads back known pin functions by name, anything else as
+	// hex. Written in decimal, see w_pin_func().
+	const struct {
+		const char* in;
+		const char* out;
+	} funcs[] = {
+		{ "33", "OUT" },	// 0x21
+		{ "35", "PWM" },	// 0x23
+		{ "16", "BTN" },	// 0x10
+		{ "17", "SW" },		// 0x11
+		{ "5", "PASS" },	// 0x05
+		{ "6", "INV" },		// 0x06
+		{ "7", "INV_PU" },	// 0x07
+		{ "2", "ACT_HIGH" },	// 0x02
+		{ "34", "22" },		// 0x22, no name
+		{ "171", "AB" },	// 0xAB, no name
+		{ "0", "0" },
+	};
+	for (const auto& f : funcs) {
+		for (int pin : { 0, 7 }) {
+			std::string path = "/29.0701F8FE6677F4/pin." + std::to_string(pin) + "/func";
+			res = fs_ops.write(path.c_str(), f.in, strlen(f.in) + 1, 0, nullptr);
+			EXPECT_EQ(res, (int)strlen(f.in) + 1);
+			buf[0] = '\0';
+			res = fs_ops.read(path.c_str(), buf, 32, 0, nullptr);
+			EXPECT_EQ(res, (int)strlen(f.out)) << path << " = " << f.in;
+			EXPECT_STREQ(buf, f.out) << path << " = " << f.in;
+		}
+	}
+	// pins are independent of each other
+	fs_ops.write("/29.0701F8FE6677F4/pin.0/func", "33", 3, 0, nullptr);
+	fs_ops.write("/29.0701F8FE6677F4/pin.1/func", "16", 3, 0, nullptr);
+	fs_ops.read("/29.0701F8FE6677F4/pin.0/func", buf, 32, 0, nullptr);
+	EXPECT_STREQ(buf, "OUT");
+	fs_ops.read("/29.0701F8FE6677F4/pin.1/func", buf, 32, 0, nullptr);
+	EXPECT_STREQ(buf, "BTN");
 }
 
 TEST_F(FsTest, WriteReadDev) {
@@ -372,9 +409,9 @@ TEST_F(FsTest, WriteReadDev) {
 	res = fs_ops.write("/29.0701F8FE6677F4/pin.0/func", buf, 3, 0, nullptr);
 	res = fs_ops.write("/29.0701F8FE6677F4/pin.1/func", buf, 3, 0, nullptr);
 	res = fs_ops.read("/29.0701F8FE6677F4/pin.0/func", buf, 32, 0, nullptr);
-	EXPECT_EQ(res, 2);
+	EXPECT_EQ(res, 3);
 	// interpret as hex
-	EXPECT_STREQ(buf, "21");
+	EXPECT_STREQ(buf, "OUT");
 }
 
 TEST_F(FsTest, WriteReadDevPio) {
@@ -405,11 +442,12 @@ TEST_F(FsTest, WriteReadDevPio) {
 		std::string path = "/29.0701F8FE6677F4/PIO." + std::to_string(i);
 		res = fs_ops.read(path.c_str(), buf, 2, 0, nullptr);
 		EXPECT_EQ(res, 1);
-		EXPECT_STREQ(buf, "1");
+		// PIO is inverted: latch bit 1 reads as 0
+		EXPECT_STREQ(buf, "0");
 		dev->data[PIO_OUT] &= ~(0x1 << i);
 		res = fs_ops.read(path.c_str(), buf, 2, 0, nullptr);
 		EXPECT_EQ(res, 1);
-		EXPECT_STREQ(buf, "0");
+		EXPECT_STREQ(buf, "1");
 	}
 
 	buf[0] = '3';
@@ -422,32 +460,32 @@ TEST_F(FsTest, WriteReadDevPio) {
 	EXPECT_EQ(buf[0], '3');
 	res = fs_ops.read("/29.0701F8FE6677F4/PIO.1", buf, 2, 0, nullptr);
 	EXPECT_EQ(res, 1);
-	EXPECT_EQ(buf[0], '1');
+	EXPECT_EQ(buf[0], '0');
 
 	buf[0] = '1';
 	buf[1] = '\0';
 
-	// set PIO.0, unset PIO.1 -> byte = 0x1
+	// byte = 0x1 -> PIO.0 = 0 (on), PIO.1 = 1 (off), PIO is inverted
 	fs_ops.write("/29.0701F8FE6677F4/BYTE", buf, 2, 0, nullptr);
 	fs_ops.read("/29.0701F8FE6677F4/PIO.0", buf, 2, 0, nullptr);
-	EXPECT_EQ(buf[0], '1');
-	fs_ops.read("/29.0701F8FE6677F4/PIO.1", buf, 2, 0, nullptr);
 	EXPECT_EQ(buf[0], '0');
-	// set PIO.1, (PIO.0 unchanged) -> byte = 0x3
-	buf[0] = '1';
+	fs_ops.read("/29.0701F8FE6677F4/PIO.1", buf, 2, 0, nullptr);
+	EXPECT_EQ(buf[0], '1');
+	// PIO.1 = 0 sets its latch bit (PIO.0 unchanged) -> byte = 0x3
+	buf[0] = '0';
 	fs_ops.write("/29.0701F8FE6677F4/PIO.1", buf, 2, 0, nullptr);
 	res = fs_ops.read("/29.0701F8FE6677F4/BYTE", buf, 2, 0, nullptr);
 	EXPECT_EQ(buf[0], '3');
 	fs_ops.read("/29.0701F8FE6677F4/PIO.0", buf, 2, 0, nullptr);
-	EXPECT_EQ(buf[0], '1');
+	EXPECT_EQ(buf[0], '0');
 	fs_ops.read("/29.0701F8FE6677F4/PIO.1", buf, 2, 0, nullptr);
-	EXPECT_EQ(buf[0], '1');
+	EXPECT_EQ(buf[0], '0');
 
-	buf[0] = '0';
+	buf[0] = '1';
 	fs_ops.write("/29.0701F8FE6677F4/PIO.0", buf, 2, 0, nullptr);
 	res = fs_ops.read("/29.0701F8FE6677F4/BYTE", buf, 2, 0, nullptr);
 	EXPECT_EQ(buf[0], '2');
-	buf[0] = '0';
+	buf[0] = '1';
 	fs_ops.write("/29.0701F8FE6677F4/PIO.1", buf, 2, 0, nullptr);
 	res = fs_ops.read("/29.0701F8FE6677F4/BYTE", buf, 2, 0, nullptr);
 	EXPECT_STREQ(buf, "0");
@@ -647,7 +685,7 @@ TEST_F(FsTest, Ds2408Gaps) {
 	EXPECT_EQ(res, -EINVAL);
 
 	// never exercised: writes the device's cfg block back over the bus
-	EXPECT_EQ(dev->cfg_write(), CFG_SIZE);
+	EXPECT_EQ(dev->cfg_write(dev->cfg), CFG_SIZE);
 
 	// OwDev::fs_attr()'s empty-path guard: no FUSE caller ever passes
 	// an empty path (the ROM prefix is always still attached), so it's
@@ -1156,4 +1194,277 @@ TEST_F(FsTest, AlarmReaddirSkipsNonAlarmingDevices) {
 	int res = fs_ops.readdir("/alarm", &seen, record_filler, 0, nullptr, FUSE_READDIR_PLUS);
 	EXPECT_EQ(res, 0);
 	EXPECT_EQ(std::find(seen.begin(), seen.end(), dev->rom), seen.end());
+}
+TEST_F(FsTest, Ds2408ThresholdBrightness) {
+	char buf[32];
+	int res;
+
+	ow.update_device(1, "29.0701F8FE6677F4");
+	ow.update_data();
+	// threshold_set()/brightness_set() go through level_set(), which
+	// needs dev->ds - only begin() assigns it
+	ow.begin();
+	ds2408* dev = (ds2408*)ow.find(0x290701F8FE6677F4);
+	ASSERT_NE(dev, nullptr);
+
+	struct stat st;
+	res = fs_ops.getattr("/29.0701F8FE6677F4/threshold", &st, nullptr);
+	EXPECT_EQ(res, 0);
+	EXPECT_TRUE(S_ISREG(st.st_mode));
+	res = fs_ops.getattr("/29.0701F8FE6677F4/brightness", &st, nullptr);
+	EXPECT_EQ(res, 0);
+	EXPECT_TRUE(S_ISREG(st.st_mode));
+
+	// defaults before anything was written or loaded
+	ds2408 fresh("29.0701F8FE6677F4");
+	EXPECT_EQ(fresh.to_json()["threshold"], 0);
+	EXPECT_EQ(fresh.to_json()["brightness"], 0);
+
+	std::strcpy(buf, "120");
+	res = fs_ops.write("/29.0701F8FE6677F4/threshold", buf, 3, 0, nullptr);
+	EXPECT_EQ(res, 3);
+
+	// invalid input is rejected and leaves the value alone
+	std::strcpy(buf, "abc");
+	EXPECT_EQ(fs_ops.write("/29.0701F8FE6677F4/threshold", buf, 3, 0, nullptr), -EINVAL);
+	EXPECT_EQ(fs_ops.write("/29.0701F8FE6677F4/brightness", buf, 3, 0, nullptr), -EINVAL);
+	std::strcpy(buf, "99999999999");
+	EXPECT_EQ(fs_ops.write("/29.0701F8FE6677F4/threshold", buf, 11, 0, nullptr), -EINVAL);
+	res = fs_ops.read("/29.0701F8FE6677F4/threshold", buf, sizeof(buf), 0, nullptr);
+	EXPECT_EQ(res, 3);
+	EXPECT_STREQ(buf, "120");
+
+	std::strcpy(buf, "80");
+	res = fs_ops.write("/29.0701F8FE6677F4/brightness", buf, 2, 0, nullptr);
+	EXPECT_EQ(res, 2);
+	res = fs_ops.read("/29.0701F8FE6677F4/brightness", buf, sizeof(buf), 0, nullptr);
+	EXPECT_EQ(res, 2);
+	EXPECT_STREQ(buf, "80");
+
+	// both are independent of each other
+	res = fs_ops.read("/29.0701F8FE6677F4/threshold", buf, sizeof(buf), 0, nullptr);
+	EXPECT_STREQ(buf, "120");
+
+	// only the low byte goes to the device
+	std::strcpy(buf, "300");
+	fs_ops.write("/29.0701F8FE6677F4/threshold", buf, 3, 0, nullptr);
+	fs_ops.read("/29.0701F8FE6677F4/threshold", buf, sizeof(buf), 0, nullptr);
+	EXPECT_STREQ(buf, "44");
+	std::strcpy(buf, "120");
+	fs_ops.write("/29.0701F8FE6677F4/threshold", buf, 3, 0, nullptr);
+
+	// both are persisted and restored with the device config
+	json j = dev->to_json();
+	EXPECT_EQ(j["threshold"], 120);
+	EXPECT_EQ(j["brightness"], 80);
+	ds2408 restored;
+	restored.from_json(j);
+	json r = restored.to_json();
+	EXPECT_EQ(r["threshold"], 120);
+	EXPECT_EQ(r["brightness"], 80);
+}
+
+TEST_F(FsTest, ArduinoPower) {
+	char buf[32];
+	int res;
+	struct stat st;
+
+	ow.update_device(1, "AD.0900F8FF6677E2");
+	ow.update_data();
+	ow.begin();
+	Ard_i2c* arduino = (Ard_i2c*)ow.find(1, 9, 0xAD);
+	ASSERT_NE(arduino, nullptr);
+
+	res = fs_ops.getattr("/AD.0900F8FF6677E2/power_total", &st, nullptr);
+	EXPECT_EQ(res, 0);
+	EXPECT_TRUE(S_ISREG(st.st_mode));
+
+	// power and power_total are only updated from interrupt() on real
+	// hardware, preset them the way it would
+	arduino->power = 0;
+	arduino->power_total = 0;
+	res = fs_ops.read("/AD.0900F8FF6677E2/power", buf, sizeof(buf), 0, nullptr);
+	EXPECT_EQ(res, 1);
+	EXPECT_STREQ(buf, "0");
+	res = fs_ops.read("/AD.0900F8FF6677E2/power_total", buf, sizeof(buf), 0, nullptr);
+	EXPECT_EQ(res, 1);
+	EXPECT_STREQ(buf, "0");
+
+	arduino->power = 1800;
+	arduino->power_total = 4242;
+	res = fs_ops.read("/AD.0900F8FF6677E2/power", buf, sizeof(buf), 0, nullptr);
+	EXPECT_EQ(res, 4);
+	EXPECT_STREQ(buf, "1800");
+	// "power" must not also match "power_total" and vice versa
+	res = fs_ops.read("/AD.0900F8FF6677E2/power_total", buf, sizeof(buf), 0, nullptr);
+	EXPECT_EQ(res, 4);
+	EXPECT_STREQ(buf, "4242");
+
+	// power_total is a counter that survives a restart, power is not
+	json j = arduino->to_json();
+	EXPECT_EQ(j["power_total"], 4242);
+	EXPECT_FALSE(j.contains("power"));
+	Ard_i2c restored;
+	restored.from_json(j);
+	EXPECT_EQ(restored.power_total, 4242);
+	EXPECT_EQ(restored.power, 0);
+
+	arduino->power = 0;
+	arduino->power_total = 0;
+}
+
+TEST_F(FsTest, Ds2450PollNotifiesPlugins) {
+	ow.update_device(0, "20.0200F8FE66771E");
+	ow.update_data();
+	// poll() reads the ADC, which needs dev->ds - only begin() assigns it
+	ow.begin();
+	ds2450* dev = (ds2450*)ow.find(0x200200F8FE66771E);
+	ASSERT_NE(dev, nullptr);
+
+	// the test fixture plugin counts ACT_DEV_CHANGE and keeps the payload
+	plugins.remove("faulty");
+	plugins.load(json{ { "faulty", { { "mode", "record" } } } });
+	ASSERT_EQ(plugins.config_of("faulty")["changes"], 0);
+
+	LogLevel lvl = logger.get_level();
+	// the simulated bus fails the CRC checks, which is only logged
+	logger.set_level(LogLevel::NONE);
+
+	// without I2C the ADC always reads 0, so start from something else
+	dev->volt_a = 3;
+	EXPECT_EQ(dev->poll(), 1);
+	json cfg = plugins.config_of("faulty");
+	EXPECT_EQ(cfg["changes"], 1);
+	EXPECT_EQ(cfg["last"]["rom"], dev->rom);
+	EXPECT_EQ(cfg["last"]["type"], "ds2450");
+	EXPECT_EQ(cfg["last"]["bus"], 0);
+	EXPECT_EQ(cfg["last"]["volt_a"], 0);
+	EXPECT_EQ(dev->volt_a, 0);
+
+	// unchanged value: no further notification
+	EXPECT_EQ(dev->poll(), 1);
+	EXPECT_EQ(plugins.config_of("faulty")["changes"], 1);
+
+	logger.set_level(lvl);
+	plugins.remove("faulty");
+}
+
+TEST_F(FsTest, Ds2408WriteCfg) {
+	char buf[128];
+	int res;
+
+	ow.update_device(1, "29.0701F8FE6677F4");
+	ow.update_data();
+	// cfg_write() needs dev->ds; only begin() assigns it
+	ow.begin();
+	ds2408* dev = (ds2408*)ow.find(0x290701F8FE6677F4);
+	ASSERT_NE(dev, nullptr);
+	std::memset(dev->cfg, 0, CFG_SIZE);
+
+	// hex bytes, any white space, upper or lower case, one or two digits
+	const char* in = "a5 1 \n21  FF\n";
+	res = fs_ops.write("/29.0701F8FE6677F4/cfg", in, strlen(in), 0, nullptr);
+	EXPECT_EQ(res, (int)strlen(in));
+	EXPECT_EQ(dev->cfg[0], 0xA5);
+	EXPECT_EQ(dev->cfg[1], 0x01);
+	EXPECT_EQ(dev->cfg[2], 0x21);
+	EXPECT_EQ(dev->cfg[3], 0xFF);
+	// the rest is left alone
+	EXPECT_EQ(dev->cfg[4], 0x00);
+
+	res = fs_ops.read("/29.0701F8FE6677F4/cfg", buf, sizeof(buf), 0, nullptr);
+	EXPECT_GT(res, 0);
+	EXPECT_EQ(std::string(buf).substr(0, 12), "A5 01 21 FF ");
+
+	// what r_cfg() prints can be written back unchanged
+	std::string all(buf);
+	res = fs_ops.write("/29.0701F8FE6677F4/cfg", all.c_str(), all.size(), 0, nullptr);
+	EXPECT_EQ(res, (int)all.size());
+	EXPECT_EQ(dev->cfg[3], 0xFF);
+
+	// rejected, and the cached cfg stays as it was
+	const char* bad[] = { "", "  \n", "0x10", "100", "1g", "-1", "10,20" };
+	for (const char* b : bad) {
+		res = fs_ops.write("/29.0701F8FE6677F4/cfg", b, strlen(b), 0, nullptr);
+		EXPECT_EQ(res, -EINVAL) << "input '" << b << "'";
+	}
+	std::string too_many;
+	for (int i = 0; i <= CFG_SIZE; i++)
+		too_many += "01 ";
+	res = fs_ops.write("/29.0701F8FE6677F4/cfg", too_many.c_str(), too_many.size(), 0, nullptr);
+	EXPECT_EQ(res, -EINVAL);
+	EXPECT_EQ(dev->cfg[0], 0xA5);
+	EXPECT_EQ(dev->cfg[1], 0x01);
+}
+
+TEST_F(FsTest, Ds2408PinNames) {
+	char buf[64];
+	int res;
+
+	ow.update_device(1, "29.0701F8FE6677F4");
+	ow.update_data();
+	ds2408* dev = (ds2408*)ow.find(0x290701F8FE6677F4);
+	ASSERT_NE(dev, nullptr);
+	// start from the defaults whatever earlier tests wrote
+	for (int i = 0; i < 8; i++) {
+		std::string path = "/29.0701F8FE6677F4/pin." + std::to_string(i) + "/name";
+		fs_ops.write(path.c_str(), "", 0, 0, nullptr);
+	}
+
+	res = fs_ops.read("/29.0701F8FE6677F4/pin.3/name", buf, sizeof(buf), 0, nullptr);
+	EXPECT_EQ(res, 5);
+	EXPECT_STREQ(buf, "PIO.3");
+
+	// a shell "echo Kitchen > .../name" ends in a newline, which is dropped
+	res = fs_ops.write("/29.0701F8FE6677F4/pin.3/name", "Kitchen\n", 8, 0, nullptr);
+	EXPECT_EQ(res, 8);
+	res = fs_ops.read("/29.0701F8FE6677F4/pin.3/name", buf, sizeof(buf), 0, nullptr);
+	EXPECT_EQ(res, 7);
+	EXPECT_STREQ(buf, "Kitchen");
+	// other pins keep their default, the device its own name
+	fs_ops.read("/29.0701F8FE6677F4/pin.4/name", buf, sizeof(buf), 0, nullptr);
+	EXPECT_STREQ(buf, "PIO.4");
+	EXPECT_NE(dev->name, "Kitchen");
+
+	// longest allowed name, and one too long, which changes nothing
+	std::string longest(PIN_NAME_MAX, 'x');
+	res = fs_ops.write("/29.0701F8FE6677F4/pin.5/name", longest.c_str(), longest.size(), 0, nullptr);
+	EXPECT_EQ(res, PIN_NAME_MAX);
+	fs_ops.read("/29.0701F8FE6677F4/pin.5/name", buf, sizeof(buf), 0, nullptr);
+	EXPECT_EQ(std::string(buf), longest);
+	std::string too_long(PIN_NAME_MAX + 1, 'y');
+	res = fs_ops.write("/29.0701F8FE6677F4/pin.5/name", too_long.c_str(), too_long.size(), 0, nullptr);
+	EXPECT_EQ(res, -EINVAL);
+	fs_ops.read("/29.0701F8FE6677F4/pin.5/name", buf, sizeof(buf), 0, nullptr);
+	EXPECT_EQ(std::string(buf), longest);
+
+	// stored with the device config and restored from it
+	json j = dev->to_json();
+	ASSERT_TRUE(j["pin_names"].is_array());
+	EXPECT_EQ(j["pin_names"].size(), 8u);
+	EXPECT_EQ(j["pin_names"][3], "Kitchen");
+	EXPECT_EQ(j["pin_names"][4], "");
+	ds2408 restored;
+	restored.from_json(j);
+	json r = restored.to_json();
+	EXPECT_EQ(r["pin_names"], j["pin_names"]);
+
+	// older configs without pin_names, or a shorter list, load fine
+	json old = j;
+	old.erase("pin_names");
+	ds2408 legacy;
+	EXPECT_NO_THROW(legacy.from_json(old));
+	EXPECT_EQ(legacy.to_json()["pin_names"][3], "");
+	old["pin_names"] = { "Door", "Hall" };
+	ds2408 partial;
+	EXPECT_NO_THROW(partial.from_json(old));
+	EXPECT_EQ(partial.to_json()["pin_names"][1], "Hall");
+	EXPECT_EQ(partial.to_json()["pin_names"][2], "");
+
+	// an empty write resets the default name
+	res = fs_ops.write("/29.0701F8FE6677F4/pin.3/name", "\n", 1, 0, nullptr);
+	EXPECT_EQ(res, 1);
+	fs_ops.read("/29.0701F8FE6677F4/pin.3/name", buf, sizeof(buf), 0, nullptr);
+	EXPECT_STREQ(buf, "PIO.3");
+	fs_ops.write("/29.0701F8FE6677F4/pin.5/name", "", 0, 0, nullptr);
 }

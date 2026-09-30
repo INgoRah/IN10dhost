@@ -1,10 +1,14 @@
 #ifndef _DS2408_H
 #define _DS2408_H
+#include <array>
+#include <string>
 #include "ow_dev.h"
 #include "interface/ds2408.h"
 #include "fs_table.h"
 
 #define CFG_SIZE 26
+/** longest pin name, same as the size its fs entry reports */
+#define PIN_NAME_MAX 20
 
 class ds2408 : public OwDev, public IDS2408 {
 	private:
@@ -19,6 +23,7 @@ class ds2408 : public OwDev, public IDS2408 {
 		int r_latched(char* buf, size_t size, bool uncached, int idx);
 		int w_latched(const char* buf, size_t size, int idx);
 		int r_cfg(char* buf, size_t size, bool uncached, int idx);
+		int w_cfg(const char* buf, size_t size, int idx);
 		int r_pin_name(char* buf, size_t size, bool uncached, int idx);
 		int w_pin_name(const char* buf, size_t size, int idx);
 		int r_pin_func(char* buf, size_t size, bool uncached, int idx);
@@ -37,8 +42,10 @@ class ds2408 : public OwDev, public IDS2408 {
 		// the directory itself.
 		static const FsEntry<ds2408> table[];
 		static const size_t n_table;
-		int threshold;
-		int brightness;
+		int threshold = 0;
+		int brightness = 0;
+		// user given name per pin, empty means the default "n.<pin>"
+		std::array<std::string, 8> pin_name;
 	public:
 		/* [0] PIO Logic State  = sensed
 		 * [1] Output latch = PIO
@@ -79,7 +86,7 @@ class ds2408 : public OwDev, public IDS2408 {
 		uint8_t reg_read(bool latch_reset);
 		uint8_t latch_reset();
 		int cfg_read();
-		int cfg_write(int len = CFG_SIZE);
+		int cfg_write(const uint8_t* data, int len = CFG_SIZE);
 		uint8_t level_set(uint8_t pio, uint8_t level,
 			uint8_t cmd = TMR_TYPE_ON, uint8_t val = 0);
 		uint8_t pin_switch(uint8_t pio, enum _pio_mode state, uint8_t lvl = 0);

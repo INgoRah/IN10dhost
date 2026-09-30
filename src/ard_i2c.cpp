@@ -44,8 +44,10 @@ enum {
 // take the address of the private handlers below directly
 const FsEntry<Ard_i2c> Ard_i2c::table[] = {
 	{ "mode", 3, 0, false, nullptr, nullptr, &Ard_i2c::r_mode, &Ard_i2c::w_mode },
-	{ "power", 3, 0, false, nullptr, nullptr, &Ard_i2c::r_power, nullptr },
+	// power_total before power: rows match as substrings of the path,
+	// so "power" would also claim .../power_total
 	{ "power_total", 3, 0, false, nullptr, nullptr, &Ard_i2c::r_pow_total, nullptr },
+	{ "power", 3, 0, false, nullptr, nullptr, &Ard_i2c::r_power, nullptr },
 	{ "test", 2, 0, false, nullptr, nullptr, nullptr, &Ard_i2c::w_test },
 	{ "int_min", 6, 0, false, nullptr, nullptr, &Ard_i2c::r_int_min, nullptr },
 	{ "int_max", 6, 0, false, nullptr, nullptr, &Ard_i2c::r_int_max, nullptr },

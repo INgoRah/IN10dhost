@@ -181,13 +181,10 @@ void OwDevices::load(const std::string& path) {
 	}
 	// init() every loaded device first (no hardware access), then only
 	// once all of them are initialized start hardware access via begin()
-	logger.verbose("init devs ...");
 	for (auto& dev : cache.devices) {
 		dev->init();
 	}
-	logger.verbose("init done!");
 	update_data();
-	logger.verbose("update data done!");
 	plugins.action(ACT_INITIALIZED, 0); // loaded
 }
 
@@ -537,6 +534,7 @@ bool OwDevices::alarmHandler(uint8_t busNr, uint8_t target)
 		// transaction
 		std::lock_guard<std::mutex> lock(ds->mtx);
 
+		// coverity[sleep]
 		ret = ds->selectChannel(busNr);
 		if (!ret)
 			// this could be a timeout or other issue
@@ -550,6 +548,7 @@ bool OwDevices::alarmHandler(uint8_t busNr, uint8_t target)
 		// with custom addresses using one byte ID only
 		// at the second byte and the remaining according a
 		// defined scheme, we could stop even after one byte search
+		// coverity[sleep]
 		srch = ds->search(adr, false);
 	}
 	while (srch && cnt > 0) {

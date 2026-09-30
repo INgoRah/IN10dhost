@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <climits>
+#include <utility>
 #include "fs.h"
 
 // Table-driven IFs helper.
@@ -188,7 +189,7 @@ std::vector<std::string> dir(const T &self, const FsEntry<T> *table, size_t n,
 			std::string inst = detail::instance_name(
 				(slash == std::string::npos ? name : name.substr(0, slash)).c_str(), idx, e.alpha);
 			if (std::find(out.begin(), out.end(), inst) == out.end())
-				out.push_back(inst);
+				out.push_back(std::move(inst));
 		}
 	}
 	return out;

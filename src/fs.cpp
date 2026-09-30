@@ -479,7 +479,7 @@ static int fs_write(const char* path, const char* buf, size_t size,
 			cmd.pop_back();
 
 		if (cmd == "rm")
-			return plugins.remove(pname) == 0 ? (int)size : -ENOENT;
+			return plugins.remove(std::move(pname)) == 0 ? (int)size : -ENOENT;
 		if (cmd == "reload") {
 			plugins.reload();
 			plugins.action(ACT_READY, 0);

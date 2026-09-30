@@ -1,4 +1,7 @@
 #include <stdint.h>
+#ifdef TESTING
+#include <gtest/gtest_prod.h>
+#endif
 #include "ow_devices.h"
 #include "fs_table.h"
 
@@ -38,6 +41,10 @@ class Ard_i2c : public OwDev{
 		int r_int_avg(char* buf, size_t size, bool uncached, int idx);
 		static const FsEntry<Ard_i2c> table[];
 		static const size_t n_table;
+#ifdef TESTING
+		// GTest testing support
+		FRIEND_TEST(FsTest, ArduinoPower);
+#endif
 	public:
 		using OwDev::OwDev;
 		using OwDev::type;

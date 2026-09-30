@@ -1,5 +1,7 @@
 #include <fstream>
 #include <iostream>
+#include <algorithm>
+#include <sstream>
 #include <string>
 #include <fuse3/fuse.h>
 #include "main.h"
@@ -26,8 +28,8 @@ const FsEntry<ds2408> ds2408::table[] = {
 	{ "PIO.*", 3, 8, false, &ds2408::vis_pio, nullptr, &ds2408::r_pio, &ds2408::w_pio },
 	{ "sensed.*", 2, 8, false, &ds2408::vis_sensed, nullptr, &ds2408::r_sensed, nullptr },
 	{ "latched.*", 2, 8, false, nullptr, nullptr, &ds2408::r_latched, &ds2408::w_latched },
-	{ "cfg", 3 * CFG_SIZE, 0, false, nullptr, nullptr, &ds2408::r_cfg, nullptr },
-	{ "pin.*/name", 20, 8, false, nullptr, nullptr, &ds2408::r_pin_name, &ds2408::w_pin_name },
+	{ "cfg", 3 * CFG_SIZE, 0, false, nullptr, nullptr, &ds2408::r_cfg, &ds2408::w_cfg },
+	{ "pin.*/name", PIN_NAME_MAX, 8, false, nullptr, nullptr, &ds2408::r_pin_name, &ds2408::w_pin_name },
 	{ "pin.*/func", 20, 8, false, nullptr, nullptr, &ds2408::r_pin_func, &ds2408::w_pin_func },
 	{ "threshold", 3, 0, false, nullptr, nullptr, &ds2408::r_threshold, &ds2408::w_threshold },
 	{ "brightness", 3, 0, false, nullptr, nullptr, &ds2408::r_brightness, &ds2408::w_brightness },
@@ -40,6 +42,7 @@ json ds2408::to_json() const {
 	j["cfg"] = cfg;
 	j["threshold"] = threshold;
 	j["brightness"] = brightness;
+	j["pin_names"] = pin_name;
 
 	return j;
 };
@@ -54,6 +57,12 @@ void ds2408::from_json(const json& j) {
 	}
 	if (j.contains("brightness")) {
 		j.at("brightness").get_to(brightness);
+	}
+	if (j.contains("pin_names")) {
+		// tolerate a shorter list, the remaining pins keep their default
+		const json& names = j.at("pin_names");
+		for (size_t i = 0; i < names.size() && i < pin_name.size(); i++)
+			names.at(i).get_to(pin_name[i]);
 	}
 }
 
@@ -85,7 +94,8 @@ int ds2408::r_pio(char* buf, size_t, bool, int idx)
 	if (cfg[CFG_PIN_ID + idx] == CFG_OUT_PWM)
 		std::sprintf(buf, "%d", level);
 	else
-		std::sprintf(buf, "%d", (data[PIO_OUT] & (0x1 << idx)) ? 1 : 0);
+		// inverted: 1 = OFF (output latch bit 0), 0 = ON (latch bit 1)
+		std::sprintf(buf, "%d", (data[PIO_OUT] & (0x1 << idx)) ? 0 : 1);
 	return std::strlen(buf);
 }
 
@@ -94,6 +104,8 @@ int ds2408::w_pio(const char* buf, size_t size, int idx)
 	try {
 		uint8_t tmp = (uint8_t)(std::stoi(buf) & 0xff);
 		logger.verbose(std::format("set PIO.{} = {}", idx, tmp));
+		// inverted for plain IO: writing 1 clears the output latch bit,
+		// writing 0 sets it (see pin_switch); PWM takes the level as is
 		pin_switch(idx, (tmp == 0 ? OFF : ON), tmp);
 		return size;
 	} catch (const std::invalid_argument&) {
@@ -140,23 +152,86 @@ int ds2408::r_cfg(char* buf, size_t size, bool uncached, int)
 	return std::strlen(buf);
 }
 
-int ds2408::r_pin_name(char* buf, size_t, bool, int idx)
+// Takes hex bytes without 0x separated by white space, e.g. "10 21 23",
+// and writes them to the device starting at cfg[0] - the same layout
+// r_cfg() prints, so its output can be written back as is
+int ds2408::w_cfg(const char* buf, size_t size, int)
 {
-	std::sprintf(buf, "n.%d", idx);
+	uint8_t tmp[CFG_SIZE];
+	int len = 0;
+	std::istringstream in(std::string(buf, size));
+	std::string tok;
+
+	while (in >> tok) {
+		if (len == CFG_SIZE || tok.size() > 2
+				|| !std::all_of(tok.begin(), tok.end(), ::isxdigit))
+			return -EINVAL;
+		tmp[len++] = (uint8_t)std::stoul(tok, nullptr, 16);
+	}
+	if (len == 0)
+		return -EINVAL;
+
+	if (cfg_write(tmp, len) != len)
+		return -EAGAIN;
+	return size;
+}
+
+int ds2408::r_pin_name(char* buf, size_t size, bool, int idx)
+{
+	if (pin_name[idx].empty())
+		std::snprintf(buf, size, "PIO.%d", idx);
+	else
+		std::snprintf(buf, size, "%s", pin_name[idx].c_str());
 	return std::strlen(buf);
 }
 
-int ds2408::w_pin_name(const char*, size_t size, int)
+// Handled here rather than by the base class, whose fs_write() matches
+// "name" as a substring and would rename the device itself. An empty
+// name resets the pin to its default.
+int ds2408::w_pin_name(const char* buf, size_t size, int idx)
 {
-	// per-pin names are not implemented yet; accept and discard rather
-	// than falling through to the base class, whose fs_write() matches
-	// "name" as a substring and would silently rename the device itself
+	std::string s(buf, size);
+
+	// trim the newline a shell redirect adds, or a C string's NUL
+	while (!s.empty() && (s.back() == '\n' || s.back() == '\r' || s.back() == '\0'))
+		s.pop_back();
+	if (s.size() > PIN_NAME_MAX)
+		return -EINVAL;
+	pin_name[idx] = std::move(s);
 	return size;
 }
 
 int ds2408::r_pin_func(char* buf, size_t, bool, int idx)
 {
-	std::sprintf(buf, "%X", cfg[CFG_PIN_ID + idx]);
+	switch(cfg[CFG_PIN_ID + idx]) {
+		case 0x21:
+			std::sprintf(buf, "OUT");
+			break;
+		case 0x23:
+			std::sprintf(buf, "PWM");
+			break;
+		case 0x10:
+			std::sprintf(buf, "BTN");
+			break;
+		case 0x11:
+			std::sprintf(buf, "SW");
+			break;
+		case 0x05:
+			std::sprintf(buf, "PASS");
+			break;
+		case 0x06:
+			std::sprintf(buf, "INV");
+			break;
+		case 0x07:
+			std::sprintf(buf, "INV_PU");
+			break;
+		case 0x02:
+			std::sprintf(buf, "ACT_HIGH");
+			break;
+		default:
+			std::sprintf(buf, "%X", cfg[CFG_PIN_ID + idx]);
+			break;
+	}
 	return std::strlen(buf);
 }
 
@@ -179,13 +254,18 @@ int ds2408::r_threshold(char* buf, size_t, bool, int)
 	return std::strlen(buf);
 }
 
-int ds2408::w_threshold(const char* buf, size_t, int)
+int ds2408::w_threshold(const char* buf, size_t size, int)
 {
-	uint8_t tmp = (uint8_t)(std::stoi(buf) & 0xff);
-	if (threshold_set(tmp) == 0)
-		return std::strlen(buf);
-
-	return -EAGAIN;
+	try {
+		uint8_t tmp = (uint8_t)(std::stoi(buf) & 0xff);
+		if (threshold_set(tmp) == 0)
+			return size;
+		return -EAGAIN;
+	} catch (const std::invalid_argument&) {
+		return -EINVAL;
+	} catch (const std::out_of_range&) {
+		return -EINVAL;
+	}
 }
 
 int ds2408::r_brightness(char* buf, size_t, bool, int)
@@ -194,13 +274,18 @@ int ds2408::r_brightness(char* buf, size_t, bool, int)
 	return std::strlen(buf);
 }
 
-int ds2408::w_brightness(const char* buf, size_t, int)
+int ds2408::w_brightness(const char* buf, size_t size, int)
 {
-	uint8_t tmp = (uint8_t)(std::stoi(buf) & 0xff);
-	if (brightness_set(tmp) == 0)
-		return std::strlen(buf);
-
-	return -EAGAIN;
+	try {
+		uint8_t tmp = (uint8_t)(std::stoi(buf) & 0xff);
+		if (brightness_set(tmp) == 0)
+			return size;
+		return -EAGAIN;
+	} catch (const std::invalid_argument&) {
+		return -EINVAL;
+	} catch (const std::out_of_range&) {
+		return -EINVAL;
+	}
 }
 
 bool ds2408::vis_pio(int idx) const
@@ -319,10 +404,11 @@ uint8_t ds2408::pin_switch(uint8_t pio, enum _pio_mode state, uint8_t lvl)
 			else
 				tmp = data[PIO_OUT] | (0x01 << pio);
 		} else {
+			// active low: ON clears the latch bit, OFF sets it
 			if (state == ON)
-				tmp = data[PIO_OUT] | (0x01 << pio);
-			if (state == OFF)
 				tmp = data[PIO_OUT] & ~(0x01 << pio);
+			if (state == OFF)
+				tmp = data[PIO_OUT] | (0x01 << pio);
 		}
 		pio_set(tmp);
 	}
@@ -365,6 +451,7 @@ uint8_t ds2408::pio_set(uint8_t pio)
 			}
 			if (err == 0)
 				err = ds->last_err;
+			// coverity[sleep] - bus mutex must be held
 			usleep(1000);
 		} while (--retry > 0);
 		// if err && retry > 0: err = 0
@@ -481,19 +568,23 @@ int ds2408::cfg_read()
 	return len;
 }
 
-int ds2408::cfg_write(int len)
+// Writes len bytes of data to the device config, starting at cfg[0].
+// Only once that succeeded they are also taken over into this->cfg, so
+// the cached copy always matches the device.
+int ds2408::cfg_write(const uint8_t* data, int len)
 {
 	int i;
 
 	if (len > CFG_SIZE)
 		len = CFG_SIZE;
 
-	// coverity[sleep] - bus mutex must be held for the whole 1-Wire
+	// bus mutex must be held for the whole 1-Wire
 	// transaction: the transfer needs exclusive access to the shared
 	// bus for its full duration, so releasing the lock mid-transfer
 	// isn't an option here
 	std::lock_guard<std::mutex> lock(ds->mtx);
 
+	// coverity[sleep] - bus mutex must be held
 	if (!ds->selectChannel(bus))
 		return -1;
 	ds->reset();
@@ -501,8 +592,11 @@ int ds2408::cfg_write(int len)
 	ds->write (0x86);
 
 	for (i = 0; i < len - 1; i++)
-		ds->write(cfg[i]);
+		ds->write(data[i]);
 
+	// data may be this->cfg itself, just written back
+	if (data != cfg)
+		std::memcpy(cfg, data, len);
 	return len;
 }
 
@@ -531,8 +625,10 @@ uint8_t ds2408::level_set(uint8_t pio, uint8_t level, uint8_t cmd, uint8_t val)
 	// coverity[sleep] - bus mutex must be held for the whole 1-Wire
 	// transaction
 	std::lock_guard<std::mutex> lock(ds->mtx);
+	// coverity[sleep] - bus mutex must be held
 	if (!ds->selectChannel(bus))
 		return 0xff;
+	// coverity[sleep] - bus mutex must be held
 	if (!ds->reset())
 		return 0xff;
 

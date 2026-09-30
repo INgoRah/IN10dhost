@@ -133,7 +133,9 @@ void background_worker()
 			gpiod_line_request_read_edge_events(line, event_buffer, 16);
 		}
 #endif
-		if (line == nullptr)
+		// no GPIO edge to wait for: service the Arduino on every wake,
+		// if there is one on the bus at all
+		if (line == nullptr && arduino)
 			arduino->interrupt();
 		if (ret == 0) {
 			ds.log_event(STATE_POLL, tm);
