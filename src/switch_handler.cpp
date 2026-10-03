@@ -12,15 +12,15 @@
 #include "switch_handler.h"
 #include "ow_devices.h"
 #include "ds2408.h"
+#include "ds1820.h"
 
 struct _sw_tbl sw_tbl[MAX_SWITCHES];
 
 // out-of-line definition of the private static members declared in
 // switch_handler.h; this counts as class scope for access control, so
 // it can take the address of the private handlers below directly.
-// "add"/"del" are write-only (no read handler), which is what makes
-// fs_table::open() below refuse to open them, matching this class's
-// original fs_open().
+// "add"/"del" are write-only (no read handler); fs_table::open() still
+// opens them, since they otherwise could never be written to at all.
 const FsEntry<SwitchHandler> SwitchHandler::table[] = {
 	{ "add", 32, 0, false, nullptr, nullptr, nullptr, &SwitchHandler::w_add },
 	{ "del", 32, 0, false, nullptr, nullptr, nullptr, &SwitchHandler::w_del },
@@ -82,9 +82,20 @@ bool parse_buf(std::string_view buf, struct _sw_tbl& sw)
 		logger.warn (std::format("size mismatch {}", buf));
 		return false;
 	}
+	// expecting any of
+	// [bus] [adr] [latch] [bus] [adr] [pio]
+	// [bus].[adr].[latch] [bus].[adr].[pio]
+	// [bus].[adr].[latch] -> [bus].[adr].[pio]
+	// '.', '-' and '>' are just delimiters here, same as whitespace -
+	// from_chars already stops an int at the first one of these on its
+	// own (a leading '-' it would otherwise read as a sign never makes
+	// sense for these always-non-negative fields), so accepting all of
+	// the above only takes skipping them between numbers as well.
+	// Anything left over past the 6th number (including a stray
+	// trailing "->") is simply never looked at below.
 	for (int i = 0; i < 6; ++i) {
-		// Skip leading whitespace manually if needed
-		while (ptr < end && std::isspace(*ptr)) ptr++;
+		// Skip leading whitespace/delimiter characters manually if needed
+		while (ptr < end && (std::isspace(*ptr) || *ptr == '.' || *ptr == '-' || *ptr == '>')) ptr++;
 
 		auto [next, ec] = std::from_chars(ptr, end, vals[i]);
 		if (ec != std::errc{}) {
@@ -97,8 +108,19 @@ bool parse_buf(std::string_view buf, struct _sw_tbl& sw)
 	// Assign to your variables
 	sw.src.sa.bus = (uint8_t)(vals[0] & 0xff);
 	sw.src.sa.adr = (uint8_t)(vals[1] & 0xff);
-	sw.src.sa.latch = (uint8_t)(vals[2] & 0xff);
-	sw.src.sa.press = 0;
+	uint8_t latch = (uint8_t)(vals[2] & 0xff);
+	if (latch - 20 > 0) {
+		/* pressing */
+		sw.src.sa.press = 2;
+		sw.src.sa.latch = latch - 20;
+	} else if (latch - 10 > 0) {
+		/* press long */
+		sw.src.sa.press = 1;
+		sw.src.sa.latch = latch - 10;
+	} else {
+		sw.src.sa.latch = latch;
+		sw.src.sa.press = 0;
+	}
 	sw.dst.da.bus = (uint8_t)(vals[3] & 0xff);
 	sw.dst.da.adr = (uint8_t)(vals[4] & 0xff);
 	sw.dst.da.pio = (uint8_t)(vals[5] & 0xff);
@@ -223,7 +245,6 @@ bool SwitchHandler::switchHandle(uint8_t busNr, uint8_t adr1)
 	size_t i;
 
 	src.data = srcData(busNr, adr1);
-	logger.debug(std::format("switch handling {}.{}", (int)src.sa.bus, (int)src.sa.adr));
 #if 0
 	for (i = 0; i < MAX_TIMED_SWITCH; i++) {
 	}
@@ -233,7 +254,7 @@ bool SwitchHandler::switchHandle(uint8_t busNr, uint8_t adr1)
 			logger.debug(std::format("sw {}.{}.{} -> {}.{}.{}",
 				(int)cache.switches[i].src.sa.bus,
 				(int)cache.switches[i].src.sa.adr,
-				(int)cache.switches[i].src.sa.latch,
+				(int)(cache.switches[i].src.sa.latch + cache.switches[i].src.sa.press * 20),
 				(int)cache.switches[i].dst.da.bus,
 				(int)cache.switches[i].dst.da.adr,
 				(int)cache.switches[i].dst.da.pio
@@ -278,7 +299,13 @@ bool SwitchHandler::dev_alarm(uint8_t bus, uint8_t adr[8])
 				to--;
 			}
 		}
+		return true;
 	}
+	auto* dev = ow->find(bus, adr[1], adr[0]);
+	if (!dev)
+		return false;
+	dev->poll();
+
 	return true;
 }
 
@@ -306,7 +333,8 @@ int SwitchHandler::r_list(char* buf, size_t size, bool, int)
 	list += std::format("{} switches\n", cache.switches.size());
 	for (const auto& sw : cache.switches) {
 		list += std::format("{}.{}.{} {}.{}.{} ({} {})\n",
-			sw.src.sa.bus, sw.src.sa.adr, sw.src.sa.latch,
+			sw.src.sa.bus, sw.src.sa.adr,
+			(int)(sw.src.sa.latch + sw.src.sa.press * 20),
 			sw.dst.da.bus, sw.dst.da.adr, sw.dst.da.pio,
 			sw.src.data, sw.dst.data);
 	}
@@ -329,12 +357,26 @@ int SwitchHandler::w_add(const char* buf, size_t size, int)
 	for (size_t i = 0; i < size; i++) {
 		if (buf[i] == '\n' || buf[i] == '\0') {
 			struct _sw_tbl sw;
-			logger.verbose(std::format("adding? {}", std::string(buf)));
 			if (parse_buf(std::string_view(&buf[start], i - start), sw)) {
 				start = i + 1;
+				bool exists = false;
+				for (const auto& sw_i : cache.switches) {
+					if (sw.src.data == sw_i.src.data &&
+						sw.dst.data == sw_i.dst.data) {
+						exists = true;
+						break;
+					}
+				}
+				if (exists) {
+					logger.info(std::format("switch {}.{}.{} -> {}.{}.{} already exists, ignoring add",
+						(int)sw.src.sa.bus, (int)sw.src.sa.adr, (int)sw.src.sa.latch,
+						(int)sw.dst.da.bus, (int)sw.dst.da.adr, (int)sw.dst.da.pio));
+					continue;
+				}
 				cache.switches.push_back(sw);
 				logger.verbose(std::format("added switch {}.{}.{} -> {}.{}.{}",
-					(int)sw.src.sa.bus, (int)sw.src.sa.adr, (int)sw.src.sa.latch,
+					(int)sw.src.sa.bus, (int)sw.src.sa.adr,
+					(int)(sw.src.sa.latch + sw.src.sa.press * 20),
 					(int)sw.dst.da.bus, (int)sw.dst.da.adr, (int)sw.dst.da.pio));
 			}
 		}
@@ -363,7 +405,8 @@ int SwitchHandler::w_del(const char* buf, size_t size, int)
 						// what we continue from
 						it = cache.switches.erase(it);
 						logger.verbose(std::format("deleted switch {}.{}.{} -> {}.{}.{}",
-							(int)sw.src.sa.bus, (int)sw.src.sa.adr, (int)sw.src.sa.latch,
+							(int)sw.src.sa.bus, (int)sw.src.sa.adr,
+							(int)(sw.src.sa.latch + sw.src.sa.press * 20),
 							(int)sw.dst.da.bus, (int)sw.dst.da.adr, (int)sw.dst.da.pio));
 						found = true;
 					} else

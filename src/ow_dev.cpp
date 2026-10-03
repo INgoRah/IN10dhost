@@ -120,7 +120,6 @@ void OwDev::begin(DS2482 *ds, bool soft)
 		return;
 	begin(soft);
 	state = DS_RUNNING;
-	logger.verbose(std::format("Device id={} type={}, rom={}  ({}) begin done ", id, type, rom, rom_code));
 };
 
 // "Is it due" query: -1 no polling configured, 0 not due yet, 1 due
@@ -202,7 +201,7 @@ std::vector<std::string> OwDev::fs_dir(string& path) const
 int OwDev::fs_read(string& path, char* buf, size_t size, bool uncached)
 {
 	(void)uncached;
-	logger.debug("Based class read " + type);
+
 	if (path.find("name") != string::npos) {
 		std::strncpy(buf, name.c_str(), size);
 		//std::sprintf(buf, name.c_str());

@@ -99,7 +99,7 @@ class OwDevices : public IDevices
 		std::vector<OwDev*> list_devices(int bus);
 
 		int log_dump(char* buf, size_t size);
-		bool alarmHandler(uint8_t busNr);
+		bool alarmHandler(uint8_t busNr, uint8_t target = 0x29);
 #if 0
 		uint8_t getVersion(uint8_t bus, uint8_t id);
 		void versionUpdate(uint8_t bus, uint8_t id);

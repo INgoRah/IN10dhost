@@ -23,9 +23,11 @@ rm    /mnt/1wire/settings/plugins/example    # unload
 exists it reloads. Reloading only does real work when something
 changed: the loader keeps a content hash of each `.so`, so a redeploy
 that produced identical bytes is a no-op, and a plugin whose library is
-unchanged just gets its config handed back — which is how `jsengine`
-notices an edited script without the library itself being touched.
-A reloaded plugin keeps its config across the swap.
+unchanged just gets its config handed back, so a plugin can re-read
+external files. A reloaded plugin keeps its config across the swap.
+
+`jsengine` does not need this for its script: it notices an edited
+script by itself, see below.
 
 Writing to a plugin file works too, and `reload` there reloads every
 plugin rather than just the one:
@@ -68,13 +70,30 @@ Available to scripts:
 | call | does |
 | --- | --- |
 | `ow.log(msg)` | write to the daemon log |
-| `ow.pio_set(rom, pio)` | drive a ds2408 PIO, returns true on success |
+| `ow.pio_set(rom, byte)` | write all ds2408 PIOs at once (raw output latch byte) |
+| `ow.pin_switch(rom, pin, state[, level])` | switch one ds2408 pin; `state` is `ow.ON`, `ow.OFF` or `ow.TOGGLE`, `level` is used by a PWM pin |
+| `ow.level_set(rom, pin, level)` | set a ds2408 PWM pin to `level` 0..255, 0 is off |
+| `ow.brightness_set(rom, value)` | hand a ds2408 the current brightness 0..255, for devices without their own light sensor |
+| `ow.threshold_set(rom, value)` | brightness 0..255 above which a ds2408's timed lights switch |
 | `ow.temp(rom)` | read a ds1820 temperature, `null` if that rom is not one |
 | `ow.volt(rom, channel)` | read a cached ds2450 voltage |
+
+The ds2408 calls return true on success and false when `rom` is not a
+ds2408 or the bus transfer failed. A `pin` outside 0..7 or a value
+outside 0..255 throws a `RangeError`.
 
 `rom` is always the dotted string form, `"29.0200FDFF6677F8"`, the same
 form the event payloads carry. It is a string rather than a number
 because a 64 bit rom code does not survive a JavaScript double intact.
+
+Saving the script is enough to change it, no `touch` or reload needed.
+Every event first checks the file's modification time, and on a change
+its contents, and loads it again when they differ. The once-a-second
+`ACT_PERIODIC_SECOND` event means an edit is live within about a
+second. Like any load this starts the script from a clean global
+object, so values kept in global variables start over. A script with a
+syntax error is logged and stays inactive until it is fixed and saved
+again.
 
 Two limits worth knowing. A callback is interrupted after 200 ms, so a
 runaway loop cannot hang the daemon. And events that arrive *while* a

@@ -12,6 +12,12 @@
  * Adding "_odd" to any of those throws something that is not derived
  * from std::exception, to reach the loader's catch(...) instead.
  *
+ *   { "faulty": { "mode": "record" } }      throw nothing, count the
+ *                                          ACT_DEV_CHANGE events and keep
+ *                                          the last payload; config_get()
+ *                                          reports them as "changes" and
+ *                                          "last"
+ *
  * Built only for TESTING builds and never installed, see CMakeLists.txt.
  */
 #include <stdexcept>
@@ -21,6 +27,9 @@
 class Faulty : public Plugin {
 private:
 	std::string mode;
+	// "record" mode only
+	int changes = 0;
+	json last;
 
 	/* Throws for the named entry point: a std::exception when the mode
 	   is "<name>", a bare int for "<name>_odd" so the loader's
@@ -44,6 +53,8 @@ public:
 	{
 		fail("config_get");
 
+		if (mode == "record")
+			return json{ { "mode", mode }, { "changes", changes }, { "last", last } };
 		return json{ { "mode", mode } };
 	}
 
@@ -54,9 +65,14 @@ public:
 		fail("config_set");
 	}
 
-	int action(const ActionEvent&) override
+	int action(const ActionEvent& ev) override
 	{
 		fail("action");
+		if (mode == "record" && ev.code == ACT_DEV_CHANGE) {
+			changes++;
+			// the payload is only valid during the call, keep a copy
+			last = ev.data ? *ev.data : json();
+		}
 
 		return 0;
 	}

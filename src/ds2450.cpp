@@ -3,9 +3,12 @@
 #include <string>
 #include <fuse3/fuse.h>
 #include "main.h"
+#include "plugins.h"
 #include "fs.h"
 #include "ow_devices.h"
 #include "ds2450.h"
+
+extern Plugins plugins;
 
 // Pio.a-d and memory below are documented but were never implemented
 // (no fs_read/fs_write case ever handled them); left undisturbed here.
@@ -58,32 +61,36 @@ int ds2450::r_volt(char* buf, size_t size, bool uncached, int idx)
 	return fs_read_volt((uint8_t)idx, buf, uncached);
 }
 
+// Converts and reads channel ch from the device and stores the result
+// in volts in volt_a..volt_d. Returns 0, or EAGAIN if the conversion
+// could not be started.
+int ds2450::volt_update(uint8_t ch)
+{
+	uint16_t volt;
+	float volt_x;
+
+	if (adc_read(ch, 0) != 0)
+		return EAGAIN;
+	volt = adc_read(ch, 1);
+	logger.verbose ("DS2450 reading raw=" + std::to_string(volt));
+	volt_x = (volt * 5.0 / 1024);
+	switch (ch) {
+		case 0: volt_a = volt_x; break;
+		case 1: volt_b = volt_x; break;
+		case 2: volt_c = volt_x; break;
+		case 3: volt_d = volt_x; break;
+	}
+	return 0;
+}
+
 int ds2450::fs_read_volt(uint8_t ch, char* buf, bool uncached)
 {
-	float volt_x = 0.0f;
-
 	if (uncached) {
-		uint16_t volt;
-		if (adc_read(ch, 0) != 0)
-			return EAGAIN;
-		volt = adc_read(ch, 1);
-		logger.info ("DS2450 reading raw=" + std::to_string(volt));
-		volt_x = (volt * 5.0 / 1024);
-		switch (ch) {
-			case 0: volt_a = volt_x; break;
-			case 1: volt_b = volt_x; break;
-			case 2: volt_c = volt_x; break;
-			case 3: volt_d = volt_x; break;
-		}
-	} else {
-		switch (ch) {
-			case 0: volt_x = volt_a; break;
-			case 1: volt_x = volt_b; break;
-			case 2: volt_x = volt_c; break;
-			case 3: volt_x = volt_d; break;
-		}
+		int r = volt_update(ch);
+		if (r != 0)
+			return r;
 	}
-	std::sprintf(buf, "%1.2f", volt_x);
+	std::sprintf(buf, "%1.2f", adc_get(ch));
 
 	return std::strlen(buf);
 }
@@ -164,8 +171,17 @@ float ds2450::adc_get(uint8_t ch)
 // Only ever called once poll_check() has just returned 1.
 int ds2450::poll()
 {
-	if (adc_read(0, 0) != 0)
+	float prev = volt_a;
+	if (volt_update(0) != 0)
 		return EAGAIN;
-	volt_a = adc_read(0, 1);
+	if (volt_a != prev) {
+		json data = {
+			{"bus", bus},
+			{"type", type},
+			{"rom", rom.c_str()},
+			{"volt_a", volt_a}
+		};
+		plugins.action(ACT_DEV_CHANGE, 0, &data);
+	}
 	return 1;
 }

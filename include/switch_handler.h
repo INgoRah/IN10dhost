@@ -164,7 +164,6 @@ class SwitchHandler : IFs {
 		void begin(DS2482 *ow);
 		void loop();
 		bool dev_alarm(uint8_t bus, uint8_t adr[8]);
-		bool alarmHandler(uint8_t busNr);
 		bool switchHandle(uint8_t busNr, uint8_t adr1);
 		bool switchHandle(uint8_t busNr, uint8_t adr1, uint8_t latch);
 		bool switchLevel(union pio dst, uint8_t level);

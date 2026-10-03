@@ -44,8 +44,10 @@ enum {
 // take the address of the private handlers below directly
 const FsEntry<Ard_i2c> Ard_i2c::table[] = {
 	{ "mode", 3, 0, false, nullptr, nullptr, &Ard_i2c::r_mode, &Ard_i2c::w_mode },
-	{ "power", 3, 0, false, nullptr, nullptr, &Ard_i2c::r_power, nullptr },
-	{ "pwr_total", 3, 0, false, nullptr, nullptr, nullptr, nullptr },
+	// power_total before power: rows match as substrings of the path,
+	// so "power" would also claim .../power_total
+	{ "power_total", 8, 0, false, nullptr, nullptr, &Ard_i2c::r_pow_total, nullptr },
+	{ "power", 4, 0, false, nullptr, nullptr, &Ard_i2c::r_power, nullptr },
 	{ "test", 2, 0, false, nullptr, nullptr, nullptr, &Ard_i2c::w_test },
 	{ "int_min", 6, 0, false, nullptr, nullptr, &Ard_i2c::r_int_min, nullptr },
 	{ "int_max", 6, 0, false, nullptr, nullptr, &Ard_i2c::r_int_max, nullptr },
@@ -56,6 +58,7 @@ const size_t Ard_i2c::n_table = sizeof(Ard_i2c::table) / sizeof(Ard_i2c::table[0
 json Ard_i2c::to_json() const {
 	json j = OwDev::to_json(); // Get base class fields
 	j["mode"] = mode; // Add specific field
+	j["power_total"] = power_total; // Add specific field
 
 	return j;
 };
@@ -65,6 +68,9 @@ void Ard_i2c::from_json(const json& j) {
 	if (j.contains("mode")) {
 		j.at("mode").get_to(mode);
 	}
+	if (j.contains("power_total")) {
+		j.at("power_total").get_to(power_total);
+	}
 }
 
 Ard_i2c::Ard_i2c()
@@ -73,6 +79,7 @@ Ard_i2c::Ard_i2c()
 	this->type = "ard_i2c";
 	this->mode = 0;
 	this->power = 0;
+	this->power_total = 0;
 }
 
 Ard_i2c::Ard_i2c(std::string rom) : OwDev(rom)
@@ -81,6 +88,7 @@ Ard_i2c::Ard_i2c(std::string rom) : OwDev(rom)
 	lastSeq = 0xff;
 	this->type = "ard_i2c";
 	this->power = 0;
+	this->power_total = 0;
 }
 
 #ifdef USE_I2C
@@ -126,6 +134,33 @@ uint8_t i2c_read(int fd)
 	}
 
 	return d;
+}
+
+/* set the read pointer to reg and read one byte in one transfer
+   (repeated start), so a register pointer changed in between by the
+   Arduino itself does not matter */
+int i2c_read_reg(int fd, uint8_t reg, uint8_t* val)
+{
+	uint8_t wbuf[2] = { 0xE1, reg };
+	struct i2c_msg msgs[2] = {
+		{
+			.addr = ARD_I2C_ADDR,
+			.flags = 0,
+			.len = 2,
+			.buf = wbuf
+		},
+		{
+			.addr = ARD_I2C_ADDR,
+			.flags = I2C_M_RD,
+			.len = 1,
+			.buf = val
+		}
+	};
+	struct i2c_rdwr_ioctl_data rdwr = {
+		.msgs = msgs,
+		.nmsgs = 2,
+	};
+	return ioctl(fd, I2C_RDWR, &rdwr);
 }
 
 int i2c_read_data(int fd, uint8_t* buf, uint16_t size) {
@@ -205,26 +240,35 @@ void delay_ms(int ms) {
 }
 #endif
 
-void Ard_i2c::interrupt() {
+/* Returns 1 if the Arduino has more queued (read again), 0 if done,
+   -1 on error */
+int Ard_i2c::interrupt() {
 #ifdef USE_I2C
 	HrClock::time_point tp = HrClock::now();
 	int fd = open("/dev/i2c-0", O_RDWR);
 
 	if (fd < 0) {
 		logger.warn("Arduino open failed");
-		return;
+		return -1;
 	}
 	if (mode == 0x10) {
-		// read status which clears the gpio ("interrupts")
-		uint8_t status = i2c_read(fd);
+		// read the alarm status which releases the gpio ("interrupts")
+		uint8_t status;
+		int ret = i2c_read_reg(fd, 0xA8, &status);
+
 		close(fd);
-		//logger.verbose(std::format("AD Stat={:#x}", status));
-		if ((status & 0x3) == 0) {
-			// call switch handler
-			for (int bus = 0; bus < MAX_BUS; bus++)
-				ow.alarmHandler(bus);
-		} else {
-			ow.alarmHandler((status & 0x3) - 1);
+		if (ret < 0 || status == 0xff) {
+			// no answer, the line stays low and we get called again
+			logger.warn(std::format("Arduino status read failed ({})", ret));
+			return -1;
+		}
+		logger.verbose(std::format("AD Stat={:#x}", status));
+		// bit 0..3: one bit per bus with an alarm
+		uint8_t buses = status & 0x0f;
+		for (int bus = 0; bus < MAX_BUS; bus++) {
+			if ((buses & (1 << bus)) == 0)
+				continue;
+			ow.alarmHandler(bus);
 			auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(HrClock::now() - tp);
 			if (duration < min_dur)
 				min_dur = duration;
@@ -232,17 +276,33 @@ void Ard_i2c::interrupt() {
 				max_dur = duration;
 			sum_dur += duration;
 			dur_count++;
-			/*logger.info(std::format("used {} (min={} max={} avg={}ms over {} calls)",
-				duration, min_dur, max_dur, sum_dur.count() / dur_count, dur_count));*/
+			// any other alarming family on that bus
+			ow.alarmHandler(bus, 0xff);
 		}
-
-		return;
+		if (status & 0x10) {
+			// power interval
+			power_total += 2;
+			// store time ...
+			HrClock::time_point now = HrClock::now();
+			double diff = std::chrono::duration<double>(now - last_imp).count(); // in seconds
+			last_imp = now;
+			/*
+			We receive 500 impulses per 1 kWh
+			With the diff in seconds to the previous impulse we
+			can estimated the usage
+			*/
+			power = (int)(1000 * (3600 / diff) / 500);
+			logger.verbose(std::format("Estimated usage: {} Watt", power));
+		}
+		// 0x40: more queued (one power impulse per read)
+		return (status & 0x40) ? 1 : 0;
 	}
 #if 0
 	events(fd);
 #endif
 	close(fd);
 #endif
+	return 0;
 }
 
 #if 0
@@ -421,6 +481,12 @@ int Ard_i2c::w_mode(const char* buf, size_t size, int)
 int Ard_i2c::r_power(char* buf, size_t, bool, int)
 {
 	std::sprintf(buf, "%d", power);
+	return std::strlen(buf);
+}
+
+int Ard_i2c::r_pow_total(char* buf, size_t, bool, int)
+{
+	std::sprintf(buf, "%d", power_total);
 	return std::strlen(buf);
 }
 

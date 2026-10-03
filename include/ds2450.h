@@ -1,4 +1,7 @@
 #pragma once
+#ifdef TESTING
+#include <gtest/gtest_prod.h>
+#endif
 
 #include "ow_dev.h"
 #include "interface/ds2450.h"
@@ -8,11 +11,16 @@ class ds2450 : public OwDev, public IDS2450 {
 	private:
 		uint16_t dat[4];
 		float volt_a, volt_b, volt_c, volt_d;
+		int volt_update(uint8_t ch);
 		int fs_read_volt(uint8_t ch, char* buf, bool uncached);
 		// fs_table.h handler for "volt.*" (A -> 0, B -> 1, C -> 2, D -> 3)
 		int r_volt(char* buf, size_t size, bool uncached, int idx);
 		static const FsEntry<ds2450> table[];
 		static const size_t n_table;
+#ifdef TESTING
+		// GTest testing support
+		FRIEND_TEST(FsTest, Ds2450PollNotifiesPlugins);
+#endif
 	public:
 		using OwDev::OwDev;
 		using OwDev::type;

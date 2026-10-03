@@ -150,6 +150,15 @@ TEST_F(SwTest, FsSwitches)
 	res = fs_ops.getattr("/switches", &st, nullptr);
 	EXPECT_EQ(res, 0);
 	EXPECT_TRUE(S_ISDIR(st.st_mode));
+	// "add"/"del" are write-only (no read handler) but must still open
+	// successfully - a real client always open()s before write()ing,
+	// and a write never even reaches fs_write() if open() refuses it
+	res = fs_ops.open("/switches/add", nullptr);
+	EXPECT_EQ(res, 0);
+	res = fs_ops.open("/switches/del", nullptr);
+	EXPECT_EQ(res, 0);
+	res = fs_ops.open("/switches/list", nullptr);
+	EXPECT_EQ(res, 0);
 	// error checking, missing number
 	strcpy(buf, "1 2 3 1 2");
 	buf [strlen(buf)] = 0;
@@ -168,6 +177,58 @@ TEST_F(SwTest, FsSwitches)
 	EXPECT_EQ(res, strlen(buf) + 1);
 	res = fs_ops.write("/switches/del", buf, strlen(buf) + 1, 0, nullptr);
 	logger.verbose(std::format("{} returned from del", res));
+	EXPECT_EQ(res, strlen(buf) + 1);
+	res = fs_ops.write("/switches/del", buf, strlen(buf) + 1, 0, nullptr);
+	EXPECT_EQ(res, 0);
+
+	// same add/del round-trip, but using the more compact "bus.adr.latch
+	// bus.adr.pio" format instead of six space-separated numbers
+	strcpy(buf, "2.3.4 1.3.1");
+	buf [strlen(buf)] = 0;
+	res = fs_ops.write("/switches/add", buf, strlen(buf) + 1, 0, nullptr);
+	EXPECT_EQ(res, strlen(buf) + 1);
+	res = fs_ops.write("/switches/del", buf, strlen(buf) + 1, 0, nullptr);
+	EXPECT_EQ(res, strlen(buf) + 1);
+	res = fs_ops.write("/switches/del", buf, strlen(buf) + 1, 0, nullptr);
+	EXPECT_EQ(res, 0);
+
+	// arrow-separated format: "bus.adr.latch -> bus.adr.pio"
+	strcpy(buf, "3.4.5 -> 2.4.2");
+	buf [strlen(buf)] = 0;
+	res = fs_ops.write("/switches/add", buf, strlen(buf) + 1, 0, nullptr);
+	EXPECT_EQ(res, strlen(buf) + 1);
+	res = fs_ops.write("/switches/del", buf, strlen(buf) + 1, 0, nullptr);
+	EXPECT_EQ(res, strlen(buf) + 1);
+	res = fs_ops.write("/switches/del", buf, strlen(buf) + 1, 0, nullptr);
+	EXPECT_EQ(res, 0);
+
+	// anything past the 6th number is ignored rather than rejected;
+	// deleting with the same values but no trailing junk must still
+	// match the switch that was added with it
+	strcpy(buf, "4.5.6 3.5.3 ignored junk");
+	buf [strlen(buf)] = 0;
+	res = fs_ops.write("/switches/add", buf, strlen(buf) + 1, 0, nullptr);
+	EXPECT_EQ(res, strlen(buf) + 1);
+	strcpy(buf, "4.5.6 3.5.3");
+	buf [strlen(buf)] = 0;
+	res = fs_ops.write("/switches/del", buf, strlen(buf) + 1, 0, nullptr);
+	EXPECT_EQ(res, strlen(buf) + 1);
+	res = fs_ops.write("/switches/del", buf, strlen(buf) + 1, 0, nullptr);
+	EXPECT_EQ(res, 0);
+
+	// adding the same switch twice must not create a duplicate entry
+	strcpy(buf, "5.6.7 4.6.4");
+	buf [strlen(buf)] = 0;
+	res = fs_ops.write("/switches/add", buf, strlen(buf) + 1, 0, nullptr);
+	EXPECT_EQ(res, strlen(buf) + 1);
+	char listbuf[1024];
+	int len1 = fs_ops.read("/switches/list", listbuf, sizeof(listbuf), 0, nullptr);
+	EXPECT_GT(len1, 0);
+	res = fs_ops.write("/switches/add", buf, strlen(buf) + 1, 0, nullptr);
+	EXPECT_EQ(res, strlen(buf) + 1);
+	int len2 = fs_ops.read("/switches/list", listbuf, sizeof(listbuf), 0, nullptr);
+	EXPECT_EQ(len1, len2);
+	res = fs_ops.write("/switches/del", buf, strlen(buf) + 1, 0, nullptr);
 	EXPECT_EQ(res, strlen(buf) + 1);
 	res = fs_ops.write("/switches/del", buf, strlen(buf) + 1, 0, nullptr);
 	EXPECT_EQ(res, 0);

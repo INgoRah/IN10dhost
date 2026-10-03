@@ -95,7 +95,11 @@ class IDS2408 {
 		virtual uint8_t pio_set(uint8_t pio) = 0;
 		virtual uint8_t reg_read(bool latch_reset) = 0;
 		virtual uint8_t latch_reset() = 0;
-		virtual uint8_t level_set(uint8_t pio, uint8_t level, uint8_t cmd = TMR_TYPE_ON, uint8_t val = 0) = 0;
-		virtual uint8_t pin_switch(uint8_t pio, enum _pio_mode state, uint8_t lvl = 0) = 0;
+		virtual uint8_t level_set(uint8_t pio, uint8_t level,
+			uint8_t cmd = TMR_TYPE_ON, uint8_t val = 0) = 0;
+		virtual uint8_t pin_switch(uint8_t pio, enum _pio_mode state,
+			uint8_t lvl = 0) = 0;
+		virtual int brightness_set(uint8_t brightness) = 0;
+		virtual int threshold_set(uint8_t threshold) = 0;
 };
 #endif

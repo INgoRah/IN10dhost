@@ -181,13 +181,10 @@ void OwDevices::load(const std::string& path) {
 	}
 	// init() every loaded device first (no hardware access), then only
 	// once all of them are initialized start hardware access via begin()
-	logger.verbose("init devs ...");
 	for (auto& dev : cache.devices) {
 		dev->init();
 	}
-	logger.verbose("init done!");
 	update_data();
-	logger.verbose("update data done!");
 	plugins.action(ACT_INITIALIZED, 0); // loaded
 }
 
@@ -447,7 +444,7 @@ int OwDevices::poll_time()
 	for (auto& dev : cache.devices) {
 		int next = dev->poll_next();
 		if (next == 0) {
-			logger.info(std::format("polling {} ", dev->addr[0]));
+			logger.verbose(std::format("polling {:#x} ", dev->addr[0]));
 			return 0; // time to poll now
 		}
 		if (next > 0 && next < next_timeout)
@@ -522,7 +519,7 @@ int OwDevices::alarm_poll()
 // Conditional (alarm) search of one bus: every 0x29 device currently
 // pulling alarm is handed to SwitchHandler::dev_alarm() in turn.
 // Returns true when at least one alarming device was handled.
-bool OwDevices::alarmHandler(uint8_t busNr)
+bool OwDevices::alarmHandler(uint8_t busNr, uint8_t target)
 {
 #ifdef USE_I2C
 	uint8_t adr[8];
@@ -537,21 +534,26 @@ bool OwDevices::alarmHandler(uint8_t busNr)
 		// transaction
 		std::lock_guard<std::mutex> lock(ds->mtx);
 
+		// coverity[sleep]
 		ret = ds->selectChannel(busNr);
 		if (!ret)
 			// this could be a timeout or other issue
 			// must be repeated
 			return false;
-		ds->target_search(0x29);
+		if (target != 0xff)
+			ds->target_search(target);
+		else
+			ds->reset_search();
 		// improve time by 1 ms with a familiy search for 0x29 only
 		// with custom addresses using one byte ID only
 		// at the second byte and the remaining according a
 		// defined scheme, we could stop even after one byte search
+		// coverity[sleep]
 		srch = ds->search(adr, false);
 	}
 	while (srch && cnt > 0) {
 		j++;
-		logger.debug(std::format("Alarm {}.{} {}", busNr, adr[1], adr[2]));
+		logger.debug(std::format("Alarm ({}) {}.{} {}", adr[0], busNr, adr[1], adr[2]));
 		try {
 			swHdl.dev_alarm(busNr, adr);
 		}
@@ -589,6 +591,7 @@ bool OwDevices::alarmHandler(uint8_t busNr)
 	return j > 0 ? true : false;
 #else
 	(void)busNr;
+	(void)target;
 	return false;
 #endif
 }
