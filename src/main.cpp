@@ -64,6 +64,40 @@ void segfault_handler(int signal)
 std::atomic<bool> running{true};
 int wake_fd;
 
+/* max. status reads in one go, retry interval if still pending */
+#define ARD_MAX_READS 10
+#define ARD_RETRY_MS 100
+
+#ifdef USE_GPIO
+/* The Arduino holds the (active low) interrupt line low until its alarm
+   status is read, 0x40 in the status tells more is queued. Service it as
+   long as the line is low or more is queued: an edge can get lost (e.g.
+   raised again while servicing), but the level cannot.
+   Returns true if still pending (line stuck low / Arduino not answering),
+   then waiting for the next edge would wait forever. */
+static bool arduino_service(Ard_i2c* arduino)
+{
+	static bool stuck_warned = false;
+	int i, more = 0;
+
+	for (i = 0; i < ARD_MAX_READS; i++) {
+		if (more <= 0 &&
+		    gpiod_line_request_get_value(line, cli.gpio_pin) !=
+		    GPIOD_LINE_VALUE_INACTIVE) {
+			stuck_warned = false;
+			return false;
+		}
+		ds.log_event(STATE_EVENT, 0);
+		more = arduino->interrupt();
+	}
+	if (!stuck_warned) {
+		logger.warn("Arduino interrupt line stays low");
+		stuck_warned = true;
+	}
+	return true;
+}
+#endif
+
 void background_worker()
 {
 	Ard_i2c* arduino = nullptr;
@@ -98,11 +132,14 @@ void background_worker()
 	const nfds_t nfds = 1;
 	logger.info("periodic worker started, built without GPIO support");
 #endif
+	if (arduino)
+		arduino->interrupt();
 	fds[0].fd = wake_fd;
 
 	int ret;
 	int tm;
 	int timeout = ow.get_poll();
+	bool retry = false;
 
 	if (timeout == 0)
 		timeout = -1;
@@ -118,26 +155,39 @@ void background_worker()
 		tm = (timeout == -1) ? ow.poll_time() : std::min(ow.poll_time(), timeout);
 
 		fds[0].events = POLLIN;
+		retry = false;
 #ifdef USE_GPIO
-		if (nfds == 2)
+		if (nfds == 2) {
 			fds[1].events = POLLIN | POLLERR;
+			// a missed edge leaves the line low: poll() would
+			// never wake up for it, so check the level first and
+			// do not wait for an edge while still pending
+			if (arduino_service(arduino) &&
+			    (tm < 0 || tm > ARD_RETRY_MS)) {
+				retry = true;
+				tm = ARD_RETRY_MS;
+			}
+		}
 #endif
 		ret = poll(fds, nfds, tm);
-
 #ifdef USE_GPIO
 		if (nfds == 2 && ret > 0 && (fds[1].revents & POLLIN)) {
 			logger.verbose("GPIO edge, servicing Arduino");
-			ds.log_event(STATE_EVENT, 0);
-			arduino->interrupt();
-			// clear the pending edge status
+			// consume the pending edges before servicing, so an edge
+			// raised meanwhile is kept for the next poll()
 			gpiod_line_request_read_edge_events(line, event_buffer, 16);
+			arduino_service(arduino);
 		}
 #endif
 		// no GPIO edge to wait for: service the Arduino on every wake,
 		// if there is one on the bus at all
-		if (line == nullptr && arduino)
-			arduino->interrupt();
-		if (ret == 0) {
+		if (line == nullptr && arduino) {
+			for (int i = 0; i < ARD_MAX_READS; i++)
+				if (arduino->interrupt() <= 0)
+					break;
+		}
+		// a shortened wait (Arduino retry) is not a due device poll
+		if (ret == 0 && !retry) {
 			ds.log_event(STATE_POLL, tm);
 			ow.dev_poll();
 			ow.alarm_poll();

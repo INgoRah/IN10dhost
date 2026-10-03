@@ -46,8 +46,8 @@ const FsEntry<Ard_i2c> Ard_i2c::table[] = {
 	{ "mode", 3, 0, false, nullptr, nullptr, &Ard_i2c::r_mode, &Ard_i2c::w_mode },
 	// power_total before power: rows match as substrings of the path,
 	// so "power" would also claim .../power_total
-	{ "power_total", 3, 0, false, nullptr, nullptr, &Ard_i2c::r_pow_total, nullptr },
-	{ "power", 3, 0, false, nullptr, nullptr, &Ard_i2c::r_power, nullptr },
+	{ "power_total", 8, 0, false, nullptr, nullptr, &Ard_i2c::r_pow_total, nullptr },
+	{ "power", 4, 0, false, nullptr, nullptr, &Ard_i2c::r_power, nullptr },
 	{ "test", 2, 0, false, nullptr, nullptr, nullptr, &Ard_i2c::w_test },
 	{ "int_min", 6, 0, false, nullptr, nullptr, &Ard_i2c::r_int_min, nullptr },
 	{ "int_max", 6, 0, false, nullptr, nullptr, &Ard_i2c::r_int_max, nullptr },
@@ -136,6 +136,33 @@ uint8_t i2c_read(int fd)
 	return d;
 }
 
+/* set the read pointer to reg and read one byte in one transfer
+   (repeated start), so a register pointer changed in between by the
+   Arduino itself does not matter */
+int i2c_read_reg(int fd, uint8_t reg, uint8_t* val)
+{
+	uint8_t wbuf[2] = { 0xE1, reg };
+	struct i2c_msg msgs[2] = {
+		{
+			.addr = ARD_I2C_ADDR,
+			.flags = 0,
+			.len = 2,
+			.buf = wbuf
+		},
+		{
+			.addr = ARD_I2C_ADDR,
+			.flags = I2C_M_RD,
+			.len = 1,
+			.buf = val
+		}
+	};
+	struct i2c_rdwr_ioctl_data rdwr = {
+		.msgs = msgs,
+		.nmsgs = 2,
+	};
+	return ioctl(fd, I2C_RDWR, &rdwr);
+}
+
 int i2c_read_data(int fd, uint8_t* buf, uint16_t size) {
 	struct i2c_msg msg = {
 		.addr = ARD_I2C_ADDR,
@@ -213,23 +240,35 @@ void delay_ms(int ms) {
 }
 #endif
 
-void Ard_i2c::interrupt() {
+/* Returns 1 if the Arduino has more queued (read again), 0 if done,
+   -1 on error */
+int Ard_i2c::interrupt() {
 #ifdef USE_I2C
 	HrClock::time_point tp = HrClock::now();
 	int fd = open("/dev/i2c-0", O_RDWR);
 
 	if (fd < 0) {
 		logger.warn("Arduino open failed");
-		return;
+		return -1;
 	}
 	if (mode == 0x10) {
-		// read status which clears the gpio ("interrupts")
-		uint8_t status = i2c_read(fd);
-		uint8_t bus = status & 0x3;
+		// read the alarm status which releases the gpio ("interrupts")
+		uint8_t status;
+		int ret = i2c_read_reg(fd, 0xA8, &status);
+
 		close(fd);
-		//logger.verbose(std::format("AD Stat={:#x}", status));
-		if (bus != 0) {
-			ow.alarmHandler(bus - 1);
+		if (ret < 0 || status == 0xff) {
+			// no answer, the line stays low and we get called again
+			logger.warn(std::format("Arduino status read failed ({})", ret));
+			return -1;
+		}
+		logger.verbose(std::format("AD Stat={:#x}", status));
+		// bit 0..3: one bit per bus with an alarm
+		uint8_t buses = status & 0x0f;
+		for (int bus = 0; bus < MAX_BUS; bus++) {
+			if ((buses & (1 << bus)) == 0)
+				continue;
+			ow.alarmHandler(bus);
 			auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(HrClock::now() - tp);
 			if (duration < min_dur)
 				min_dur = duration;
@@ -237,9 +276,8 @@ void Ard_i2c::interrupt() {
 				max_dur = duration;
 			sum_dur += duration;
 			dur_count++;
-			ow.alarmHandler(bus - 1, 0x28);
-			/*logger.info(std::format("used {} (min={} max={} avg={}ms over {} calls)",
-				duration, min_dur, max_dur, sum_dur.count() / dur_count, dur_count));*/
+			// any other alarming family on that bus
+			ow.alarmHandler(bus, 0xff);
 		}
 		if (status & 0x10) {
 			// power interval
@@ -256,17 +294,15 @@ void Ard_i2c::interrupt() {
 			power = (int)(1000 * (3600 / diff) / 500);
 			logger.verbose(std::format("Estimated usage: {} Watt", power));
 		}
-		// call switch handler
-		for (int i = 0; i < MAX_BUS; i++)
-			ow.alarmHandler(i, 0xff);
-
-		return;
+		// 0x40: more queued (one power impulse per read)
+		return (status & 0x40) ? 1 : 0;
 	}
 #if 0
 	events(fd);
 #endif
 	close(fd);
 #endif
+	return 0;
 }
 
 #if 0

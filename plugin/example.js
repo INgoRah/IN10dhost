@@ -48,8 +48,14 @@ function onAction(code, val, data)
         if (data) {
             if (data.type == "ds2408")
                 ow.log(data.rom + " pio is now 0x" + data.pio.toString(16));
-            if (data.type == "ds2450")
-                ow.log(data.rom + " brightness is now " + data.volt_a);
+            /* a light sensor on channel A: hand its reading on to the
+               lamp's ds2408 as brightness (0..5 V -> 0..255), so its
+               timers only switch when it is dark enough */
+            if (data.type == "ds2450") {
+                const b = Math.min(255, Math.round(data.volt_a * 51));
+                ow.log(data.rom + " brightness is now " + b);
+                ow.brightness_set(LAMP, b);
+            }
         }
         return 1;
 
@@ -63,7 +69,7 @@ function onAction(code, val, data)
         if (t !== null) {
             ow.log("temperature " + t.toFixed(2));
             if (t > 24.0)
-                ow.pio_set(LAMP, 1);
+                ow.pin_switch(LAMP, 0, ow.ON);
         }
         return 1;
     }

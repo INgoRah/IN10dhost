@@ -36,6 +36,7 @@ class ds2408 : public OwDev, public IDS2408 {
 		// sensed.* only the ones configured as an input/button
 		bool vis_pio(int idx) const;
 		bool vis_sensed(int idx) const;
+		bool vis_latched(int idx) const;
 		// pin.0 .. pin.7 are directories purely because two of these
 		// rows exist - see the "pin dot star slash ..." comment on
 		// FsEntry in fs_table.h. There is no separate "pin.*" row for

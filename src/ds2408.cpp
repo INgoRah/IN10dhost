@@ -27,7 +27,7 @@ const FsEntry<ds2408> ds2408::table[] = {
 	{ "BYTE", 3, 0, false, nullptr, nullptr, &ds2408::r_byte, &ds2408::w_byte },
 	{ "PIO.*", 3, 8, false, &ds2408::vis_pio, nullptr, &ds2408::r_pio, &ds2408::w_pio },
 	{ "sensed.*", 2, 8, false, &ds2408::vis_sensed, nullptr, &ds2408::r_sensed, nullptr },
-	{ "latched.*", 2, 8, false, nullptr, nullptr, &ds2408::r_latched, &ds2408::w_latched },
+	{ "latched.*", 2, 8, false, &ds2408::vis_latched, nullptr, &ds2408::r_latched, &ds2408::w_latched },
 	{ "cfg", 3 * CFG_SIZE, 0, false, nullptr, nullptr, &ds2408::r_cfg, &ds2408::w_cfg },
 	{ "pin.*/name", PIN_NAME_MAX, 8, false, nullptr, nullptr, &ds2408::r_pin_name, &ds2408::w_pin_name },
 	{ "pin.*/func", 20, 8, false, nullptr, nullptr, &ds2408::r_pin_func, &ds2408::w_pin_func },
@@ -290,12 +290,35 @@ int ds2408::w_brightness(const char* buf, size_t size, int)
 
 bool ds2408::vis_pio(int idx) const
 {
-	return (cfg[CFG_PIN_ID + idx] & CFG_OUT_MASK) != 0;
+	switch (cfg[CFG_PIN_ID + idx]) {
+		case 0xff:
+		case 0:
+			return false;
+		default:
+			return (cfg[CFG_PIN_ID + idx] & CFG_OUT_MASK) != 0;
+	}
 }
 
 bool ds2408::vis_sensed(int idx) const
 {
-	return (cfg[CFG_PIN_ID + idx] & CFG_BTN_MASK) != 0;
+	switch (cfg[CFG_PIN_ID + idx]) {
+		case 0xff:
+		case 0:
+			return false;
+		default:
+			return (vis_pio(idx)) == 0;
+	}
+}
+
+bool ds2408::vis_latched(int idx) const
+{
+	switch (cfg[CFG_PIN_ID + idx]) {
+		case 0xff:
+		case 0:
+			return false;
+		default:
+			return true;
+	}
 }
 
 // --- IFs, all table-driven ----------------------------------------------
@@ -321,10 +344,8 @@ int ds2408::fs_attr(std::string& path) const
 
 int ds2408::fs_read(string& path, char* buf, size_t size, bool uncached)
 {
-	logger.verbose("DS2408 read " + path + " " + rom);
 	int r = fs_table::read(*this, table, n_table, path, buf, size, uncached);
 	if (r != fs_table::NOT_FOUND) {
-		logger.log(LogLevel::DEBUG, "reading " + path + " -> " + std::string(buf) + "...");
 		return r;
 	}
 	return OwDev::fs_read(path, buf, size, uncached);
@@ -343,6 +364,7 @@ void ds2408::begin(bool soft)
 	if (soft)
 		return;
 	// if not soft read regs, cfg ...
+	//cfg_read();
 	reg_read(true);
 	// level_set
 }
@@ -386,11 +408,11 @@ uint8_t ds2408::latch_reset()
 
 uint8_t ds2408::pin_switch(uint8_t pio, enum _pio_mode state, uint8_t lvl)
 {
-	logger.log(LogLevel::DEBUG, "PIO cfg=" + std::to_string(cfg[CFG_PIN_ID + pio]));
+	//logger.log(LogLevel::DEBUG, "PIO cfg=" + std::to_string(cfg[CFG_PIN_ID + pio]));
 	// check whether this is a level or simple IO
 	if (cfg[CFG_PIN_ID + pio] == CFG_OUT_PWM) {
 		// TODO Toggle leads to dim stages
-		if (level_set(pio, lvl) != 0xAA)
+		if (level_set(pio, lvl, TMR_TYPE_ON) != 0xAA)
 			return -1;
 		// store current level in data for readback until the next write
 		level = lvl;
@@ -420,7 +442,7 @@ uint8_t ds2408::pio_set(uint8_t pio)
 	uint8_t r, retry, err = 0;
 	bool ret;
 
-	logger.log(LogLevel::DEBUG, "set PIO " + std::to_string(pio));
+	logger.debug(std::format("Set {} PIO {:#x}", name, pio));
 
 	{
 	// coverity[sleep] - bus mutex must be held for the whole 1-Wire
@@ -622,8 +644,10 @@ uint8_t ds2408::level_set(uint8_t pio, uint8_t level, uint8_t cmd, uint8_t val)
 	if (level == 0 && cmd == 0xDD)
 		/* dim down */
 		data[1] = TMR_TYPE_STOP_DIM;
+	logger.debug(std::format("send cmd {:#x} {:#x} {:#x} {:#x}", data[1], data[2], data[3], data[4]));
 	// coverity[sleep] - bus mutex must be held for the whole 1-Wire
 	// transaction
+	{
 	std::lock_guard<std::mutex> lock(ds->mtx);
 	// coverity[sleep] - bus mutex must be held
 	if (!ds->selectChannel(bus))
@@ -643,9 +667,14 @@ uint8_t ds2408::level_set(uint8_t pio, uint8_t level, uint8_t cmd, uint8_t val)
 	// a hung dev
 	crc = ds->read();
 	crc |= ds->read() << 8;
+	}
 	uint16_t crc16 = ds->crc16(data, 5, 0);
-	if (crc == static_cast<uint16_t>(~crc16))
+	if (crc == static_cast<uint16_t>(~crc16)) {
+		logger.verbose(std::format("CRC ok {:#x}", crc));
 		return 0xAA;
+	}
+	else
+		logger.warn(std::format("CRC mismatch {:#x} <> {:#x}", crc, ~crc16));
 
 
 	return 0xff;

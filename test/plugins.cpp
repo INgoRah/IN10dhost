@@ -10,6 +10,7 @@
 #include "main.h"
 #include "ow_devices.h"
 #include "plugins.h"
+#include "ds2408.h"
 
 extern OwDevices ow;
 extern DS2482 ds;
@@ -143,14 +144,12 @@ static bool jsengine_available()
 // Plugins::load() skips a plugin that is already loaded and there is no
 // API to swap its script afterwards, so every test has to share one
 // script that branches on the action code rather than loading its own.
-static void load_js_once()
+static std::string js_path()
 {
-	static std::string path;
+	return (std::filesystem::current_path() / "test_engine.js").string();
+}
 
-	if (!path.empty())
-		return;
-	path = (std::filesystem::current_path() / "test_engine.js").string();
-	std::ofstream(path) << R"JS(
+static const char js_src[] = R"JS(
 		function onAction(code, val, data) {
 			switch (code) {
 			case 3:                     /* ACT_READY */
@@ -161,11 +160,41 @@ static void load_js_once()
 				throw new Error("boom");
 			case 7:                     /* ACT_ALARM_AFTER: never returns */
 				while (true) { }
+			case 4:                     /* ACT_PERIODIC_SECOND: ds2408 calls */
+				if (!data)
+					return 0;
+				/* one bit per call that reported success */
+				return (ow.brightness_set(data.rom, data.brightness) ? 1 : 0)
+					| (ow.threshold_set(data.rom, data.threshold) ? 2 : 0)
+					| (ow.pin_switch(data.rom, data.pin, ow.ON) ? 4 : 0)
+					| (ow.level_set(data.rom, data.pin, 10) ? 8 : 0)
+					| (ow.OFF === 0 && ow.ON === 2 && ow.TOGGLE === 3 ? 16 : 0);
 			}
 			return 0;
 		}
 	)JS";
-	plugins.load(json{ { "jsengine", { { "script", path } } } });
+
+static void load_js_once()
+{
+	static bool loaded = false;
+
+	if (loaded)
+		return;
+	loaded = true;
+	std::ofstream(js_path()) << js_src;
+	plugins.load(json{ { "jsengine", { { "script", js_path() } } } });
+}
+
+/* Replaces the script on disk. The modification time is pushed forward
+   explicitly so the change is seen even when the file system's time
+   stamps are coarser than the time between two writes. */
+static void write_js(const std::string& src)
+{
+	static auto stamp = std::filesystem::file_time_type::clock::now();
+
+	std::ofstream(js_path()) << src;
+	stamp += std::chrono::seconds(1);
+	std::filesystem::last_write_time(js_path(), stamp);
 }
 
 TEST(plugins, JsEngineRunsScript)
@@ -207,6 +236,20 @@ TEST(plugins, JsEngineFromOtherThread)
 	t.join();
 
 	EXPECT_EQ(other, base);
+
+	// Same with a payload: it is turned into a JS object before the
+	// script runs, and that has to happen against the calling thread's
+	// stack as well, not the one of whichever thread called last.
+	json data = { { "rom", "29.0200FDFF6677F8" }, { "pio", 5 } };
+	int dev_base = plugins.action(ACT_DEV_CHANGE, 0, nullptr);
+	int with_data = plugins.action(ACT_DEV_CHANGE, 0, &data);
+	EXPECT_EQ(with_data, dev_base + 5);
+	int from_thread = 0;
+	std::thread t2([&] { from_thread = plugins.action(ACT_DEV_CHANGE, 0, &data); });
+	t2.join();
+	EXPECT_EQ(from_thread, with_data);
+	// and back on this thread after the other one moved the stack top
+	EXPECT_EQ(plugins.action(ACT_DEV_CHANGE, 0, &data), with_data);
 }
 
 TEST(plugins, JsEngineSurvivesBadScript)
@@ -235,6 +278,98 @@ TEST(plugins, JsEngineSurvivesBadScript)
 	EXPECT_LT(ms, 5000);
 
 	logger.set_level(lvl);
+}
+
+TEST(plugins, JsEngineReloadsChangedScript)
+{
+	if (!jsengine_available())
+		GTEST_SKIP() << "built without quickjs";
+
+	load_js_once();
+	int base = plugins.action(ACT_READY);
+
+	// edited on disk: the next event already runs the new version,
+	// without any reload or touch
+	std::string edited(js_src);
+	size_t pos = edited.find("return 7;");
+	ASSERT_NE(pos, std::string::npos);
+	edited.replace(pos, 9, "return 9;");
+	write_js(edited);
+	EXPECT_EQ(plugins.action(ACT_READY), base + 2);
+
+	// saved again unchanged (only the time stamp moved): nothing to do
+	write_js(edited);
+	EXPECT_EQ(plugins.action(ACT_READY), base + 2);
+
+	// a broken edit is logged, and fixing it brings the script back
+	LogLevel lvl = logger.get_level();
+	logger.set_level(LogLevel::NONE);
+	write_js("function onAction( {");
+	EXPECT_EQ(plugins.action(ACT_READY), base - 7);
+	logger.set_level(lvl);
+
+	write_js(js_src);
+	EXPECT_EQ(plugins.action(ACT_READY), base);
+}
+
+TEST(plugins, JsEngineDs2408Calls)
+{
+	if (!jsengine_available())
+		GTEST_SKIP() << "built without quickjs";
+
+	ow.init();
+	ow.update_device(1, "29.0701F8FE6677F4");
+	ow.update_data();
+	// the calls go over the (simulated) bus, which needs dev->ds
+	ow.begin();
+	ds2408* dev = (ds2408*)ow.find(0x290701F8FE6677F4);
+	ASSERT_NE(dev, nullptr);
+	dev->cfg[CFG_PIN_ID + 2] = CFG_OUT_LOW;
+	dev->data[PIO_OUT] = 0xff;
+	load_js_once();
+
+	int base = plugins.action(ACT_PERIODIC_SECOND, 0, nullptr);
+	json data = {
+		{ "rom", "29.0701F8FE6677F4" },
+		{ "brightness", 120 },
+		{ "threshold", 30 },
+		{ "pin", 2 },
+	};
+	LogLevel lvl = logger.get_level();
+	// pin_switch() dispatches ACT_DEV_CHANGE back into the engine,
+	// which drops it as re-entrant and says so
+	logger.set_level(LogLevel::NONE);
+	int ret = plugins.action(ACT_PERIODIC_SECOND, 0, &data);
+	logger.set_level(lvl);
+	EXPECT_EQ(ret - base, 31);
+
+	json j = dev->to_json();
+	EXPECT_EQ(j["brightness"], 120);
+	EXPECT_EQ(j["threshold"], 30);
+	// ON clears the output latch bit, the outputs are active low
+	EXPECT_EQ(dev->data[PIO_OUT] & (1 << 2), 0);
+
+	// not a ds2408: every call reports failure instead of throwing
+	data["rom"] = "28.0501FAFE6677A0";
+	logger.set_level(LogLevel::NONE);
+	ret = plugins.action(ACT_PERIODIC_SECOND, 0, &data);
+	logger.set_level(lvl);
+	EXPECT_EQ(ret - base, 16);
+
+	// out of range values throw in the script, so nothing is changed
+	data["rom"] = "29.0701F8FE6677F4";
+	data["brightness"] = 300;
+	logger.set_level(LogLevel::NONE);
+	ret = plugins.action(ACT_PERIODIC_SECOND, 0, &data);
+	logger.set_level(lvl);
+	EXPECT_EQ(ret - base, 0);
+	EXPECT_EQ(dev->to_json()["brightness"], 120);
+	data["brightness"] = 120;
+	data["pin"] = 8;
+	logger.set_level(LogLevel::NONE);
+	ret = plugins.action(ACT_PERIODIC_SECOND, 0, &data);
+	logger.set_level(lvl);
+	EXPECT_EQ(ret - base, 0);
 }
 
 TEST(plugins, ConfigRoundTrip)

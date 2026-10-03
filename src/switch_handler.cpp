@@ -245,7 +245,6 @@ bool SwitchHandler::switchHandle(uint8_t busNr, uint8_t adr1)
 	size_t i;
 
 	src.data = srcData(busNr, adr1);
-	logger.debug(std::format("switch handling {}.{}", (int)src.sa.bus, (int)src.sa.adr));
 #if 0
 	for (i = 0; i < MAX_TIMED_SWITCH; i++) {
 	}
@@ -255,7 +254,7 @@ bool SwitchHandler::switchHandle(uint8_t busNr, uint8_t adr1)
 			logger.debug(std::format("sw {}.{}.{} -> {}.{}.{}",
 				(int)cache.switches[i].src.sa.bus,
 				(int)cache.switches[i].src.sa.adr,
-				(int)cache.switches[i].src.sa.latch,
+				(int)(cache.switches[i].src.sa.latch + cache.switches[i].src.sa.press * 20),
 				(int)cache.switches[i].dst.da.bus,
 				(int)cache.switches[i].dst.da.adr,
 				(int)cache.switches[i].dst.da.pio
@@ -300,14 +299,13 @@ bool SwitchHandler::dev_alarm(uint8_t bus, uint8_t adr[8])
 				to--;
 			}
 		}
+		return true;
 	}
-	if (adr[0] == 0x28) {
-		ds1820* dev = (ds1820*)ow->find(bus, adr[1], 0x28);
-		if (!dev)
-			return false;
-		dev->temp_read(0);
-		dev->temp_read(2);
-	}
+	auto* dev = ow->find(bus, adr[1], adr[0]);
+	if (!dev)
+		return false;
+	dev->poll();
+
 	return true;
 }
 
@@ -335,7 +333,8 @@ int SwitchHandler::r_list(char* buf, size_t size, bool, int)
 	list += std::format("{} switches\n", cache.switches.size());
 	for (const auto& sw : cache.switches) {
 		list += std::format("{}.{}.{} {}.{}.{} ({} {})\n",
-			sw.src.sa.bus, sw.src.sa.adr, sw.src.sa.latch,
+			sw.src.sa.bus, sw.src.sa.adr,
+			(int)(sw.src.sa.latch + sw.src.sa.press * 20),
 			sw.dst.da.bus, sw.dst.da.adr, sw.dst.da.pio,
 			sw.src.data, sw.dst.data);
 	}
@@ -358,7 +357,6 @@ int SwitchHandler::w_add(const char* buf, size_t size, int)
 	for (size_t i = 0; i < size; i++) {
 		if (buf[i] == '\n' || buf[i] == '\0') {
 			struct _sw_tbl sw;
-			logger.verbose(std::format("adding? {}", std::string(buf)));
 			if (parse_buf(std::string_view(&buf[start], i - start), sw)) {
 				start = i + 1;
 				bool exists = false;
@@ -377,7 +375,8 @@ int SwitchHandler::w_add(const char* buf, size_t size, int)
 				}
 				cache.switches.push_back(sw);
 				logger.verbose(std::format("added switch {}.{}.{} -> {}.{}.{}",
-					(int)sw.src.sa.bus, (int)sw.src.sa.adr, (int)sw.src.sa.latch,
+					(int)sw.src.sa.bus, (int)sw.src.sa.adr,
+					(int)(sw.src.sa.latch + sw.src.sa.press * 20),
 					(int)sw.dst.da.bus, (int)sw.dst.da.adr, (int)sw.dst.da.pio));
 			}
 		}
@@ -406,7 +405,8 @@ int SwitchHandler::w_del(const char* buf, size_t size, int)
 						// what we continue from
 						it = cache.switches.erase(it);
 						logger.verbose(std::format("deleted switch {}.{}.{} -> {}.{}.{}",
-							(int)sw.src.sa.bus, (int)sw.src.sa.adr, (int)sw.src.sa.latch,
+							(int)sw.src.sa.bus, (int)sw.src.sa.adr,
+							(int)(sw.src.sa.latch + sw.src.sa.press * 20),
 							(int)sw.dst.da.bus, (int)sw.dst.da.adr, (int)sw.dst.da.pio));
 						found = true;
 					} else

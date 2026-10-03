@@ -63,5 +63,5 @@ class Ard_i2c : public OwDev{
 #if 0
 		void events(int fd, OwDevices* ow);
 #endif
-		void interrupt();
+		int interrupt();
 };

@@ -24,16 +24,6 @@ class ds1820 : public OwDev, public IDS1820 {
 		int fs_attr(string& path) const override;
 		int fs_read(string& path, char* buf, size_t size, bool uncached = false) override;
 
-		json to_json() const override {
-			return json{
-				{"type", type},
-				{"bus", bus},
-				{"rom", rom},
-				{"id", id},
-				{"name", name},
-			};
-		};
-
 		// IDS1820
 		float temp_read(const uint8_t flag);
 };

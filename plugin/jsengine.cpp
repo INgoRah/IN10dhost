@@ -8,15 +8,36 @@
  *
  * Scripts reach the 1-Wire devices through the global "ow" object:
  *   ow.log(msg)              write to the daemon log
- *   ow.pio_set(rom, pio)     drive a ds2408 PIO, returns true on success
+ *   ow.pio_set(rom, pio)     drive all ds2408 PIOs at once (raw output
+ *                            latch byte), returns true on success
+ *   ow.pin_switch(rom, pin, state[, level])
+ *                            switch one ds2408 pin, state is ow.ON,
+ *                            ow.OFF or ow.TOGGLE; a PWM pin takes level
+ *   ow.level_set(rom, pin, level)
+ *                            set a ds2408 PWM pin to level (0 = off)
+ *   ow.brightness_set(rom, value)
+ *                            hand a ds2408 the current brightness, for
+ *                            devices without a light sensor of their own
+ *   ow.threshold_set(rom, value)
+ *                            brightness above which a ds2408 does not
+ *                            switch its timed lights
+ *                            all four return true on success
  *   ow.temp(rom)             read a ds1820 temperature, null if not one
  *   ow.volt(rom, channel)    read a cached ds2450 voltage
+ *
+ * The script is reloaded on its own when the file changes on disk: every
+ * event first compares the file's modification time, and on a change
+ * its contents, with what was last loaded. ACT_PERIODIC_SECOND arrives
+ * every second, so an edit is live within about a second. A reload
+ * starts the script from a clean global object, like loading it anew.
+ *
  * rom is the dotted string form ("29.0200FDFF6677F8") that the event
  * payloads also carry - JS numbers cannot hold a 64 bit rom code
  * exactly, so the string is the only safe round trip.
  */
 #include <chrono>
 #include <cstdlib>
+#include <filesystem>
 #include <format>
 #include <fstream>
 #include <iostream>
@@ -44,6 +65,9 @@ private:
 	/* contents of the script as last loaded, so a reload with an
 	   unedited file is a no-op instead of wiping the script's state */
 	uint64_t script_hash;
+	/* modification time of the script as last loaded, so most events
+	   only cost a stat() rather than hashing the file */
+	std::filesystem::file_time_type script_mtime;
 	/* QuickJS is single threaded, but action() is reached both from the
 	   FUSE threads and from the background poll worker */
 	std::recursive_mutex mtx;
@@ -108,6 +132,105 @@ private:
 		return JS_NewBool(ctx, d->pio_set((uint8_t)pio) == 0xAA);
 	}
 
+	/* Reads argv[i] as a byte. Throws a JS RangeError, and returns
+	   false, for anything outside 0..255. */
+	static bool arg_u8(JSContext* ctx, JSValueConst v, const char* what, uint8_t& out)
+	{
+		int32_t n;
+
+		if (JS_ToInt32(ctx, &n, v) < 0)
+			return false;
+		if (n < 0 || n > 255) {
+			JS_ThrowRangeError(ctx, "%s must be 0..255, got %d", what, n);
+			return false;
+		}
+		out = (uint8_t)n;
+		return true;
+	}
+
+	/* pin numbers are 0..7, anything else would index past the
+	   device's per-pin config */
+	static bool arg_pin(JSContext* ctx, JSValueConst v, uint8_t& out)
+	{
+		int32_t n;
+
+		if (JS_ToInt32(ctx, &n, v) < 0)
+			return false;
+		if (n < 0 || n > 7) {
+			JS_ThrowRangeError(ctx, "pin must be 0..7, got %d", n);
+			return false;
+		}
+		out = (uint8_t)n;
+		return true;
+	}
+
+	static JSValue js_pin_switch(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv)
+	{
+		uint8_t pin, lvl = 0;
+		int32_t state;
+
+		if (argc < 3)
+			return JS_FALSE;
+		IDS2408* d = dynamic_cast<IDS2408*>(arg_dev(ctx, argc, argv));
+		if (d == nullptr)
+			return JS_FALSE;
+		if (!arg_pin(ctx, argv[1], pin))
+			return JS_EXCEPTION;
+		if (JS_ToInt32(ctx, &state, argv[2]) < 0)
+			return JS_EXCEPTION;
+		if (state != OFF && state != ON && state != TOGGLE)
+			return JS_ThrowRangeError(ctx, "state must be ow.ON, ow.OFF or ow.TOGGLE");
+		if (argc > 3 && !arg_u8(ctx, argv[3], "level", lvl))
+			return JS_EXCEPTION;
+
+		return JS_NewBool(ctx, d->pin_switch(pin, (enum _pio_mode)state, lvl) == 0);
+	}
+
+	static JSValue js_level_set(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv)
+	{
+		uint8_t pin, lvl;
+
+		if (argc < 3)
+			return JS_FALSE;
+		IDS2408* d = dynamic_cast<IDS2408*>(arg_dev(ctx, argc, argv));
+		if (d == nullptr)
+			return JS_FALSE;
+		if (!arg_pin(ctx, argv[1], pin) || !arg_u8(ctx, argv[2], "level", lvl))
+			return JS_EXCEPTION;
+
+		return JS_NewBool(ctx, d->level_set(pin, lvl) == 0xAA);
+	}
+
+	static JSValue js_brightness_set(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv)
+	{
+		uint8_t val;
+
+		if (argc < 2)
+			return JS_FALSE;
+		IDS2408* d = dynamic_cast<IDS2408*>(arg_dev(ctx, argc, argv));
+		if (d == nullptr)
+			return JS_FALSE;
+		if (!arg_u8(ctx, argv[1], "brightness", val))
+			return JS_EXCEPTION;
+
+		return JS_NewBool(ctx, d->brightness_set(val) == 0);
+	}
+
+	static JSValue js_threshold_set(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv)
+	{
+		uint8_t val;
+
+		if (argc < 2)
+			return JS_FALSE;
+		IDS2408* d = dynamic_cast<IDS2408*>(arg_dev(ctx, argc, argv));
+		if (d == nullptr)
+			return JS_FALSE;
+		if (!arg_u8(ctx, argv[1], "threshold", val))
+			return JS_EXCEPTION;
+
+		return JS_NewBool(ctx, d->threshold_set(val) == 0);
+	}
+
 	static JSValue js_temp(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv)
 	{
 		IDS1820* d = dynamic_cast<IDS1820*>(arg_dev(ctx, argc, argv));
@@ -155,16 +278,23 @@ private:
 		JS_FreeValue(ctx, e);
 	}
 
+	/* The runtime measures stack depth against the stack top of the
+	   thread that last set it, but calls arrive from the background
+	   poll worker and the FUSE threads alike. Every entry point calls
+	   this first, before *any* QuickJS call - JS_ParseJSON() and
+	   JS_Eval() check the stack too, not only running the script - or
+	   a call from another thread fails with "Maximum call stack size
+	   exceeded". Safe because the mutex means only one thread is ever
+	   inside the engine. */
+	void enter()
+	{
+		if (rt)
+			JS_UpdateStackTop(rt);
+	}
+
 	/* Arms the watchdog, runs fn, and reports anything it threw. */
 	JSValue call_guarded(JSValue fn, JSValue self_obj, int argc, JSValue* argv, const char* what)
 	{
-		/* The runtime measures stack depth against the stack top of
-		   whichever thread created it, but actions arrive from the
-		   background poll worker and the FUSE threads as well. Without
-		   re-basing it here every call from one of those threads fails
-		   with "Maximum call stack size exceeded". Safe because the
-		   mutex means only one thread is ever inside the engine. */
-		JS_UpdateStackTop(rt);
 		deadline = std::chrono::steady_clock::now() +
 			std::chrono::milliseconds(SCRIPT_TIMEOUT_MS);
 		depth++;
@@ -185,6 +315,18 @@ private:
 			JS_NewCFunction(ctx, js_log, "log", 1));
 		JS_SetPropertyStr(ctx, owobj, "pio_set",
 			JS_NewCFunction(ctx, js_pio_set, "pio_set", 2));
+		JS_SetPropertyStr(ctx, owobj, "pin_switch",
+			JS_NewCFunction(ctx, js_pin_switch, "pin_switch", 4));
+		JS_SetPropertyStr(ctx, owobj, "level_set",
+			JS_NewCFunction(ctx, js_level_set, "level_set", 3));
+		JS_SetPropertyStr(ctx, owobj, "brightness_set",
+			JS_NewCFunction(ctx, js_brightness_set, "brightness_set", 2));
+		JS_SetPropertyStr(ctx, owobj, "threshold_set",
+			JS_NewCFunction(ctx, js_threshold_set, "threshold_set", 2));
+		/* states for pin_switch(), the values of enum _pio_mode */
+		JS_SetPropertyStr(ctx, owobj, "OFF", JS_NewInt32(ctx, OFF));
+		JS_SetPropertyStr(ctx, owobj, "ON", JS_NewInt32(ctx, ON));
+		JS_SetPropertyStr(ctx, owobj, "TOGGLE", JS_NewInt32(ctx, TOGGLE));
 		JS_SetPropertyStr(ctx, owobj, "temp",
 			JS_NewCFunction(ctx, js_temp, "temp", 1));
 		JS_SetPropertyStr(ctx, owobj, "volt",
@@ -227,9 +369,6 @@ private:
 		buf << f.rdbuf();
 		std::string src = buf.str();
 
-		/* config_set() can also arrive on a FUSE thread, see the note
-		   in call_guarded() */
-		JS_UpdateStackTop(rt);
 		deadline = std::chrono::steady_clock::now() +
 			std::chrono::milliseconds(SCRIPT_TIMEOUT_MS);
 		JSValue res = JS_Eval(ctx, src.c_str(), src.size(), script.c_str(),
@@ -239,6 +378,30 @@ private:
 		else if (logger)
 			logger->info(std::format("jsengine: loaded {}", script));
 		JS_FreeValue(ctx, res);
+	}
+
+	/* Reloads the script if the file changed on disk since it was last
+	   loaded. A missing file (an editor in the middle of replacing it)
+	   is left for the next event to look at. */
+	void check_script()
+	{
+		std::error_code ec;
+
+		if (script.empty())
+			return;
+		auto mtime = std::filesystem::last_write_time(script, ec);
+		if (ec || mtime == script_mtime)
+			return;
+		script_mtime = mtime;
+		/* touched or saved unchanged: keep the running script's state */
+		uint64_t hash = file_hash(script);
+		if (hash == 0 || hash == script_hash)
+			return;
+		script_hash = hash;
+		if (logger)
+			logger->info(std::format("jsengine: {} changed, reloading", script));
+		if (reset_context())
+			load_script();
 	}
 
 public:
@@ -276,6 +439,8 @@ public:
 	{
 		std::lock_guard<std::recursive_mutex> lock(mtx);
 
+		/* freeing runs the garbage collector, also stack checked */
+		enter();
 		if (ctx) {
 			JS_FreeContext(ctx);
 			ctx = nullptr;
@@ -306,12 +471,17 @@ public:
 
 		if (rt == nullptr || want.empty())
 			return;
+		enter();
 		/* same file, same contents: leave the running script and its
 		   state alone rather than re-evaluating it for nothing */
 		if (ctx && want == script && hash == script_hash)
 			return;
 		script = want;
 		script_hash = hash;
+		{
+			std::error_code ec;
+			script_mtime = std::filesystem::last_write_time(script, ec);
+		}
 		if (reset_context())
 			load_script();
 	}
@@ -331,6 +501,10 @@ public:
 				logger->warn(std::format("jsengine: dropping re-entrant action {}", ev.code));
 			return 0;
 		}
+		enter();
+		check_script();
+		if (ctx == nullptr)
+			return 0;
 		JSValue global = JS_GetGlobalObject(ctx);
 		JSValue fn = JS_GetPropertyStr(ctx, global, "onAction");
 
@@ -343,6 +517,12 @@ public:
 			argv[2] = ev.data
 				? JS_ParseJSON(ctx, payload.c_str(), payload.size(), "<event>")
 				: JS_NULL;
+			if (JS_IsException(argv[2])) {
+				/* report it here rather than hand the script an
+				   exception object as its payload */
+				log_exception("event payload");
+				argv[2] = JS_NULL;
+			}
 
 			JSValue res = call_guarded(fn, global, 3, argv, "onAction");
 			if (!JS_IsException(res))

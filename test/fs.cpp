@@ -1468,3 +1468,45 @@ TEST_F(FsTest, Ds2408PinNames) {
 	EXPECT_STREQ(buf, "PIO.3");
 	fs_ops.write("/29.0701F8FE6677F4/pin.5/name", "", 0, 0, nullptr);
 }
+
+// defined in src/ow_devices.cpp, what load() uses per device
+extern std::unique_ptr<OwDev> make_device_from_json(const json& j);
+
+// "poll" is common to every device type and has to survive a save and
+// reload, whatever the type adds to or overrides in to_json()
+TEST_F(FsTest, PollIsStoredForEveryDeviceType) {
+	const struct {
+		int bus;
+		const char* rom;
+	} devs[] = {
+		{ 1, "29.0701F8FE6677F4" },	// ds2408
+		{ 1, "28.0501FAFE6677A0" },	// ds1820
+		{ 0, "20.0200F8FE66771E" },	// ds2450
+		{ 1, "AD.0900F8FF6677E2" },	// ard_i2c
+	};
+	char buf[16];
+	int res;
+
+	for (const auto& d : devs) {
+		ow.update_device(d.bus, d.rom);
+		ow.update_data();
+		std::string path = std::string("/") + d.rom + "/poll";
+
+		res = fs_ops.write(path.c_str(), "7\n", 2, 0, nullptr);
+		EXPECT_EQ(res, 2) << d.rom;
+		res = fs_ops.read(path.c_str(), buf, sizeof(buf), 0, nullptr);
+		EXPECT_GT(res, 0) << d.rom;
+		EXPECT_STREQ(buf, "7") << d.rom;
+
+		OwDev* dev = ow.find(d.rom);
+		ASSERT_NE(dev, nullptr) << d.rom;
+		json j = dev->to_json();
+		EXPECT_EQ(j.value("poll", -1), 7) << d.rom << " " << j.dump();
+
+		auto restored = make_device_from_json(j);
+		ASSERT_NE(restored, nullptr) << d.rom;
+		EXPECT_EQ(restored->to_json().value("poll", -1), 7) << d.rom;
+
+		fs_ops.write(path.c_str(), "0\n", 2, 0, nullptr);
+	}
+}

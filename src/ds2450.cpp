@@ -72,7 +72,7 @@ int ds2450::volt_update(uint8_t ch)
 	if (adc_read(ch, 0) != 0)
 		return EAGAIN;
 	volt = adc_read(ch, 1);
-	logger.info ("DS2450 reading raw=" + std::to_string(volt));
+	logger.verbose ("DS2450 reading raw=" + std::to_string(volt));
 	volt_x = (volt * 5.0 / 1024);
 	switch (ch) {
 		case 0: volt_a = volt_x; break;
