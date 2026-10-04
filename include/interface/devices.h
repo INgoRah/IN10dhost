@@ -1,10 +1,13 @@
 #pragma once
+#include <string>
 
 class IDev {
 public:
 	virtual ~IDev() {}
-	virtual const char* get_type() const = 0;
-	virtual const char* get_name() const = 0;
+	/* copies: the device may be renamed from another thread at any time,
+	   a pointer into it would not stay valid */
+	virtual std::string get_type() const = 0;
+	virtual std::string get_name() const = 0;
 };
 
 class IDevices {

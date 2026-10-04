@@ -66,7 +66,7 @@ public:
 	/**
 	 * @brief Create an empty circular buffer.
 	 */
-	constexpr RingBuffer() : head(buffer), tail(buffer), count(0) {}
+	constexpr RingBuffer() : buffer(), head(buffer), tail(buffer), count(0) {}
 
 	// disable the copy constructor
 	/** @private */

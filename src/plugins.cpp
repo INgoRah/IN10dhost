@@ -133,7 +133,7 @@ static void drop_tmp(const std::filesystem::path& p)
  *    tried and crashes inside dlsym() once the original is replaced.
  *
  * Downside: this needs /tmp to be writable and executable. */
-Plugin* Plugins::plugin_init(string name)
+Plugin* Plugins::plugin_init(const string& name)
 {
 	std::lock_guard<std::recursive_mutex> lock(mtx);
 	std::filesystem::path f;
@@ -246,7 +246,7 @@ int Plugins::cleanup()
 /* Loads a plugin that is not loaded yet. Returns 0 on success, -1 when
    the library is missing or failed to load, 1 when it was already
    there (nothing to do). */
-int Plugins::add(string name)
+int Plugins::add(const string& name)
 {
 	std::lock_guard<std::recursive_mutex> lock(mtx);
 
@@ -357,6 +357,11 @@ json Plugins::save()
 
 int Plugins::action(int code, int val, const json* data)
 {
+	/* the list must not change underneath, and a plugin must not be
+	   unloaded while it runs: add/remove/reload come from FUSE threads,
+	   actions from the poll worker too. Recursive, a plugin calling back
+	   into the daemon (and so into here) on the same thread is fine. */
+	std::lock_guard<std::recursive_mutex> lock(mtx);
 	int ret;
 	ActionEvent ev{ code, val, data };
 

@@ -90,7 +90,7 @@ enum DS2482_ERR {
 class DS2482
 {
 private:
-	uint64_t start_time;
+	uint64_t start_time = 0;
 	uint64_t get_now_us();
 public:
 	DS2482() { searchExhausted = 0; ch = 0xff; fd = -1; _read_ptr = 0; _combined = false; };
@@ -98,7 +98,7 @@ public:
 	~DS2482();
 
 	std::mutex mtx;
-	uint8_t last_err;
+	uint8_t last_err = 0;
 	bool init();
 	int log_dump(char* buf, size_t size);
 	bool configureDev(uint8_t config);
@@ -125,21 +125,23 @@ public:
 	// get garbage.  The order is deterministic. You will always get
 	// the same devices in the same order.
 	bool search(uint8_t *newAddr, bool search_mode = true);
-	uint16_t crc16(const uint8_t* input, uint16_t len, uint16_t crc);
-	bool check_crc16(const uint8_t* input, uint16_t len, const uint8_t* inverted_crc, uint16_t crc);
+	// pure computations, no bus or object state: static so they can be
+	// used without the bus mutex
+	static uint16_t crc16(const uint8_t* input, uint16_t len, uint16_t crc);
+	static bool check_crc16(const uint8_t* input, uint16_t len, const uint8_t* inverted_crc, uint16_t crc);
 	void log_event(uint8_t state, uint8_t data);
 
 private:
-	int fd;
-	uint8_t addr;
-	uint8_t ch;
-	uint8_t _read_ptr;
-	uint8_t searchLastDisrepancy;
-	uint8_t searchLastFamilyDiscrepancy;
-	uint8_t searchAddress[8];
-	uint8_t searchExhausted;
+	int fd = -1;
+	uint8_t addr = 0;
+	uint8_t ch = 0xff;
+	uint8_t _read_ptr = 0;
+	uint8_t searchLastDisrepancy = 0;
+	uint8_t searchLastFamilyDiscrepancy = 0;
+	uint8_t searchAddress[8] = {};
+	uint8_t searchExhausted = 0;
 	/* adapter supports plain-I2C combined transfers (I2C_FUNC_I2C) */
-	bool _combined;
+	bool _combined = false;
 
 	void set_error(int err_code, int def);
 	void _write(uint8_t b);

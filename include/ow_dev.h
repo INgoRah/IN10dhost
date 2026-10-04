@@ -1,6 +1,9 @@
 #ifndef _OW_DEV_H
 #define _OW_DEV_H
 
+#include <atomic>
+#include <mutex>
+#include <vector>
 #include "fs.h"
 #include "interface/devices.h"
 
@@ -19,7 +22,24 @@ enum dev_states {
 };
 
 class OwDev : IFs, public IDev {
+	private:
+		// Guards the members of this device - here and in every subclass
+		// (e.g. ds2408::data[]) - against the FUSE threads, the poll
+		// worker and plugins using it at the same time. Take it with
+		// lock(). Recursive, because the handlers call each other
+		// (w_pio() -> pin_switch() -> pio_set()). Always taken before
+		// the bus mutex (ds->mtx), never while holding it.
+		mutable std::recursive_mutex dev_mtx;
+		mutable int lock_depth = 0;
+		// ACT_DEV_CHANGE payloads raised while locked, see notify_change()
+		mutable std::vector<json> pending;
 	protected:
+		/* Tells the plugins this device changed. While the device is
+		   locked the event is only queued, and sent by the outermost
+		   DevLock once the lock is released: a plugin reacting to it may
+		   use the device from another thread (jsengine runs scripts under
+		   its own lock), which would deadlock against a held lock. */
+		void notify_change(json data) const;
 		// nullptr until begin() runs; a device method that dereferences
 		// it without begin() having run first is a bug in that caller,
 		// not something to paper over here, but the pointer itself must
@@ -33,7 +53,7 @@ class OwDev : IFs, public IDev {
 		string info;
 		HrClock::time_point last_poll;
 		// polling interval in seconds, 0 means no polling, default is 0
-		uint16_t poll_interval;
+		uint16_t poll_interval = 0;
 		uint8_t crc8(const uint8_t *addr, uint8_t len);
 	public:
 		// Timing check ("is it due?"), shared by every device type. When
@@ -46,13 +66,29 @@ class OwDev : IFs, public IDev {
 		// check it themselves.
 		int poll_check();
 		string rom;
-		uint64_t rom_code;
+		uint64_t rom_code = 0;
 		string type;
 		string name;
-		uint8_t addr[8];
-		int id;
-		int bus;
-		bool alarm;
+		uint8_t addr[8] = {};
+		int id = 0;
+		int bus = 0;
+		// set by the alarm handling (SwitchHandler::dev_alarm()), listed
+		// under /alarm until cleared - see ds2408::w_latched(). Atomic
+		// as /alarm is listed without taking the device lock.
+		std::atomic<bool> alarm{false};
+
+		/* Scoped device lock, see dev_mtx. Sends the queued change
+		   events when the outermost one goes out of scope. */
+		class DevLock {
+			const OwDev& dev;
+		public:
+			explicit DevLock(const OwDev& d);
+			~DevLock();
+			DevLock(const DevLock&) = delete;
+			DevLock& operator=(const DevLock&) = delete;
+		};
+		DevLock lock() const { return DevLock(*this); }
+
 		OwDev() { };
 		OwDev(string rom);
 		virtual ~OwDev() {};
@@ -79,8 +115,9 @@ class OwDev : IFs, public IDev {
 		virtual int poll();
 		virtual int poll_next();
 		// IDev functions
-		const char* get_name() const { return name.c_str(); };
-		const char* get_type() const { return type.c_str(); };
+		// copies taken under the device lock, see IDev
+		std::string get_name() const override { auto lk = lock(); return name; };
+		std::string get_type() const override { auto lk = lock(); return type; };
 		// IFs functions
 		std::vector<string> fs_dir(string& path) const override;
 		int fs_attr(string& path) const override;

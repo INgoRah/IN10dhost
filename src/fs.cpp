@@ -60,6 +60,22 @@ static string plugin_name(const char* path)
 }
 
 static void fs_dir_devs(fuse_fill_dir_t filler, void *buf, bool alarm = false);
+
+/* "/alarm" lists the alarming devices; below it everything is the same
+   as in the root, so "/alarm/<rom>/latched.0" is "/<rom>/latched.0".
+   Every entry point maps the path through this first. */
+static string alarm_alias(const char* path)
+{
+	static const char prefix[] = "/alarm/";
+
+	if (strncmp(path, prefix, sizeof(prefix) - 1) == 0) {
+		if (path[sizeof(prefix) - 1] == '\0')
+			return string("/alarm");
+		// keep the slash in front of what follows
+		return string(path + sizeof(prefix) - 2);
+	}
+	return string(path);
+}
 static bool check_path(std::string &spath, const filetype &s, struct stat *st);
 
 static bool extractBusNumber(string& path, int& busNumber)
@@ -186,8 +202,10 @@ bool check_path(std::string &spath, const filetype &s, struct stat *st)
 	return false;
 }
 
-static int fs_getattr(const char* path, struct stat* st, struct fuse_file_info*)
+static int fs_getattr(const char* path_in, struct stat* st, struct fuse_file_info*)
 {
+	string alias = alarm_alias(path_in);
+	const char* path = alias.c_str();
 	string spath(path);
 	spath.erase(0, 1);
 	memset(st, 0, sizeof(struct stat));
@@ -237,7 +255,7 @@ static int fs_getattr(const char* path, struct stat* st, struct fuse_file_info*)
 	if (extractBusNumber(spath, bus)) {
 		if (spath.length() > 0) {
 			// below bus
-			return fs_attr_rom(bus, spath, st);
+			return fs_attr_rom(bus, std::move(spath), st);
 		} else {
 			st->st_mode = S_IFDIR | 0755;
 			st->st_nlink = 0;
@@ -282,10 +300,12 @@ static void fs_dir_devs(fuse_fill_dir_t filler, void *buf, bool alarm)
 	}
 }
 
-static int fs_readdir(const char* path, void* buf, fuse_fill_dir_t filler,
+static int fs_readdir(const char* path_in, void* buf, fuse_fill_dir_t filler,
 					  off_t, struct fuse_file_info*, enum fuse_readdir_flags)
 {
 	bool ret;
+	string alias = alarm_alias(path_in);
+	const char* path = alias.c_str();
 	string spath(path);
 	spath.erase(0, 1);
 
@@ -297,10 +317,11 @@ static int fs_readdir(const char* path, void* buf, fuse_fill_dir_t filler,
 			fs_dir_devs(filler, buf, false);
 		}
 	}
-	ret = extract_subpath(spath, "alarm");
-	if (ret) {
-		logger.info("alarm search ... ");
-		ow.search(false);
+	// only the directory itself, a device below it is an alias (see
+	// alarm_alias()) and lists that device's own entries
+	if (strcmp(path, "/alarm") == 0) {
+		// no bus search: the alarm handling flags the devices as it
+		// handles them, see SwitchHandler::dev_alarm()
 		fs_dir_devs(filler, buf, true);
 		return 0;
 	}
@@ -385,8 +406,10 @@ static int fs_readdir(const char* path, void* buf, fuse_fill_dir_t filler,
 	//return -ENOENT;
 }
 
-static int fs_open(const char* path, struct fuse_file_info*)
+static int fs_open(const char* path_in, struct fuse_file_info*)
 {
+	string alias = alarm_alias(path_in);
+	const char* path = alias.c_str();
 	string spath(path);
 	spath.erase(0, 1);
 
@@ -414,9 +437,11 @@ static int fs_open(const char* path, struct fuse_file_info*)
 	return -ENOENT;
 }
 
-static int fs_read(const char* path, char* buf, size_t size, off_t offset,
+static int fs_read(const char* path_in, char* buf, size_t size, off_t offset,
 				   struct fuse_file_info*)
 {
+	string alias = alarm_alias(path_in);
+	const char* path = alias.c_str();
 	string spath(path);
 	spath.erase(0, 1);
 	(void)offset;
@@ -457,10 +482,12 @@ static int fs_read(const char* path, char* buf, size_t size, off_t offset,
 }
 
 
-static int fs_write(const char* path, const char* buf, size_t size,
+static int fs_write(const char* path_in, const char* buf, size_t size,
 					off_t offset, struct fuse_file_info*)
 {
 	(void)offset;
+	string alias = alarm_alias(path_in);
+	const char* path = alias.c_str();
 	string spath(path);
 	spath.erase(0, 1);
 	{

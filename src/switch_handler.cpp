@@ -273,19 +273,29 @@ bool SwitchHandler::dev_alarm(uint8_t bus, uint8_t adr[8])
 		ds2408* dev = (ds2408*)ow->find(bus, adr[1], 0x29);
 		if (!dev)
 			return false;
-		//dev->set_alarm(true);
 		ds->log_event('1',adr[1]);
-		res = dev->reg_read(true);
+		uint8_t stat, press;
+		{
+			// the read and the copy out as one: data[] is the device's,
+			// guarded by its lock. Not held for switching below, which
+			// locks the target devices.
+			auto lk = dev->lock();
+			// also keeps the latches and flags the device; the read
+			// resets them on the device, so work on the copy handed
+			// back, see alarm_read()
+			res = dev->alarm_read(cur_latch);
+			stat = dev->data[STAT];
+			press = dev->data[PIO_TIME];
+		}
 		/* fill data for use in switchHandle */
 		if (res == 0xaa || res == 0xff) {
 			// loop over all set bits
 			// cur_latch is reduced by each call to bitnumber
-			cur_latch = dev->data[PIO_LATCH];
 			//logger.verbose(std::format(" -> {} {}", cur_latch, data[5]));
-			if (dev->data[STAT] & 0x40) {
+			if (stat & 0x40) {
 				/* status in 5 signals a dimming down */
 			}
-			if (dev->data[STAT] & 0x88) {
+			if (stat & 0x88) {
 				logger.warn(std::format("Watchdog on {}!", dev->rom));
 				return false;
 			}
@@ -294,7 +304,7 @@ bool SwitchHandler::dev_alarm(uint8_t bus, uint8_t adr[8])
 				return false;
 			}
 			while (cur_latch != 0 && to > 0) {
-				data[6] = dev->data[PIO_TIME];
+				data[6] = press;
 				switchHandle(bus, adr[1]);
 				to--;
 			}
@@ -304,6 +314,7 @@ bool SwitchHandler::dev_alarm(uint8_t bus, uint8_t adr[8])
 	auto* dev = ow->find(bus, adr[1], adr[0]);
 	if (!dev)
 		return false;
+	dev->alarm = true;
 	dev->poll();
 
 	return true;

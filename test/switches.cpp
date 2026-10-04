@@ -98,6 +98,10 @@ TEST_F(SwTest, switching)
 	logger.info(std::format("used {} ", duration));
 	res = fs_ops.read("/29.0202abbd6677d4/PIO.0", buf, 2, 0, nullptr);
 	EXPECT_STREQ(buf, "1");
+	// the alarm read reset the latch on the device (and so in data[]),
+	// a second press sets it again
+	EXPECT_EQ(dev->data[PIO_LATCH], 0);
+	dev->data[PIO_LATCH] = 0x04;
 	ret = swHdl.dev_alarm(1, adr);
 	res = fs_ops.read("/29.0202abbd6677d4/PIO.0", buf, 2, 0, nullptr);
 	EXPECT_STREQ(buf, "0");

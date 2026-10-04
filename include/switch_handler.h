@@ -128,11 +128,11 @@ extern struct _sw_tim_tbl timed_tbl[MAX_TIMED_SWITCH];
 class OwDevices;
 class SwitchHandler : IFs {
 	private:
-		OwDevices* ow;
-		DS2482 *ds;
-		uint8_t data[10];
+		OwDevices* ow = nullptr;
+		DS2482 *ds = nullptr;
+		uint8_t data[10] = {};
 		// current latch data to be hanled
-		uint8_t cur_latch;
+		uint8_t cur_latch = 0;
   		uint16_t srcData(uint8_t busNr, uint8_t adr1);
 		uint8_t dataRead(union pio dst, uint8_t adr[8]);
 		uint8_t dimStage(uint8_t dim);
@@ -153,10 +153,10 @@ class SwitchHandler : IFs {
 		FRIEND_TEST(LLSwTest, ll_funcs);
 #endif
 	public:
-		uint8_t mode;
-		uint8_t light_thr;
-		uint8_t dim_on_lvl;
-		uint8_t tbl_vers;
+		uint8_t mode = MODE_ALRAM_HANDLING | MODE_ALRAM_POLLING | MODE_AUTO_SWITCH;
+		uint8_t light_thr = 0;
+		uint8_t dim_on_lvl = 0;
+		uint8_t tbl_vers = 0;
 		SwitchHandler();
 		SwitchHandler(OwDevices* devs);
 		void status();

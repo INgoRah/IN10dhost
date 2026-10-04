@@ -9,7 +9,7 @@
 
 class ds2450 : public OwDev, public IDS2450 {
 	private:
-		uint16_t dat[4];
+		uint16_t dat[4] = {};
 		float volt_a, volt_b, volt_c, volt_d;
 		int volt_update(uint8_t ch);
 		int fs_read_volt(uint8_t ch, char* buf, bool uncached);
@@ -31,7 +31,7 @@ class ds2450 : public OwDev, public IDS2450 {
 				volt_d = 0.0f;
 				type = "ds2450";
 			};
-			ds2450(std::string rom) : OwDev(rom) {
+			ds2450(std::string rom) : OwDev(std::move(rom)) {
 				volt_a = 0.0f;
 				volt_b = 0.0f;
 				volt_c = 0.0f;

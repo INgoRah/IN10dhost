@@ -6,7 +6,7 @@
 #include "interface/ds2408.h"
 #include "fs_table.h"
 
-#define CFG_SIZE 26
+#define DS2408_CFG_SIZE 26
 /** longest pin name, same as the size its fs entry reports */
 #define PIN_NAME_MAX 20
 
@@ -32,10 +32,14 @@ class ds2408 : public OwDev, public IDS2408 {
 		int w_threshold(const char* buf, size_t size, int idx);
 		int r_brightness(char* buf, size_t size, bool uncached, int idx);
 		int w_brightness(const char* buf, size_t size, int idx);
+		int r_level(char* buf, size_t size, bool uncached, int idx);
+		int w_level(const char* buf, size_t size, int idx);
 		// PIO.* only lists the pins currently configured as an output,
 		// sensed.* only the ones configured as an input/button
 		bool vis_pio(int idx) const;
 		bool vis_sensed(int idx) const;
+		// level.* only for pins configured as PWM output
+		bool vis_level(int idx) const;
 		bool vis_latched(int idx) const;
 		// pin.0 .. pin.7 are directories purely because two of these
 		// rows exist - see the "pin dot star slash ..." comment on
@@ -47,6 +51,15 @@ class ds2408 : public OwDev, public IDS2408 {
 		int brightness = 0;
 		// user given name per pin, empty means the default "n.<pin>"
 		std::array<std::string, 8> pin_name;
+		// activity latches collected by alarm_read() since they were last
+		// cleared by writing 0 to a latched.* entry; other register reads
+		// (data[PIO_LATCH]) do not change it
+		uint8_t latched = 0;
+		// activity latches as reg_read() got them, before it reset them
+		// on the device (which also clears data[PIO_LATCH])
+		uint8_t last_latch = 0;
+		// level per pin in percent as last applied by level_set()
+		std::array<uint8_t, 8> level_pct{};
 	public:
 		/* [0] PIO Logic State  = sensed
 		 * [1] Output latch = PIO
@@ -59,20 +72,15 @@ class ds2408 : public OwDev, public IDS2408 {
 		 * [8] CRC16 LSB
 		 * [9] CRC16 MSB
 		 **/
-		uint8_t data[10];
+		uint8_t data[10] = {};
 		using OwDev::OwDev;
 		using OwDev::type;
 		void begin(bool soft=false) override;
 
-		ds2408() { this->level = 0; type = "ds2408"; };
-		ds2408(std::string rom) : OwDev(rom) {
-			this->level = 0;
+		ds2408() { type = "ds2408"; };
+		ds2408(std::string rom) : OwDev(std::move(rom)) {
 			type = "ds2408"; };
-		// each custom device may have one PWM output enabled and
-		// can set one dedicated pin to any level
-		// the level is set with a specail custom command
-		int level;
-		uint8_t cfg[CFG_SIZE];
+		uint8_t cfg[DS2408_CFG_SIZE] = {};
 
 		std::vector<string> fs_dir(string& path) const override;
 		int fs_attr(string& path) const override;
@@ -85,9 +93,10 @@ class ds2408 : public OwDev, public IDS2408 {
 		// ds2408 functions
 		uint8_t pio_set(uint8_t pio);
 		uint8_t reg_read(bool latch_reset);
+		uint8_t alarm_read(uint8_t& latch);
 		uint8_t latch_reset();
 		int cfg_read();
-		int cfg_write(const uint8_t* data, int len = CFG_SIZE);
+		int cfg_write(const uint8_t* data, int len = DS2408_CFG_SIZE);
 		uint8_t level_set(uint8_t pio, uint8_t level,
 			uint8_t cmd = TMR_TYPE_ON, uint8_t val = 0);
 		uint8_t pin_switch(uint8_t pio, enum _pio_mode state, uint8_t lvl = 0);
