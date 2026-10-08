@@ -1,3 +1,16 @@
+in10dfs (0.4.0) trixie; urgency=medium
+
+  * Timers implemented
+
+ -- INgo Rah <INgo.Rah@gmx.net>  Thu, 08 Oct 2026 08:30:00 +0000
+
+in10dfs (0.3.0) trixie; urgency=medium
+
+  * fs improvements and fixes
+  * features needed for go live
+
+ -- INgo Rah <INgo.Rah@gmx.net>  Wed, 07 Oct 2026 12:00:00 +0000
+
 in10dfs (0.2.1) trixie; urgency=medium
 
   * rework internal fs handling

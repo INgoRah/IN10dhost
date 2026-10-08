@@ -115,8 +115,10 @@ class OwDev : IFs, public IDev {
 		virtual int poll();
 		virtual int poll_next();
 		// IDev functions
+		// the name given to the device, or its rom while it has none
+		std::string display_name() const { auto lk = lock(); return name.empty() ? rom : name; };
 		// copies taken under the device lock, see IDev
-		std::string get_name() const override { auto lk = lock(); return name; };
+		std::string get_name() const override { return display_name(); };
 		std::string get_type() const override { auto lk = lock(); return type; };
 		// IFs functions
 		std::vector<string> fs_dir(string& path) const override;

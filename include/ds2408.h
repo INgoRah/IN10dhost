@@ -100,6 +100,12 @@ class ds2408 : public OwDev, public IDS2408 {
 		uint8_t level_set(uint8_t pio, uint8_t level,
 			uint8_t cmd = TMR_TYPE_ON, uint8_t val = 0);
 		uint8_t pin_switch(uint8_t pio, enum _pio_mode state, uint8_t lvl = 0);
+		// whether an output is on as far as known here: a PWM pin with a
+		// level above 0, otherwise its output latch bit cleared (active
+		// low, see pin_switch())
+		bool pin_is_on(uint8_t pio) const;
+		// the name given to a pin, or "PIO.<n>" while it has none
+		std::string pin_label(int pio) const;
 		int brightness_set(uint8_t brightness);
 		int threshold_set(uint8_t threshold);
 };

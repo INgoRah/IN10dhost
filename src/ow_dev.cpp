@@ -222,7 +222,7 @@ int OwDev::fs_attr(std::string& path) const
 	for (const auto& s : generic) {
 		if (path.find(s.name) != std::string::npos) {
 			if (strcmp(s.name, "name") == 0)
-				return (std::max(name.length(), (size_t)1));
+				return display_name().length();
 			return s.suglen;
 		}
 	}
@@ -255,8 +255,8 @@ int OwDev::fs_read(string& path, char* buf, size_t size, bool uncached)
 	(void)uncached;
 
 	if (path.find("name") != string::npos) {
-		std::strncpy(buf, name.c_str(), size);
-		//std::sprintf(buf, name.c_str());
+		// the rom while no name was given
+		std::snprintf(buf, size, "%s", display_name().c_str());
 		return std::strlen(buf);
 	}
 	if (path.find("id") != string::npos) {

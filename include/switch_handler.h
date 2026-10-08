@@ -3,6 +3,8 @@
 #ifdef TESTING
 #include <gtest/gtest_prod.h>
 #endif
+#include <map>
+#include <mutex>
 #include "ds2482.h"
 #include "ds2408.h"
 #include "fs.h"
@@ -76,9 +78,20 @@ union pio {
 	} da;
 };
 
+/* What a press of a timed switch does while the target's timer runs */
+/** Restart the timer, the target stays on */
+#define SW_ON_PRESS_RETRIGGER 0
+/** Switch the target off and stop the timer */
+#define SW_ON_PRESS_OFF 1
+
 struct _sw_tbl {
 	union s_adr src;
 	union pio dst;
+	/** Timed switch: seconds the target stays on after a press, 0 is
+	 * a plain switch that toggles the target */
+	uint16_t secs = 0;
+	/** Timed switch: SW_ON_PRESS_* */
+	uint8_t on_press = SW_ON_PRESS_RETRIGGER;
 };
 
 enum tim_type {
@@ -142,8 +155,21 @@ class SwitchHandler : IFs {
 		uint8_t dimLevel(union pio dst, uint8_t* id);
 		uint8_t dimLevel(union d_adr_8 dst, uint8_t* id);
 		uint16_t getLen(uint8_t max, uint16_t elSize);
+		// running off timers per target IO (union pio data -> when it is
+		// switched off). Per target, not per switch: all switches of one
+		// light share its timer. Guarded by timers_mtx, which is never
+		// held while switching (that takes the target device's lock).
+		std::map<uint16_t, HrClock::time_point> timers;
+		mutable std::mutex timers_mtx;
+		void switch_timed(const struct _sw_tbl& sw);
+		bool output_on(union pio dst);
 		// fs_table.h handlers
 		int r_list(char* buf, size_t size, bool uncached, int idx);
+		int list_size(int idx) const;
+		// what /switches/list shows
+		std::string list_text() const;
+		std::string src_label(union s_adr src) const;
+		std::string dst_label(union pio dst) const;
 		int w_add(const char* buf, size_t size, int idx);
 		int w_del(const char* buf, size_t size, int idx);
 		static const FsEntry<SwitchHandler> table[];
@@ -167,6 +193,17 @@ class SwitchHandler : IFs {
 		bool switchHandle(uint8_t busNr, uint8_t adr1);
 		bool switchHandle(uint8_t busNr, uint8_t adr1, uint8_t latch);
 		bool switchLevel(union pio dst, uint8_t level);
+		// Off timers of target IOs, used by timed switches (and meant for
+		// automatic IO timeouts as well): start (or restart) switches dst
+		// off after secs, stop cancels that.
+		void timer_start(union pio dst, uint16_t secs);
+		bool timer_stop(union pio dst);
+		bool timer_running(union pio dst);
+		// seconds until dst is switched off, -1 while no timer runs
+		int timer_remaining(union pio dst) const;
+		// Switches off every target whose timer expired by now; called
+		// from the poll loop. Returns how many it switched off.
+		int timer_poll(HrClock::time_point now = HrClock::now());
 		bool initialStates();
 		// FS entries
 		std::vector<string> fs_dir(string& path) const override;
