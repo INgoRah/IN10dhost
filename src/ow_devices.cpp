@@ -323,39 +323,37 @@ void OwDevices::update_device(int bus, string rom) {
 		return;
 	}
 	OwDev* dev = nullptr;
-	// "factory" for different devices
-	if (rom.substr(0, 2) == "29") {
-		auto& p = cache.devices.emplace_back(std::make_unique<ds2408>(rom));
+	const string family = rom.substr(0, 2);
+	// "factory" for different devices; the matching one takes the rom
+	if (family == "29") {
+		auto& p = cache.devices.emplace_back(std::make_unique<ds2408>(std::move(rom)));
 		dev = p.get();
-	}
-	if (rom.substr(0, 2) == "28") {
-		auto& p = cache.devices.emplace_back(std::make_unique<ds1820>(rom));
+	} else if (family == "28") {
+		auto& p = cache.devices.emplace_back(std::make_unique<ds1820>(std::move(rom)));
 		dev = p.get();
-	}
-	if (rom.substr(0, 2) == "20") {
-		auto& p = cache.devices.emplace_back(std::make_unique<ds2450>(rom));
+	} else if (family == "20") {
+		auto& p = cache.devices.emplace_back(std::make_unique<ds2450>(std::move(rom)));
 		dev = p.get();
-	}
-	if (rom.substr(0, 2) == "AD") {
-		auto& p = cache.devices.emplace_back(std::make_unique<Ard_i2c>(rom));
+	} else if (family == "AD") {
+		auto& p = cache.devices.emplace_back(std::make_unique<Ard_i2c>(std::move(rom)));
 		dev = p.get();
-	}
-	if (dev) {
-		dev->bus = bus;
-		// no hardware access here - just config/state normalization and
-		// registration, so this device is findable via add_device()
-		// below. search()'s closing begin() sweep is what actually
-		// brings this (and only this, thanks to its state guard) device
-		// up afterwards.
-		dev->init();
-		logger.verbose(std::format("adding device {}", dev->rom));
-		add_device(dev);
-		// TODO update the bus cache as well
 	} else {
+		// here, before any branch above took the rom
 		printf("unknown device %s\n", rom.c_str());
 		// TODO create generic device to at least show it in the list
 		// issue ...
+		return;
 	}
+	dev->bus = bus;
+	// no hardware access here - just config/state normalization and
+	// registration, so this device is findable via add_device()
+	// below. search()'s closing begin() sweep is what actually
+	// brings this (and only this, thanks to its state guard) device
+	// up afterwards.
+	dev->init();
+	logger.verbose(std::format("adding device {}", dev->rom));
+	add_device(dev);
+	// TODO update the bus cache as well
 }
 
 std::vector<OwDev*> OwDevices::list_devices(int bus)
@@ -386,6 +384,7 @@ void OwDevices::search(bool mode)
 		}
 		ds->reset_search();
 #ifdef USE_I2C
+		// coverity[sleep] - bus mutex must be held
 		while (ds->search(adr, mode)) {
 				res++;
 				if (mode) {

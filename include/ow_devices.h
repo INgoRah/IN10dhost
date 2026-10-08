@@ -22,16 +22,16 @@ using json = nlohmann::json;
 using HrClock = std::chrono::high_resolution_clock;
 
 struct Bus {
-    int id;
-    int dev_count;
+    int id = 0;
+    int dev_count = 0;
     std::vector<OwDev*> devices;
 };
 
 struct Config {
-    int version;
+    int version = 0;
 	/* poll interval in secs or 0 for no polling */
-	int poll;
-    int bus_count;
+	int poll = 0;
+    int bus_count = 0;
     std::vector<std::unique_ptr<OwDev>> devices;
 	std::vector<Bus> busses;
 	// TODO move to switch handler
@@ -45,7 +45,7 @@ extern Config cache;
 class OwDevices : public IDevices
 {
 	private:
-		DS2482 *ds;
+		DS2482 *ds = nullptr;
 #if 0
 		uint8_t	pio_data[MAX_BUS][MAX_ADR];
 		uint8_t dev_vers[MAX_BUS][MAX_ADR];

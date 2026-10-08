@@ -6,6 +6,8 @@
 #include <gmock/gmock.h>
 #include <cstdlib> // Required for std::system
 #include <thread>
+#include <future>
+#include <atomic>
 
 #include "main.h"
 #include "ow_devices.h"
@@ -370,6 +372,77 @@ TEST(plugins, JsEngineDs2408Calls)
 	ret = plugins.action(ACT_PERIODIC_SECOND, 0, &data);
 	logger.set_level(lvl);
 	EXPECT_EQ(ret - base, 0);
+}
+
+// One thread changes a device through the file system (its change event
+// goes to jsengine), another runs a script that switches the same device.
+// Sending the event while still holding the device lock would deadlock:
+// each thread would hold the lock the other one waits for.
+TEST(plugins, JsEngineNoDeadlockWithDeviceLock)
+{
+	if (!jsengine_available())
+		GTEST_SKIP() << "built without quickjs";
+
+	ow.init();
+	ow.update_device(1, "29.0701F8FE6677F4");
+	ow.update_data();
+	ow.begin();
+	ds2408* dev = (ds2408*)ow.find(0x290701F8FE6677F4);
+	ASSERT_NE(dev, nullptr);
+	for (int i = 0; i < 8; i++)
+		dev->cfg[CFG_PIN_ID + i] = CFG_OUT_LOW;
+	load_js_once();
+
+	LogLevel lvl = logger.get_level();
+	logger.set_level(LogLevel::NONE);
+	std::atomic<bool> done{false};
+	auto writer = std::thread([&] {
+		for (int i = 0; i < 300; i++)
+			dev->pio_set((uint8_t)i);
+	});
+	auto scripter = std::thread([&] {
+		json data = {
+			{ "rom", "29.0701F8FE6677F4" },
+			{ "brightness", 1 }, { "threshold", 1 }, { "pin", 2 },
+		};
+		for (int i = 0; i < 300; i++)
+			plugins.action(ACT_PERIODIC_SECOND, 0, &data);
+	});
+	auto watchdog = std::async(std::launch::async, [&] {
+		writer.join();
+		scripter.join();
+		done = true;
+	});
+	bool finished = watchdog.wait_for(std::chrono::seconds(20)) == std::future_status::ready;
+	logger.set_level(lvl);
+	if (!finished) {
+		// cannot recover the stuck threads, so do not wait for them
+		ADD_FAILURE() << "deadlock between device lock and jsengine";
+		std::_Exit(1);
+	}
+	EXPECT_TRUE(done);
+}
+
+// Unloading a plugin from a FUSE thread while the poll worker is
+// calling into it must wait for that call, see Plugins::action()
+TEST(plugins, ActionAndReloadFromOtherThreads)
+{
+	ensure_example_loaded();
+
+	std::atomic<bool> stop{false};
+	std::thread events([&] {
+		while (!stop)
+			plugins.action(ACT_READY);
+	});
+	for (int i = 0; i < 50; i++) {
+		EXPECT_EQ(plugins.remove("example"), 0);
+		ensure_example_loaded();
+	}
+	stop = true;
+	events.join();
+
+	// still there and working afterwards
+	EXPECT_GE(plugins.action(ACT_READY), 1);
 }
 
 TEST(plugins, ConfigRoundTrip)

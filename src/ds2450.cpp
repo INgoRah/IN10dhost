@@ -38,6 +38,7 @@ const size_t ds2450::n_table = sizeof(ds2450::table) / sizeof(ds2450::table[0]);
 
 std::vector<std::string> ds2450::fs_dir(string& path) const
 {
+	auto lk = lock();
 	std::vector<std::string> dir = OwDev::fs_dir(path);
 	std::vector<std::string> extra = fs_table::dir(*this, table, n_table, path);
 	dir.insert(dir.end(), extra.begin(), extra.end());
@@ -46,16 +47,23 @@ std::vector<std::string> ds2450::fs_dir(string& path) const
 
 int ds2450::fs_attr(std::string& path) const
 {
+	auto lk = lock();
 	int r = fs_table::attr(*this, table, n_table, path);
 	if (r != fs_table::NOT_FOUND)
 		return r;
 	return OwDev::fs_attr(path);
 }
 
+// The fs_table.h handlers below are only called from fs_read()/
+// fs_write()/fs_dir(), which already hold the device lock. They take it
+// again (it is recursive) because static analysis cannot follow the call
+// through the table's member pointers and would see unguarded access.
+
 // only ever called with idx 0..3 (A..D), once fs_table.h has already
 // matched "volt.*" in path
 int ds2450::r_volt(char* buf, size_t size, bool uncached, int idx)
 {
+	auto lk = lock();
 	if (size < 5)
 		return -EINVAL;
 	return fs_read_volt((uint8_t)idx, buf, uncached);
@@ -97,6 +105,7 @@ int ds2450::fs_read_volt(uint8_t ch, char* buf, bool uncached)
 
 int ds2450::fs_read(string& path, char* buf, size_t size, bool uncached)
 {
+	auto lk = lock();
 	int r = fs_table::read(*this, table, n_table, path, buf, size, uncached);
 	if (r != fs_table::NOT_FOUND)
 		return r;
@@ -105,6 +114,7 @@ int ds2450::fs_read(string& path, char* buf, size_t size, bool uncached)
 
 int16_t ds2450::adc_read(uint8_t ch, uint8_t flag)
 {
+	auto lk = lock();
 	if (ch > 3)
 		return -1;
 	if (flag == 2)
@@ -113,6 +123,7 @@ int16_t ds2450::adc_read(uint8_t ch, uint8_t flag)
 	// coverity[sleep] - bus mutex must be held for the whole 1-Wire
 	// transaction
 	std::lock_guard<std::mutex> lock(ds->mtx);
+	// coverity[sleep] - bus mutex must be held
 	if (!ds->selectChannel(bus))
 		return -1;
 	if (!ds->reset())
@@ -159,6 +170,7 @@ int16_t ds2450::adc_read(uint8_t ch, uint8_t flag)
 
 float ds2450::adc_get(uint8_t ch)
 {
+	auto lk = lock();
 	switch (ch) {
 		case 0: return volt_a;
 		case 1: return volt_b;
@@ -171,17 +183,18 @@ float ds2450::adc_get(uint8_t ch)
 // Only ever called once poll_check() has just returned 1.
 int ds2450::poll()
 {
+	auto lk = lock();
 	float prev = volt_a;
 	if (volt_update(0) != 0)
 		return EAGAIN;
 	if (volt_a != prev) {
-		json data = {
+		// sent once the device is unlocked, see OwDev::notify_change()
+		notify_change(json{
 			{"bus", bus},
 			{"type", type},
 			{"rom", rom.c_str()},
 			{"volt_a", volt_a}
-		};
-		plugins.action(ACT_DEV_CHANGE, 0, &data);
+		});
 	}
 	return 1;
 }

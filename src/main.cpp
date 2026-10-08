@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <cerrno>
 #include <cstring>
 #ifdef GPIOD_V2
 #include <gpiod.h>
@@ -183,6 +184,7 @@ void background_worker()
 		// if there is one on the bus at all
 		if (line == nullptr && arduino) {
 			for (int i = 0; i < ARD_MAX_READS; i++)
+				// coverity[sleep] - bus mutex must be held
 				if (arduino->interrupt() <= 0)
 					break;
 		}
@@ -195,7 +197,16 @@ void background_worker()
 		// External wake (CLI / FUSE)
 		if (ret > 0 && (fds[0].revents & POLLIN)) {
 			uint64_t v;
-			ret = read(wake_fd, &v, sizeof(v)); // clears event
+			// clears the event; non-blocking, EAGAIN means nothing pending.
+			// An eventfd read is all 8 bytes or an error, anything else is
+			// unexpected, and v is not used either way.
+			ssize_t n = read(wake_fd, &v, sizeof(v));
+			if (n < 0) {
+				if (errno != EAGAIN)
+					logger.warn(std::format("wake fd read failed: {}", strerror(errno)));
+			} else if (n != (ssize_t)sizeof(v)) {
+				logger.warn(std::format("wake fd short read: {} bytes", n));
+			}
 		}
 	}
 	printf("Background worker exiting.\n");

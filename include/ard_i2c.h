@@ -13,10 +13,10 @@ int i2c_read_data(int fd, uint8_t* buf, uint16_t size);
 class Ard_i2c : public OwDev{
 	private:
 		// Assuming ad_fd and other globals are defined elsewhere
-		uint8_t lastSeq;
-		int power;
-		int mode;
-		int power_total;
+		uint8_t lastSeq = 0xff;
+		int power = 0;
+		int mode = 0;
+		int power_total = 0;
 		// timestamp of the last power-meter impulse, used to turn the
 		// interval between impulses into an estimated wattage
 		HrClock::time_point last_imp{};

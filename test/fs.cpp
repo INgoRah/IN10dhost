@@ -19,10 +19,12 @@
 #include "ard_i2c.h"
 #include "fs_table.h"
 #include "plugins.h"
+#include "switch_handler.h"
 
 extern OwDevices ow;
 extern DS2482 ds;
 extern Plugins plugins;
+extern SwitchHandler swHdl;
 // defined in test/plugins.cpp
 extern std::filesystem::path exec_path();
 extern void fs_init(fuse_operations* fs_ops);
@@ -685,7 +687,7 @@ TEST_F(FsTest, Ds2408Gaps) {
 	EXPECT_EQ(res, -EINVAL);
 
 	// never exercised: writes the device's cfg block back over the bus
-	EXPECT_EQ(dev->cfg_write(dev->cfg), CFG_SIZE);
+	EXPECT_EQ(dev->cfg_write(dev->cfg), DS2408_CFG_SIZE);
 
 	// OwDev::fs_attr()'s empty-path guard: no FUSE caller ever passes
 	// an empty path (the ROM prefix is always still attached), so it's
@@ -1359,7 +1361,7 @@ TEST_F(FsTest, Ds2408WriteCfg) {
 	ow.begin();
 	ds2408* dev = (ds2408*)ow.find(0x290701F8FE6677F4);
 	ASSERT_NE(dev, nullptr);
-	std::memset(dev->cfg, 0, CFG_SIZE);
+	std::memset(dev->cfg, 0, DS2408_CFG_SIZE);
 
 	// hex bytes, any white space, upper or lower case, one or two digits
 	const char* in = "a5 1 \n21  FF\n";
@@ -1389,7 +1391,7 @@ TEST_F(FsTest, Ds2408WriteCfg) {
 		EXPECT_EQ(res, -EINVAL) << "input '" << b << "'";
 	}
 	std::string too_many;
-	for (int i = 0; i <= CFG_SIZE; i++)
+	for (int i = 0; i <= DS2408_CFG_SIZE; i++)
 		too_many += "01 ";
 	res = fs_ops.write("/29.0701F8FE6677F4/cfg", too_many.c_str(), too_many.size(), 0, nullptr);
 	EXPECT_EQ(res, -EINVAL);
@@ -1509,4 +1511,321 @@ TEST_F(FsTest, PollIsStoredForEveryDeviceType) {
 
 		fs_ops.write(path.c_str(), "0\n", 2, 0, nullptr);
 	}
+}
+
+TEST_F(FsTest, Ds2408Level) {
+	std::vector<std::string> seen;
+	auto record = [](void* buf, const char* name, const struct stat*,
+					 off_t, enum fuse_fill_dir_flags) {
+		static_cast<std::vector<std::string>*>(buf)->push_back(name);
+		return 0;
+	};
+	char buf[16];
+	int res;
+
+	ow.update_device(1, "29.0701F8FE6677F4");
+	ow.update_data();
+	// level_set() goes over the (simulated) bus, which needs dev->ds
+	ow.begin();
+	ds2408* dev = (ds2408*)ow.find(0x290701F8FE6677F4);
+	ASSERT_NE(dev, nullptr);
+	for (int i = 0; i < 8; i++)
+		dev->cfg[CFG_PIN_ID + i] = CFG_OUT_LOW;
+	dev->cfg[CFG_PIN_ID + 3] = CFG_OUT_PWM;
+
+	// listed only for the PWM pin
+	fs_ops.readdir("/29.0701F8FE6677F4", &seen, record, 0, nullptr, (enum fuse_readdir_flags)0);
+	EXPECT_NE(std::find(seen.begin(), seen.end(), "level.3"), seen.end());
+	for (int i : { 0, 1, 2, 4, 5, 6, 7 })
+		EXPECT_EQ(std::find(seen.begin(), seen.end(), "level." + std::to_string(i)), seen.end()) << i;
+
+	struct stat st;
+	EXPECT_EQ(fs_ops.getattr("/29.0701F8FE6677F4/level.3", &st, nullptr), 0);
+	EXPECT_TRUE(S_ISREG(st.st_mode));
+
+	// starts at 0, takes 0..100
+	res = fs_ops.read("/29.0701F8FE6677F4/level.3", buf, sizeof(buf), 0, nullptr);
+	EXPECT_EQ(res, 1);
+	EXPECT_STREQ(buf, "0");
+	for (const char* v : { "100", "50", "1", "0" }) {
+		std::string in = std::string(v) + "\n";
+		res = fs_ops.write("/29.0701F8FE6677F4/level.3", in.c_str(), in.size(), 0, nullptr);
+		EXPECT_EQ(res, (int)in.size()) << v;
+		res = fs_ops.read("/29.0701F8FE6677F4/level.3", buf, sizeof(buf), 0, nullptr);
+		EXPECT_STREQ(buf, v);
+	}
+
+	// out of range or not a number: rejected, value unchanged
+	fs_ops.write("/29.0701F8FE6677F4/level.3", "42", 2, 0, nullptr);
+	for (const char* v : { "101", "-1", "abc", "" }) {
+		res = fs_ops.write("/29.0701F8FE6677F4/level.3", v, strlen(v), 0, nullptr);
+		EXPECT_EQ(res, -EINVAL) << "'" << v << "'";
+	}
+	fs_ops.read("/29.0701F8FE6677F4/level.3", buf, sizeof(buf), 0, nullptr);
+	EXPECT_STREQ(buf, "42");
+
+	// the switch handler goes through pin_switch(), not level.*: the
+	// level it applies has to be what level.N and PIO.N read back
+	auto level3 = [&]() {
+		fs_ops.read("/29.0701F8FE6677F4/level.3", buf, sizeof(buf), 0, nullptr);
+		std::string l(buf);
+		fs_ops.read("/29.0701F8FE6677F4/PIO.3", buf, sizeof(buf), 0, nullptr);
+		EXPECT_EQ(l, std::string(buf)) << "level.3 and PIO.3 disagree";
+		return l;
+	};
+	EXPECT_EQ(dev->pin_switch(3, OFF), 0);
+	EXPECT_EQ(level3(), "0");
+	EXPECT_EQ(dev->pin_switch(3, ON), 0);	// no level given: full on
+	EXPECT_EQ(level3(), "100");
+	EXPECT_EQ(dev->pin_switch(3, TOGGLE), 0);
+	EXPECT_EQ(level3(), "0");
+	EXPECT_EQ(dev->pin_switch(3, TOGGLE), 0);
+	EXPECT_EQ(level3(), "100");
+	EXPECT_EQ(dev->pin_switch(3, ON, 30), 0);
+	EXPECT_EQ(level3(), "30");
+	// and PIO.N on a PWM pin is the same level
+	fs_ops.write("/29.0701F8FE6677F4/PIO.3", "70", 2, 0, nullptr);
+	EXPECT_EQ(level3(), "70");
+
+	// not a PWM pin: neither readable nor writable
+	EXPECT_EQ(fs_ops.read("/29.0701F8FE6677F4/level.2", buf, sizeof(buf), 0, nullptr), -ENOENT);
+	EXPECT_EQ(fs_ops.write("/29.0701F8FE6677F4/level.2", "50", 2, 0, nullptr), -ENOENT);
+}
+
+TEST_F(FsTest, Ds2408AlarmLatches) {
+	std::vector<std::string> seen;
+	auto record = [](void* buf, const char* name, const struct stat*,
+					 off_t, enum fuse_fill_dir_flags) {
+		static_cast<std::vector<std::string>*>(buf)->push_back(name);
+		return 0;
+	};
+	auto in_alarm = [&](const std::string& rom) {
+		seen.clear();
+		fs_ops.readdir("/alarm", &seen, record, 0, nullptr, FUSE_READDIR_PLUS);
+		return std::find(seen.begin(), seen.end(), rom) != seen.end();
+	};
+	auto latched = [&](int i) {
+		char buf[8];
+		std::string path = "/29.0701F8FE6677F4/latched." + std::to_string(i);
+		fs_ops.read(path.c_str(), buf, sizeof(buf), 0, nullptr);
+		return std::string(buf);
+	};
+	uint8_t adr[8] = { 0x29, 0x07, 0x01, 0xF8, 0xFE, 0x66, 0x77, 0xF4 };
+
+	ow.update_device(1, "29.0701F8FE6677F4");
+	ow.update_data();
+	// the alarm read goes over the (simulated) bus, which needs dev->ds,
+	// and dev_alarm() logs to the switch handler's bus
+	ow.begin();
+	swHdl.begin(&ds);
+	ds2408* dev = (ds2408*)ow.find(0x290701F8FE6677F4);
+	ASSERT_NE(dev, nullptr);
+	fs_ops.write("/29.0701F8FE6677F4/latched.0", "0", 1, 0, nullptr);
+	EXPECT_FALSE(in_alarm(dev->rom));
+
+	// an alarm: what the register read leaves in data[PIO_LATCH] is kept
+	// (the simulated bus reads nothing, so preset it)
+	dev->data[STAT] = 0;
+	dev->data[PIO_LATCH] = 0x05;
+	swHdl.dev_alarm(1, adr);
+	EXPECT_TRUE(dev->alarm);
+	EXPECT_TRUE(in_alarm(dev->rom));
+	// the read reset the latch on the device, data[] mirrors that; the
+	// latches stay available through latched.* only
+	EXPECT_EQ(dev->data[PIO_LATCH], 0);
+	EXPECT_EQ(latched(0), "1");
+	EXPECT_EQ(latched(1), "0");
+	EXPECT_EQ(latched(2), "1");
+
+	// any other register read (e.g. an uncached BYTE) does not touch it
+	dev->data[PIO_LATCH] = 0;
+	EXPECT_EQ(latched(0), "1");
+	// a second alarm before clearing adds to it
+	dev->data[PIO_LATCH] = 0x02;
+	swHdl.dev_alarm(1, adr);
+	EXPECT_EQ(latched(0), "1");
+	EXPECT_EQ(latched(1), "1");
+	// an invalid latch read (0xff) is not taken over
+	dev->data[PIO_LATCH] = 0xff;
+	swHdl.dev_alarm(1, adr);
+	EXPECT_EQ(latched(3), "0");
+
+	// only 0 clears, anything else is rejected and changes nothing
+	for (const char* v : { "1", "", "x" })
+		EXPECT_EQ(fs_ops.write("/29.0701F8FE6677F4/latched.5", v, strlen(v), 0, nullptr), -EINVAL) << v;
+	EXPECT_TRUE(in_alarm(dev->rom));
+	EXPECT_EQ(latched(0), "1");
+
+	// below /alarm the device is the same as in the root: a directory
+	// with its own entries (not the alarm list again), readable files
+	std::string adir = "/alarm/" + dev->rom;
+	struct stat st;
+	EXPECT_EQ(fs_ops.getattr(adir.c_str(), &st, nullptr), 0);
+	EXPECT_TRUE(S_ISDIR(st.st_mode));
+	seen.clear();
+	EXPECT_EQ(fs_ops.readdir(adir.c_str(), &seen, record, 0, nullptr, FUSE_READDIR_PLUS), 0);
+	EXPECT_NE(std::find(seen.begin(), seen.end(), "BYTE"), seen.end());
+	EXPECT_EQ(std::find(seen.begin(), seen.end(), dev->rom), seen.end());
+	for (const auto& name : seen) {
+		std::string p = adir + "/" + name;
+		EXPECT_EQ(fs_ops.getattr(p.c_str(), &st, nullptr), 0) << p;
+	}
+	std::string alatch = adir + "/latched.0";
+	char buf[8];
+	EXPECT_EQ(fs_ops.open(alatch.c_str(), nullptr), 0);
+	EXPECT_EQ(fs_ops.read(alatch.c_str(), buf, sizeof(buf), 0, nullptr), 1);
+	EXPECT_STREQ(buf, "1");
+	// "/alarm/" itself is still the alarm list
+	seen.clear();
+	fs_ops.readdir("/alarm/", &seen, record, 0, nullptr, FUSE_READDIR_PLUS);
+	EXPECT_NE(std::find(seen.begin(), seen.end(), dev->rom), seen.end());
+
+	// 0 to any latch, here through the /alarm path, clears all of them
+	// and the alarm
+	std::string alatch5 = adir + "/latched.5";
+	EXPECT_EQ(fs_ops.write(alatch5.c_str(), "0\n", 2, 0, nullptr), 2);
+	EXPECT_FALSE(dev->alarm);
+	EXPECT_FALSE(in_alarm(dev->rom));
+	for (int i = 0; i < 8; i++)
+		EXPECT_EQ(latched(i), "0") << i;
+}
+
+// A device change raised while the device is locked reaches the plugins
+// only once the (outermost) lock is released, see OwDev::notify_change()
+TEST_F(FsTest, DeviceChangeSentAfterUnlock) {
+	ow.update_device(1, "29.0701F8FE6677F4");
+	ow.update_data();
+	ow.begin();
+	ds2408* dev = (ds2408*)ow.find(0x290701F8FE6677F4);
+	ASSERT_NE(dev, nullptr);
+	dev->data[PIO_OUT] = 0xff;
+
+	plugins.remove("faulty");
+	plugins.load(json{ { "faulty", { { "mode", "record" } } } });
+	{
+		auto outer = dev->lock();
+		{
+			auto inner = dev->lock();
+			EXPECT_EQ(dev->pio_set(0x0f), 0xAA);
+		}
+		// inner released, outer still held: nothing sent yet
+		EXPECT_EQ(plugins.config_of("faulty")["changes"], 0);
+	}
+	json cfg = plugins.config_of("faulty");
+	EXPECT_EQ(cfg["changes"], 1);
+	EXPECT_EQ(cfg["last"]["pio"], 0x0f);
+
+	// without an outer lock it goes out straight away
+	EXPECT_EQ(dev->pio_set(0xf0), 0xAA);
+	EXPECT_EQ(plugins.config_of("faulty")["changes"], 2);
+	plugins.remove("faulty");
+}
+
+TEST_F(FsTest, Ds1820Cfg) {
+	std::vector<std::string> seen;
+	auto record = [](void* buf, const char* name, const struct stat*,
+					 off_t, enum fuse_fill_dir_flags) {
+		static_cast<std::vector<std::string>*>(buf)->push_back(name);
+		return 0;
+	};
+	char buf[128];
+	int res;
+	struct stat st;
+	// all of what reading cfg prints: DS1820_CFG_SIZE times "XX "
+	auto cfg_str = [&]() {
+		buf[0] = '\0';
+		fs_ops.read("/28.0501FAFE6677A0/cfg", buf, sizeof(buf), 0, nullptr);
+		return std::string(buf);
+	};
+	static_assert(DS1820_CFG_SIZE == 8, "the expected strings below are 8 bytes");
+
+	ow.update_device(1, "28.0501FAFE6677A0");
+	ow.update_data();
+	// cfg_read()/cfg_write() go over the (simulated) bus, needs dev->ds
+	ow.begin();
+	ds1820* dev = (ds1820*)ow.find(1, 5, 0x28);
+	ASSERT_NE(dev, nullptr);
+
+	// listed, a regular file
+	fs_ops.readdir("/28.0501FAFE6677A0", &seen, record, 0, nullptr, (enum fuse_readdir_flags)0);
+	EXPECT_NE(std::find(seen.begin(), seen.end(), "cfg"), seen.end());
+	EXPECT_EQ(fs_ops.getattr("/28.0501FAFE6677A0/cfg", &st, nullptr), 0);
+	EXPECT_TRUE(S_ISREG(st.st_mode));
+	EXPECT_EQ(st.st_size, 3 * DS1820_CFG_SIZE);
+
+	// starts out all 0, one "XX " per byte
+	res = fs_ops.read("/28.0501FAFE6677A0/cfg", buf, sizeof(buf), 0, nullptr);
+	EXPECT_EQ(res, 3 * DS1820_CFG_SIZE);
+	EXPECT_EQ(cfg_str(), "00 00 00 00 00 00 00 00 ");
+
+	// hex bytes, any white space, upper or lower case, one or two digits
+	const char* in = "a5 1 \n21  FF\n";
+	res = fs_ops.write("/28.0501FAFE6677A0/cfg", in, strlen(in), 0, nullptr);
+	EXPECT_EQ(res, (int)strlen(in));
+	// the rest is left alone
+	EXPECT_EQ(cfg_str(), "A5 01 21 FF 00 00 00 00 ");
+
+	// what reading prints can be written back unchanged
+	fs_ops.read("/28.0501FAFE6677A0/cfg", buf, sizeof(buf), 0, nullptr);
+	std::string all(buf);
+	res = fs_ops.write("/28.0501FAFE6677A0/cfg", all.c_str(), all.size(), 0, nullptr);
+	EXPECT_EQ(res, (int)all.size());
+	EXPECT_EQ(cfg_str(), "A5 01 21 FF 00 00 00 00 ");
+
+	// rejected, and the cached cfg stays as it was
+	const char* bad[] = { "", "  \n", "0x10", "100", "1g", "-1", "10,20" };
+	for (const char* b : bad) {
+		res = fs_ops.write("/28.0501FAFE6677A0/cfg", b, strlen(b), 0, nullptr);
+		EXPECT_EQ(res, -EINVAL) << "input '" << b << "'";
+	}
+	// exactly DS1820_CFG_SIZE bytes are taken
+	const char* full = "1 2 3 4 5 6 7 8";
+	res = fs_ops.write("/28.0501FAFE6677A0/cfg", full, strlen(full), 0, nullptr);
+	EXPECT_EQ(res, (int)strlen(full));
+	EXPECT_EQ(cfg_str(), "01 02 03 04 05 06 07 08 ");
+	fs_ops.write("/28.0501FAFE6677A0/cfg", "a5 1 21 ff 0 0 0 0", 18, 0, nullptr);
+	std::string too_many;
+	for (int i = 0; i <= DS1820_CFG_SIZE; i++)
+		too_many += "01 ";
+	res = fs_ops.write("/28.0501FAFE6677A0/cfg", too_many.c_str(), too_many.size(), 0, nullptr);
+	EXPECT_EQ(res, -EINVAL);
+	EXPECT_EQ(cfg_str(), "A5 01 21 FF 00 00 00 00 ");
+
+	// the uncached read goes through cfg_read() (the simulated bus reads
+	// nothing, so the cache is unchanged)
+	res = fs_ops.read("/uncached/28.0501FAFE6677A0/cfg", buf, sizeof(buf), 0, nullptr);
+	EXPECT_EQ(res, 3 * DS1820_CFG_SIZE);
+	EXPECT_EQ(cfg_str(), "A5 01 21 FF 00 00 00 00 ");
+
+	// directly: cfg_read() reports the size, cfg_write() takes over what
+	// it wrote into the cache, longer input is cut to DS1820_CFG_SIZE
+	EXPECT_EQ(dev->cfg_read(), DS1820_CFG_SIZE);
+	uint8_t data[DS1820_CFG_SIZE + 4] = { 0x11, 0x22, 0x33 };
+	EXPECT_EQ(dev->cfg_write(data, 3), 3);
+	EXPECT_EQ(cfg_str(), "11 22 33 FF 00 00 00 00 ");
+	EXPECT_EQ(dev->cfg_write(data, DS1820_CFG_SIZE + 4), DS1820_CFG_SIZE);
+	EXPECT_EQ(cfg_str(), "11 22 33 00 00 00 00 00 ");
+
+	// leave it zeroed for other tests
+	std::memset(data, 0, sizeof(data));
+	dev->cfg_write(data, DS1820_CFG_SIZE);
+}
+
+// get_name()/get_type() hand out copies: a rename from another thread
+// cannot invalidate what a plugin already got
+TEST_F(FsTest, DevNameAndTypeAreCopies) {
+	ow.update_device(1, "29.0701F8FE6677F4");
+	ow.update_data();
+	IDev* dev = ow.get_dev(0x290701F8FE6677F4);
+	ASSERT_NE(dev, nullptr);
+
+	fs_ops.write("/29.0701F8FE6677F4/name", "kitchen\n", 8, 0, nullptr);
+	std::string before = dev->get_name();
+	EXPECT_EQ(before, "kitchen");
+	EXPECT_EQ(dev->get_type(), "ds2408");
+
+	fs_ops.write("/29.0701F8FE6677F4/name", "a much longer hallway name\n", 27, 0, nullptr);
+	EXPECT_EQ(before, "kitchen");
+	EXPECT_EQ(dev->get_name(), "a much longer hallway name");
+	fs_ops.write("/29.0701F8FE6677F4/name", "\n", 1, 0, nullptr);
 }

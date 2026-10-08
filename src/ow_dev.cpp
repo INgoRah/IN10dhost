@@ -8,6 +8,9 @@
 #include "fs.h"
 #include "ow_devices.h"
 #include "ow_dev.h"
+#include "plugins.h"
+
+extern Plugins plugins;
 
 static struct filetype generic[] = {
 	{ "id", 3 },
@@ -17,9 +20,49 @@ static struct filetype generic[] = {
 	{ "poll", 5 },
 };
 
+OwDev::DevLock::DevLock(const OwDev& d) : dev(d)
+{
+	dev.dev_mtx.lock();
+	dev.lock_depth++;
+}
+
+OwDev::DevLock::~DevLock()
+{
+	std::vector<json> out;
+
+	if (--dev.lock_depth == 0)
+		out.swap(dev.pending);
+	dev.dev_mtx.unlock();
+	// outside the lock, see notify_change(). A destructor must not throw
+	// (it would terminate the daemon): Plugins::action() already catches
+	// what the plugins throw, this catches the rest (allocation, its own
+	// logging). Such an event is lost, the device is not affected.
+	for (const auto& data : out) {
+		try {
+			plugins.action(ACT_DEV_CHANGE, 0, &data);
+		}
+		catch (...) {
+			try {
+				logger.error("device change notification failed");
+			}
+			catch (...) {
+			}
+		}
+	}
+}
+
+void OwDev::notify_change(json data) const
+{
+	{
+		auto lk = lock();
+		pending.push_back(std::move(data));
+	}
+	// sent right here unless an outer lock is still held, then by that
+}
+
 OwDev::OwDev(std::string rom)
 {
-	this->rom = rom;
+	this->rom = std::move(rom);
 	poll_interval = 0;
 	id = 0;
 	update();
@@ -28,6 +71,7 @@ OwDev::OwDev(std::string rom)
 
 json OwDev::to_json() const
 {
+	auto lk = lock();
 	return json{
 		{"type", type},
 		{"bus", bus},
@@ -40,6 +84,7 @@ json OwDev::to_json() const
 
 void OwDev::from_json(const json& j)
 {
+	auto lk = lock();
 	j.at("bus").get_to(bus); // TODO throw exception if bus is out of range
 	j.at("rom").get_to(rom);
 	j.at("id").get_to(id);
@@ -106,6 +151,7 @@ void OwDev::update()
 // back to DS_INIT, which would defeat begin()'s own once-only guard.
 void OwDev::init()
 {
+	auto lk = lock();
 	if (state == DS_RUNNING)
 		return;
 	update();
@@ -114,7 +160,9 @@ void OwDev::init()
 
 void OwDev::begin(DS2482 *ds, bool soft)
 {
-	//std::lock_guard<std::mutex> lock(ds->mtx);
+	auto lk = lock();
+
+	// coverity[missing_lock] - set once at bring-up, under the device lock
 	this->ds = ds;
 	if (state == DS_RUNNING || state == DS_STALE)
 		return;
@@ -130,6 +178,7 @@ void OwDev::begin(DS2482 *ds, bool soft)
 // (and this default) never need to check it themselves.
 int OwDev::poll_check()
 {
+	auto lk = lock();
 	if (poll_interval == 0)
 		// no polling
 		return -1;
@@ -154,6 +203,7 @@ int OwDev::poll()
 
 int OwDev::poll_next()
 {
+	auto lk = lock();
 	if (poll_interval == 0)
 		// no polling
 		return -1;
@@ -166,6 +216,7 @@ int OwDev::poll_next()
 
 int OwDev::fs_attr(std::string& path) const
 {
+	auto lk = lock();
 	if (path.length() == 0)
 		return 0;
 	for (const auto& s : generic) {
@@ -200,6 +251,7 @@ std::vector<std::string> OwDev::fs_dir(string& path) const
 
 int OwDev::fs_read(string& path, char* buf, size_t size, bool uncached)
 {
+	auto lk = lock();
 	(void)uncached;
 
 	if (path.find("name") != string::npos) {
@@ -221,6 +273,7 @@ int OwDev::fs_read(string& path, char* buf, size_t size, bool uncached)
 
 int OwDev::fs_write(string& path, const char* buf, size_t size)
 {
+	auto lk = lock();
 	if (path.find("name") != string::npos) {
 		name.assign(buf, size - 1); // Exclude \n terminator
 	}

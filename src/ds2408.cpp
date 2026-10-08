@@ -1,6 +1,7 @@
 #include <fstream>
 #include <iostream>
 #include <algorithm>
+#include <cctype>
 #include <sstream>
 #include <string>
 #include <fuse3/fuse.h>
@@ -28,15 +29,17 @@ const FsEntry<ds2408> ds2408::table[] = {
 	{ "PIO.*", 3, 8, false, &ds2408::vis_pio, nullptr, &ds2408::r_pio, &ds2408::w_pio },
 	{ "sensed.*", 2, 8, false, &ds2408::vis_sensed, nullptr, &ds2408::r_sensed, nullptr },
 	{ "latched.*", 2, 8, false, &ds2408::vis_latched, nullptr, &ds2408::r_latched, &ds2408::w_latched },
-	{ "cfg", 3 * CFG_SIZE, 0, false, nullptr, nullptr, &ds2408::r_cfg, &ds2408::w_cfg },
+	{ "cfg", 3 * DS2408_CFG_SIZE, 0, false, nullptr, nullptr, &ds2408::r_cfg, &ds2408::w_cfg },
 	{ "pin.*/name", PIN_NAME_MAX, 8, false, nullptr, nullptr, &ds2408::r_pin_name, &ds2408::w_pin_name },
 	{ "pin.*/func", 20, 8, false, nullptr, nullptr, &ds2408::r_pin_func, &ds2408::w_pin_func },
 	{ "threshold", 3, 0, false, nullptr, nullptr, &ds2408::r_threshold, &ds2408::w_threshold },
 	{ "brightness", 3, 0, false, nullptr, nullptr, &ds2408::r_brightness, &ds2408::w_brightness },
+	{ "level.*", 3, 8, false, &ds2408::vis_level, nullptr, &ds2408::r_level, &ds2408::w_level },
 };
 const size_t ds2408::n_table = sizeof(ds2408::table) / sizeof(ds2408::table[0]);
 
 json ds2408::to_json() const {
+	auto lk = lock();
 	json j = OwDev::to_json(); // Get base class fields
 	// Add ds2408 specific fields
 	j["cfg"] = cfg;
@@ -48,6 +51,7 @@ json ds2408::to_json() const {
 };
 
 void ds2408::from_json(const json& j) {
+	auto lk = lock();
 	OwDev::from_json(j); // Delegate common fields to base
 	if (j.contains("cfg")) {
 		j.at("cfg").get_to(cfg);
@@ -67,9 +71,14 @@ void ds2408::from_json(const json& j) {
 }
 
 // --- fs_table.h handlers -----------------------------------------------
+// The fs_table.h handlers below are only called from fs_read()/
+// fs_write()/fs_dir(), which already hold the device lock. They take it
+// again (it is recursive) because static analysis cannot follow the call
+// through the table's member pointers and would see unguarded access.
 
 int ds2408::r_byte(char* buf, size_t, bool uncached, int)
 {
+	auto lk = lock();
 	if (uncached)
 		reg_read(false);
 	std::sprintf(buf, "%d", data[PIO_OUT]);
@@ -78,6 +87,7 @@ int ds2408::r_byte(char* buf, size_t, bool uncached, int)
 
 int ds2408::w_byte(const char* buf, size_t size, int)
 {
+	auto lk = lock();
 	try {
 		uint8_t tmp = (uint8_t)(std::stoi(buf) & 0xff);
 		pio_set(tmp);
@@ -91,8 +101,9 @@ int ds2408::w_byte(const char* buf, size_t size, int)
 
 int ds2408::r_pio(char* buf, size_t, bool, int idx)
 {
+	auto lk = lock();
 	if (cfg[CFG_PIN_ID + idx] == CFG_OUT_PWM)
-		std::sprintf(buf, "%d", level);
+		std::sprintf(buf, "%d", level_pct[idx]);
 	else
 		// inverted: 1 = OFF (output latch bit 0), 0 = ON (latch bit 1)
 		std::sprintf(buf, "%d", (data[PIO_OUT] & (0x1 << idx)) ? 0 : 1);
@@ -101,6 +112,7 @@ int ds2408::r_pio(char* buf, size_t, bool, int idx)
 
 int ds2408::w_pio(const char* buf, size_t size, int idx)
 {
+	auto lk = lock();
 	try {
 		uint8_t tmp = (uint8_t)(std::stoi(buf) & 0xff);
 		logger.verbose(std::format("set PIO.{} = {}", idx, tmp));
@@ -117,6 +129,7 @@ int ds2408::w_pio(const char* buf, size_t size, int idx)
 
 int ds2408::r_sensed(char* buf, size_t, bool, int idx)
 {
+	auto lk = lock();
 	/* sensed from register 0x88 */
 	std::sprintf(buf, "%d", (data[PIO_LS] & (0x1 << idx)) ? 1 : 0);
 	return std::strlen(buf);
@@ -124,29 +137,47 @@ int ds2408::r_sensed(char* buf, size_t, bool, int idx)
 
 int ds2408::r_latched(char* buf, size_t, bool, int idx)
 {
-	/* read activity latch from register 0x8A */
-	std::sprintf(buf, "%d", (data[PIO_LATCH] & (0x1 << idx)) ? 1 : 0);
+	auto lk = lock();
+	/* activity latch as collected by the alarm handling, alarm_read() */
+	std::sprintf(buf, "%d", (latched & (0x1 << idx)) ? 1 : 0);
 	return std::strlen(buf);
 }
 
-int ds2408::w_latched(const char*, size_t size, int)
+// Writing 0 to any latched.N clears all latches of the device and its
+// alarm flag, which also drops it from /alarm. Nothing else clears them.
+int ds2408::w_latched(const char* buf, size_t size, int)
 {
-	// writing anything here clears the activity latches
-	// coverity[sleep] - bus mutex must be held for the whole 1-Wire
-	// transaction; see latch_reset()
-	std::lock_guard<std::mutex> lock(ds->mtx);
-	latch_reset();
+	auto lk = lock();
+	std::string s(buf, size);
+
+	// a C string's NUL, or the newline of a shell redirect
+	s = s.substr(0, s.find('\0'));
+	while (!s.empty() && std::isspace((unsigned char)s.back()))
+		s.pop_back();
+	if (s != "0")
+		return -EINVAL;
+	if (data[PIO_LATCH] != 0) {
+		logger.verbose(rom + " latch reset: cleared from the file system");
+		// coverity[sleep] - bus mutex must be held for the whole 1-Wire
+		// transaction; see latch_reset()
+		std::lock_guard<std::mutex> lock(ds->mtx);
+		latch_reset();
+	}
 	data[PIO_LATCH] = 0;
+	latched = 0;
+	alarm = false;
 	return size;
 }
 
 int ds2408::r_cfg(char* buf, size_t size, bool uncached, int)
 {
+	auto lk = lock();
 	if (uncached)
+		// coverity[sleep] - bus mutex must be held
 		if (cfg_read() == -1)
 			return -EAGAIN;
 	//   |CRC |  RES    |SW   1    2    3    4    5    6    7   | CFG  1    2    3    4    5    6    7  |FEA |OFF |MAJ |MIN |TYP |   OFF   |   FACT  |S   |IO  |TH  |TL  |TYP |THR |DIMD|DIMU|DIF |TM1 |TM2 |SWA0|SWA1|SWA2|SWA3|SWA4|SWA5|SWA6.
-	for (int i = 0; i < CFG_SIZE && (size_t)((i + 1) * 3) < size - 1; i++) {
+	for (int i = 0; i < DS2408_CFG_SIZE && (size_t)((i + 1) * 3) < size - 1; i++) {
 		std::sprintf(buf + i * 3, "%02X ", cfg[i]);
 	}
 	return std::strlen(buf);
@@ -157,13 +188,14 @@ int ds2408::r_cfg(char* buf, size_t size, bool uncached, int)
 // r_cfg() prints, so its output can be written back as is
 int ds2408::w_cfg(const char* buf, size_t size, int)
 {
-	uint8_t tmp[CFG_SIZE];
+	auto lk = lock();
+	uint8_t tmp[DS2408_CFG_SIZE];
 	int len = 0;
 	std::istringstream in(std::string(buf, size));
 	std::string tok;
 
 	while (in >> tok) {
-		if (len == CFG_SIZE || tok.size() > 2
+		if (len == DS2408_CFG_SIZE || tok.size() > 2
 				|| !std::all_of(tok.begin(), tok.end(), ::isxdigit))
 			return -EINVAL;
 		tmp[len++] = (uint8_t)std::stoul(tok, nullptr, 16);
@@ -171,6 +203,7 @@ int ds2408::w_cfg(const char* buf, size_t size, int)
 	if (len == 0)
 		return -EINVAL;
 
+	// coverity[sleep] - bus mutex must be held
 	if (cfg_write(tmp, len) != len)
 		return -EAGAIN;
 	return size;
@@ -178,6 +211,7 @@ int ds2408::w_cfg(const char* buf, size_t size, int)
 
 int ds2408::r_pin_name(char* buf, size_t size, bool, int idx)
 {
+	auto lk = lock();
 	if (pin_name[idx].empty())
 		std::snprintf(buf, size, "PIO.%d", idx);
 	else
@@ -190,6 +224,7 @@ int ds2408::r_pin_name(char* buf, size_t size, bool, int idx)
 // name resets the pin to its default.
 int ds2408::w_pin_name(const char* buf, size_t size, int idx)
 {
+	auto lk = lock();
 	std::string s(buf, size);
 
 	// trim the newline a shell redirect adds, or a C string's NUL
@@ -203,6 +238,7 @@ int ds2408::w_pin_name(const char* buf, size_t size, int idx)
 
 int ds2408::r_pin_func(char* buf, size_t, bool, int idx)
 {
+	auto lk = lock();
 	switch(cfg[CFG_PIN_ID + idx]) {
 		case 0x21:
 			std::sprintf(buf, "OUT");
@@ -237,6 +273,7 @@ int ds2408::r_pin_func(char* buf, size_t, bool, int idx)
 
 int ds2408::w_pin_func(const char* buf, size_t size, int idx)
 {
+	auto lk = lock();
 	try {
 		uint8_t tmp = (uint8_t)(std::stoi(buf) & 0xff);
 		cfg[CFG_PIN_ID + idx] = tmp;
@@ -250,12 +287,14 @@ int ds2408::w_pin_func(const char* buf, size_t size, int idx)
 
 int ds2408::r_threshold(char* buf, size_t, bool, int)
 {
+	auto lk = lock();
 	std::sprintf(buf, "%d", threshold);
 	return std::strlen(buf);
 }
 
 int ds2408::w_threshold(const char* buf, size_t size, int)
 {
+	auto lk = lock();
 	try {
 		uint8_t tmp = (uint8_t)(std::stoi(buf) & 0xff);
 		if (threshold_set(tmp) == 0)
@@ -270,12 +309,14 @@ int ds2408::w_threshold(const char* buf, size_t size, int)
 
 int ds2408::r_brightness(char* buf, size_t, bool, int)
 {
+	auto lk = lock();
 	std::sprintf(buf, "%d", brightness);
 	return std::strlen(buf);
 }
 
 int ds2408::w_brightness(const char* buf, size_t size, int)
 {
+	auto lk = lock();
 	try {
 		uint8_t tmp = (uint8_t)(std::stoi(buf) & 0xff);
 		if (brightness_set(tmp) == 0)
@@ -290,6 +331,7 @@ int ds2408::w_brightness(const char* buf, size_t size, int)
 
 bool ds2408::vis_pio(int idx) const
 {
+	auto lk = lock();
 	switch (cfg[CFG_PIN_ID + idx]) {
 		case 0xff:
 		case 0:
@@ -299,8 +341,50 @@ bool ds2408::vis_pio(int idx) const
 	}
 }
 
+bool ds2408::vis_level(int idx) const
+{
+	auto lk = lock();
+	return cfg[CFG_PIN_ID + idx] == CFG_OUT_PWM;
+}
+
+// level.* is the PWM level in percent, 0 = off .. 100 = full on, handed
+// to level_set() as is.
+int ds2408::r_level(char* buf, size_t, bool, int idx)
+{
+	auto lk = lock();
+	// readable only where it is listed, see vis_level()
+	if (!vis_level(idx))
+		return -ENOENT;
+	std::sprintf(buf, "%d", level_pct[idx]);
+	return std::strlen(buf);
+}
+
+int ds2408::w_level(const char* buf, size_t size, int idx)
+{
+	auto lk = lock();
+	int pct;
+
+	if (!vis_level(idx))
+		return -ENOENT;
+	try {
+		pct = std::stoi(std::string(buf, size));
+	} catch (const std::invalid_argument&) {
+		return -EINVAL;
+	} catch (const std::out_of_range&) {
+		return -EINVAL;
+	}
+	if (pct < 0 || pct > 100)
+		return -EINVAL;
+
+	if (level_set((uint8_t)idx, (uint8_t)pct) != 0xAA)
+		return -EAGAIN;
+
+	return size;
+}
+
 bool ds2408::vis_sensed(int idx) const
 {
+	auto lk = lock();
 	switch (cfg[CFG_PIN_ID + idx]) {
 		case 0xff:
 		case 0:
@@ -312,6 +396,7 @@ bool ds2408::vis_sensed(int idx) const
 
 bool ds2408::vis_latched(int idx) const
 {
+	auto lk = lock();
 	switch (cfg[CFG_PIN_ID + idx]) {
 		case 0xff:
 		case 0:
@@ -325,6 +410,7 @@ bool ds2408::vis_latched(int idx) const
 
 std::vector<std::string> ds2408::fs_dir(string& path) const
 {
+	auto lk = lock();
 	if (fs_table::in_instance_dir(table, n_table, path))
 		return fs_table::dir(*this, table, n_table, path);
 
@@ -336,6 +422,7 @@ std::vector<std::string> ds2408::fs_dir(string& path) const
 
 int ds2408::fs_attr(std::string& path) const
 {
+	auto lk = lock();
 	int r = fs_table::attr(*this, table, n_table, path);
 	if (r != fs_table::NOT_FOUND)
 		return r;
@@ -344,6 +431,7 @@ int ds2408::fs_attr(std::string& path) const
 
 int ds2408::fs_read(string& path, char* buf, size_t size, bool uncached)
 {
+	auto lk = lock();
 	int r = fs_table::read(*this, table, n_table, path, buf, size, uncached);
 	if (r != fs_table::NOT_FOUND) {
 		return r;
@@ -353,6 +441,7 @@ int ds2408::fs_read(string& path, char* buf, size_t size, bool uncached)
 
 int ds2408::fs_write(string& path, const char* buf, size_t size)
 {
+	auto lk = lock();
 	int r = fs_table::write(*this, table, n_table, path, buf, size);
 	if (r != fs_table::NOT_FOUND)
 		return r;
@@ -361,6 +450,7 @@ int ds2408::fs_write(string& path, const char* buf, size_t size)
 
 void ds2408::begin(bool soft)
 {
+	auto lk = lock();
 	if (soft)
 		return;
 	// if not soft read regs, cfg ...
@@ -371,6 +461,7 @@ void ds2408::begin(bool soft)
 
 uint8_t ds2408::latch_reset()
 {
+	auto lk = lock();
 	uint8_t retry, tmp;
 	bool res;
 #ifdef USE_I2C
@@ -379,18 +470,29 @@ uint8_t ds2408::latch_reset()
 	retry = LATCH_RESET_RETRY - 1;
 	do {
 		tmp = 0xff;
-		res = ds->reset();
+		// select this device's bus first: called on its own (w_latched)
+		// the controller may still be on whichever bus was used last,
+		// and the reset would go to a device on the wrong bus
+		res = ds->selectChannel(bus) && ds->reset();
 		if (res && ds->last_err == 0)
+			// coverity[sleep] - bus mutex must be held
 			ds->select(addr);
 		if (ds->last_err == 0)
 			ds->write (0xC3);
 		if (ds->last_err == 0)
 			tmp = ds->read();
 #ifndef USE_I2C
+		// simulated bus: behave like a successful reset
+		data[PIO_LATCH] = 0;
 		return 0xaa;
 #else
-		if (tmp == 0xAA)
+		// data[PIO_LATCH] mirrors the device: cleared once its latch
+		// is. Whoever needs the latches takes a copy first, see
+		// reg_read() (last_latch) and alarm_read().
+		if (tmp == 0xAA) {
+			data[PIO_LATCH] = 0;
 			break;
+		}
 		if (ds->last_err != 0) {
 			err = ds->last_err;
 		}
@@ -408,14 +510,25 @@ uint8_t ds2408::latch_reset()
 
 uint8_t ds2408::pin_switch(uint8_t pio, enum _pio_mode state, uint8_t lvl)
 {
+	auto lk = lock();
 	//logger.log(LogLevel::DEBUG, "PIO cfg=" + std::to_string(cfg[CFG_PIN_ID + pio]));
 	// check whether this is a level or simple IO
 	if (cfg[CFG_PIN_ID + pio] == CFG_OUT_PWM) {
+		if (state == TOGGLE ) {
+			if (level_pct[pio] == 0)
+				lvl = 100;
+			else
+				lvl = 0;
+		} else if (state == OFF) {
+			lvl = 0;
+		} else if (state == ON && lvl == 0) {
+			// ON without a level, e.g. from the switch handler: full on
+			lvl = 100;
+		}
 		// TODO Toggle leads to dim stages
+		// level_set() keeps the level for readback once it is applied
 		if (level_set(pio, lvl, TMR_TYPE_ON) != 0xAA)
 			return -1;
-		// store current level in data for readback until the next write
-		level = lvl;
 	} else {
 		uint8_t tmp = 0;
 
@@ -439,10 +552,11 @@ uint8_t ds2408::pin_switch(uint8_t pio, enum _pio_mode state, uint8_t lvl)
 
 uint8_t ds2408::pio_set(uint8_t pio)
 {
+	auto lk = lock();
 	uint8_t r, retry, err = 0;
 	bool ret;
 
-	logger.debug(std::format("Set {} PIO {:#x}", name, pio));
+	logger.debug(std::format("Set {} {} PIO {:#x}", rom, name, pio));
 
 	{
 	// coverity[sleep] - bus mutex must be held for the whole 1-Wire
@@ -454,6 +568,7 @@ uint8_t ds2408::pio_set(uint8_t pio)
 			if (ret)
 				ret = ds->reset();
 			if (ret)
+				// coverity[sleep] - bus mutex must be held
 				ds->select(addr);
 			if (ds->last_err == 0)
 				ds->write (0x5A);
@@ -479,20 +594,39 @@ uint8_t ds2408::pio_set(uint8_t pio)
 		// if err && retry > 0: err = 0
 		if (r == 0xAA) {
 			// success
+			logger.verbose(rom + std::format(" latch reset: after PIO write {:#x}", pio));
 			latch_reset();
 		}
 	}
 	if (r == 0xAA && data[PIO_OUT] != pio) {
 		data[PIO_OUT] = pio;
-		json data = {
+		// sent once the device is unlocked, see OwDev::notify_change()
+		notify_change(json{
 			{"bus", bus},
 			{"type", type},
 			{"rom", rom.c_str()},
 			{"pio", pio}
-		};
-		plugins.action(ACT_DEV_CHANGE, 0, &data);
+		});
 	}
 	return r;
+}
+
+/* Register read for an alarm, called from the alarm handling. The read
+ * also resets the latches on the device, so the ones it got are handed
+ * back in latch for the caller to work on, and added to the ones kept
+ * for latched.* (a second alarm before they were cleared does not lose
+ * the first). The device is flagged for /alarm. Returns what
+ * reg_read() returns. */
+uint8_t ds2408::alarm_read(uint8_t& latch)
+{
+	auto lk = lock();
+	uint8_t res = reg_read(true);
+
+	latch = last_latch;
+	if ((res == 0xaa || res == 0xff) && latch != 0xff)
+		latched |= latch;
+	alarm = true;
+	return res;
 }
 
 /* Read DS2408 registers
@@ -511,6 +645,7 @@ uint8_t ds2408::pio_set(uint8_t pio)
  * */
 uint8_t ds2408::reg_read(bool latch_reset)
 {
+	auto lk = lock();
 	uint8_t tmp, err = 0;
 	uint8_t retry = REG_RETRY - 1;
 	bool ret;
@@ -544,9 +679,9 @@ uint8_t ds2408::reg_read(bool latch_reset)
 #else
 		uint8_t dummy[10];
 		ds->read (dummy, 10);
+		data[STAT] = 0x00;
 #endif
 		/* check for valid status register */
-		data[STAT] = 0x00;
 		if (data[STAT] != 0xff)
 			break;
 		if (err == 0)
@@ -559,33 +694,53 @@ uint8_t ds2408::reg_read(bool latch_reset)
 		if ((retry == 0 || data[STAT] == 0xff) && !latch_reset)
 			return 0xff;
 	}
-	// clear the alarm status
-	tmp = this->latch_reset();
+	// clear the alarm status, only when asked: any other read (e.g. an
+	// uncached BYTE) must not swallow latches an alarm has not read yet
+	// copy before the reset below clears data[PIO_LATCH]
+	last_latch = data[PIO_LATCH];
+	if (latch_reset) {
+		logger.verbose(rom + std::format(" latch reset: after register read, LATCH={:#x}", data[PIO_LATCH]));
+		tmp = this->latch_reset();
+	} else {
+		tmp = 0xaa;
+	}
 
-	logger.verbose(rom + " " + std::format(" read_regs OUT={:#x} LS={:#x} LATCH={:#x} STAT={:#x}", data[PIO_OUT], data[PIO_LS], data[PIO_LATCH], data[STAT]));
+	logger.verbose(rom + " " + std::format(" read_regs OUT={:#x} LS={:#x} LATCH={:#x} STAT={:#x}", data[PIO_OUT], data[PIO_LS], last_latch, data[STAT]));
+	if (data[STAT] & 0x40) {
+		/* status in 5 signals a dimming down */
+		level_pct[0] = 0;
+	}
+
 	return tmp;
 }
 
 int ds2408::cfg_read()
 {
-	int len = CFG_SIZE;
+	auto lk = lock();
+	int len = DS2408_CFG_SIZE;
 
 #ifdef USE_I2C
 	int i;
+	uint8_t tmp[DS2408_CFG_SIZE];
 
-	std::lock_guard<std::mutex> lock(ds->mtx);
-	// coverity[sleep]
-	if (!ds->selectChannel(bus))
-		return -1;
-	ds->reset();
-	// coverity[sleep]
-	ds->select(addr);
-	// coverity[sleep]
-	ds->write (0x85);
-
-	for (i = 0; i < CFG_SIZE - 1; i++)
+	// the bus lock only for the transfer, cfg is the device's data and
+	// updated below under the device lock alone
+	{
+		std::lock_guard<std::mutex> lock(ds->mtx);
 		// coverity[sleep]
-		cfg[i] = ds->read ();
+		if (!ds->selectChannel(bus))
+			return -1;
+		ds->reset();
+		// coverity[sleep]
+		ds->select(addr);
+		// coverity[sleep]
+		ds->write (0x85);
+
+		for (i = 0; i < DS2408_CFG_SIZE - 1; i++)
+			// coverity[sleep]
+			tmp[i] = ds->read ();
+	}
+	std::memcpy(cfg, tmp, DS2408_CFG_SIZE - 1);
 #endif
 	return len;
 }
@@ -593,29 +748,35 @@ int ds2408::cfg_read()
 // Writes len bytes of data to the device config, starting at cfg[0].
 // Only once that succeeded they are also taken over into this->cfg, so
 // the cached copy always matches the device.
+// storing the data into EERPOM is done by the device itself, if
+// len = DS2408_CFG_SIZE;
+// data[21] = 0x55;
 int ds2408::cfg_write(const uint8_t* data, int len)
 {
+	auto lk = lock();
 	int i;
 
-	if (len > CFG_SIZE)
-		len = CFG_SIZE;
+	if (len > DS2408_CFG_SIZE)
+		len = DS2408_CFG_SIZE;
 
 	// bus mutex must be held for the whole 1-Wire
 	// transaction: the transfer needs exclusive access to the shared
 	// bus for its full duration, so releasing the lock mid-transfer
 	// isn't an option here
-	std::lock_guard<std::mutex> lock(ds->mtx);
+	{
+		std::lock_guard<std::mutex> lock(ds->mtx);
 
-	// coverity[sleep] - bus mutex must be held
-	if (!ds->selectChannel(bus))
-		return -1;
-	ds->reset();
-	ds->select(addr);
-	ds->write (0x86);
+		// coverity[sleep] - bus mutex must be held
+		if (!ds->selectChannel(bus))
+			return -1;
+		ds->reset();
+		// coverity[sleep] - bus mutex must be held
+		ds->select(addr);
+		ds->write (0x86);
 
-	for (i = 0; i < len - 1; i++)
-		ds->write(data[i]);
-
+		for (i = 0; i < len - 1; i++)
+			ds->write(data[i]);
+	}
 	// data may be this->cfg itself, just written back
 	if (data != cfg)
 		std::memcpy(cfg, data, len);
@@ -623,27 +784,41 @@ int ds2408::cfg_write(const uint8_t* data, int len)
 }
 
 /*
+	level: 0..100 percent, larger values are taken as 100. The device
+	takes 0..254, so it is converted here, like the Arduino host did in
+	SwitchHandler::setLevel() before calling ds2408xPinSet().
+	The level a TMR_TYPE_ON sets is kept per pin in level_pct once the
+	device confirmed it, for everyone calling this - level.*, PIO.* and
+	the switch handler through pin_switch() - to read back.
 	cmd:
 	- TMR_TYPE_BRIGHTNESS: set current brightness: level_set(0, 0, 0xE3, light)
 	- TMR_TYPE_THRESHOLD
 */
 uint8_t ds2408::level_set(uint8_t pio, uint8_t level, uint8_t cmd, uint8_t val)
 {
+	auto lk = lock();
+	uint8_t pct = level > 100 ? 100 : level;
+
+	level = (uint8_t)(pct * 254 / 100);
 #ifdef USE_I2C
 	uint8_t data[5] = { 0xC5, cmd, pio, val, level };
 	uint16_t crc;
 #endif
-	logger.log(LogLevel::DEBUG, "set PIO level=" + std::to_string(level) + " for PIO " + std::to_string(pio));
+	logger.log(LogLevel::DEBUG, "set PIO level=" + std::to_string(pct) + "% (" + std::to_string(level) + ") for PIO " + std::to_string(pio));
 
 #ifndef USE_I2C
-	(void)cmd;
 	(void)val;
+	if (cmd == TMR_TYPE_ON)
+		level_pct[pio] = pct;
 	return 0xaa;
 #else
 	/* if setting any level, a level 0 means stop */
-	if (level == 0 && cmd == 0xDD)
-		/* dim down */
-		data[1] = TMR_TYPE_STOP_DIM;
+	if (cmd == TMR_TYPE_ON) {
+		if (level == 0)
+			/* dim down */
+			data[1] = TMR_TYPE_STOP_DIM;
+		data[3] = level;
+	}
 	logger.debug(std::format("send cmd {:#x} {:#x} {:#x} {:#x}", data[1], data[2], data[3], data[4]));
 	// coverity[sleep] - bus mutex must be held for the whole 1-Wire
 	// transaction
@@ -656,6 +831,7 @@ uint8_t ds2408::level_set(uint8_t pio, uint8_t level, uint8_t cmd, uint8_t val)
 	if (!ds->reset())
 		return 0xff;
 
+	// coverity[sleep] - bus mutex must be held
 	ds->select(addr);
 	for (int i = 0; i < 5; i++) {
 		ds->write(data[i]);
@@ -668,9 +844,12 @@ uint8_t ds2408::level_set(uint8_t pio, uint8_t level, uint8_t cmd, uint8_t val)
 	crc = ds->read();
 	crc |= ds->read() << 8;
 	}
-	uint16_t crc16 = ds->crc16(data, 5, 0);
+	// no bus access, so outside the bus lock above
+	uint16_t crc16 = DS2482::crc16(data, 5, 0);
 	if (crc == static_cast<uint16_t>(~crc16)) {
 		logger.verbose(std::format("CRC ok {:#x}", crc));
+		if (cmd == TMR_TYPE_ON)
+			level_pct[pio] = pct;
 		return 0xAA;
 	}
 	else
@@ -683,6 +862,7 @@ uint8_t ds2408::level_set(uint8_t pio, uint8_t level, uint8_t cmd, uint8_t val)
 
 int ds2408::brightness_set(uint8_t brightness)
 {
+	auto lk = lock();
 	this->brightness = brightness;
 	if (level_set(0, 0, TMR_TYPE_BRIGHTNESS, brightness) != 0xAA)
 		return -EAGAIN;
@@ -691,6 +871,7 @@ int ds2408::brightness_set(uint8_t brightness)
 
 int ds2408::threshold_set(uint8_t threshold)
 {
+	auto lk = lock();
 	this->threshold = threshold;
 	if (level_set(0, 0, TMR_TYPE_THRESHOLD, threshold) != 0xAA)
 		return -EAGAIN;

@@ -56,6 +56,7 @@ const FsEntry<Ard_i2c> Ard_i2c::table[] = {
 const size_t Ard_i2c::n_table = sizeof(Ard_i2c::table) / sizeof(Ard_i2c::table[0]);
 
 json Ard_i2c::to_json() const {
+	auto lk = lock();
 	json j = OwDev::to_json(); // Get base class fields
 	j["mode"] = mode; // Add specific field
 	j["power_total"] = power_total; // Add specific field
@@ -64,6 +65,7 @@ json Ard_i2c::to_json() const {
 };
 
 void Ard_i2c::from_json(const json& j) {
+	auto lk = lock();
 	OwDev::from_json(j); // Delegate common fields to base
 	if (j.contains("mode")) {
 		j.at("mode").get_to(mode);
@@ -82,7 +84,7 @@ Ard_i2c::Ard_i2c()
 	this->power_total = 0;
 }
 
-Ard_i2c::Ard_i2c(std::string rom) : OwDev(rom)
+Ard_i2c::Ard_i2c(std::string rom) : OwDev(std::move(rom))
 {
 	// initialize members (can't delegate to default when also initializing base OwDev)
 	lastSeq = 0xff;
@@ -217,6 +219,7 @@ void Ard_i2c::end()
 
 void Ard_i2c::set_mode(int mode)
 {
+	auto lk = lock();
 	this->mode = mode;
 #ifdef USE_I2C
 	int fd = open("/dev/i2c-0", O_RDWR);
@@ -251,7 +254,14 @@ int Ard_i2c::interrupt() {
 		logger.warn("Arduino open failed");
 		return -1;
 	}
-	if (mode == 0x10) {
+	// not locked as a whole: the alarm handling below locks the alarming
+	// devices, so only this device's own members are touched under lock
+	int cur_mode;
+	{
+		auto lk = lock();
+		cur_mode = mode;
+	}
+	if (cur_mode == 0x10) {
 		// read the alarm status which releases the gpio ("interrupts")
 		uint8_t status;
 		int ret = i2c_read_reg(fd, 0xA8, &status);
@@ -268,18 +278,24 @@ int Ard_i2c::interrupt() {
 		for (int bus = 0; bus < MAX_BUS; bus++) {
 			if ((buses & (1 << bus)) == 0)
 				continue;
+			// coverity[sleep] - mutex must be held
 			ow.alarmHandler(bus);
 			auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(HrClock::now() - tp);
-			if (duration < min_dur)
-				min_dur = duration;
-			if (duration > max_dur)
-				max_dur = duration;
-			sum_dur += duration;
-			dur_count++;
+			{
+				auto lk = lock();
+				if (duration < min_dur)
+					min_dur = duration;
+				if (duration > max_dur)
+					max_dur = duration;
+				sum_dur += duration;
+				dur_count++;
+			}
 			// any other alarming family on that bus
+			// coverity[sleep] - bus mutex must be held
 			ow.alarmHandler(bus, 0xff);
 		}
 		if (status & 0x10) {
+			auto lk = lock();
 			// power interval
 			power_total += 2;
 			// store time ...
@@ -292,6 +308,7 @@ int Ard_i2c::interrupt() {
 			can estimated the usage
 			*/
 			power = (int)(1000 * (3600 / diff) / 500);
+			alarm = true;
 			logger.verbose(std::format("Estimated usage: {} Watt", power));
 		}
 		// 0x40: more queued (one power impulse per read)
@@ -444,6 +461,7 @@ void Ard_i2c::events(int fd, OwDevices* ow)
 
 std::vector<std::string> Ard_i2c::fs_dir(string& path) const
 {
+	auto lk = lock();
 	std::vector<std::string> dir = OwDev::fs_dir(path);
 	std::vector<std::string> extra = fs_table::dir(*this, table, n_table, path);
 	dir.insert(dir.end(), extra.begin(), extra.end());
@@ -452,20 +470,27 @@ std::vector<std::string> Ard_i2c::fs_dir(string& path) const
 
 int Ard_i2c::fs_attr(std::string& path) const
 {
+	auto lk = lock();
 	int r = fs_table::attr(*this, table, n_table, path);
 	if (r != fs_table::NOT_FOUND)
 		return r;
 	return OwDev::fs_attr(path);
 }
 
+// The fs_table.h handlers below are only called from fs_read()/
+// fs_write()/fs_dir(), which already hold the device lock. They take it
+// again (it is recursive) because static analysis cannot follow the call
+// through the table's member pointers and would see unguarded access.
 int Ard_i2c::r_mode(char* buf, size_t, bool, int)
 {
+	auto lk = lock();
 	std::sprintf(buf, "%d", mode);
 	return std::strlen(buf);
 }
 
 int Ard_i2c::w_mode(const char* buf, size_t size, int)
 {
+	auto lk = lock();
 	try {
 		uint8_t tmp = (uint8_t)(std::stoi(buf) & 0xff);
 		logger.log(LogLevel::DEBUG, "write mode, set val=" + std::to_string(tmp));
@@ -480,18 +505,24 @@ int Ard_i2c::w_mode(const char* buf, size_t size, int)
 
 int Ard_i2c::r_power(char* buf, size_t, bool, int)
 {
+	auto lk = lock();
 	std::sprintf(buf, "%d", power);
+	alarm = false;
+
 	return std::strlen(buf);
 }
 
 int Ard_i2c::r_pow_total(char* buf, size_t, bool, int)
 {
+	auto lk = lock();
 	std::sprintf(buf, "%d", power_total);
+	alarm = false;
 	return std::strlen(buf);
 }
 
 int Ard_i2c::w_test(const char* buf, size_t size, int)
 {
+	auto lk = lock();
 	try {
 		uint8_t tmp = (uint8_t)(std::stoi(buf) & 0xff);
 		logger.log(LogLevel::DEBUG, "write test, set val=" + std::to_string(tmp));
@@ -513,6 +544,7 @@ int Ard_i2c::w_test(const char* buf, size_t size, int)
 
 int Ard_i2c::r_int_min(char* buf, size_t, bool, int)
 {
+	auto lk = lock();
 	// min_dur sits at its ::max() sentinel until the first sample
 	std::sprintf(buf, "%d", dur_count ? (int)min_dur.count() : 0);
 	return std::strlen(buf);
@@ -520,18 +552,21 @@ int Ard_i2c::r_int_min(char* buf, size_t, bool, int)
 
 int Ard_i2c::r_int_max(char* buf, size_t, bool, int)
 {
+	auto lk = lock();
 	std::sprintf(buf, "%d", (int)max_dur.count());
 	return std::strlen(buf);
 }
 
 int Ard_i2c::r_int_avg(char* buf, size_t, bool, int)
 {
+	auto lk = lock();
 	std::sprintf(buf, "%d", dur_count ? (int)(sum_dur.count() / dur_count) : 0);
 	return std::strlen(buf);
 }
 
 int Ard_i2c::fs_read(string& path, char* buf, size_t size, bool uncached)
 {
+	auto lk = lock();
 	int r = fs_table::read(*this, table, n_table, path, buf, size, uncached);
 	if (r != fs_table::NOT_FOUND)
 		return r;
@@ -540,6 +575,7 @@ int Ard_i2c::fs_read(string& path, char* buf, size_t size, bool uncached)
 
 int Ard_i2c::fs_write(string& path, const char* buf, size_t size)
 {
+	auto lk = lock();
 	int r = fs_table::write(*this, table, n_table, path, buf, size);
 	if (r != fs_table::NOT_FOUND)
 		return r;

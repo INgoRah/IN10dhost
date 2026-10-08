@@ -23,7 +23,7 @@ class Plugins {
 		std::map<string, uint64_t> hashes;
 		/* Loads lib<name>.so from a private copy - see the comment on
 		   the definition for why the copy is not optional. */
-		Plugin* plugin_init(string name);
+		Plugin* plugin_init(const string& name);
 		int init();
 		/* tears one plugin down: exit(), destroy, dlclose, drop the
 		   shadow copy. Does not touch the plugins vector. */
@@ -46,7 +46,7 @@ class Plugins {
 		   as a script. With a name, only that plugin is considered.
 		   Returns how many libraries were swapped. */
 		int reload(const string& only = string());
-		int add(string name);
+		int add(const string& name);
 		int remove(string name);
 		int load(json j);
 		json save();
