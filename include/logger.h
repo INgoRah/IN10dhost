@@ -1,6 +1,9 @@
 #ifndef _LOGGER_H
 #define _LOGGER_H
 
+#include <atomic>
+#include <chrono>
+#include <mutex>
 #include <string>
 
 enum class LogLevel {
@@ -35,9 +38,22 @@ public:
     STATIC void warn(const std::string& msg) { log(LogLevel::WARN, msg);}
     STATIC void error(const std::string& msg) { log(LogLevel::ERROR, msg);}
 
+	/* Every warning and error since the start, whatever the log level
+	   shows, and the last one of each with the time it happened - for
+	   status/health. */
+	struct Recent {
+		uint64_t count = 0;
+		std::string last;	// "" when there was none yet
+		std::chrono::system_clock::time_point when;
+	};
+	Recent warnings() const;
+	Recent errors() const;
+
 private:
     LogLevel _level = LogLevel::INFO;
     STATIC std::string levelToString(LogLevel level);
+	mutable std::mutex recent_mtx;
+	Recent recent_warn, recent_err;
 };
 
 #endif

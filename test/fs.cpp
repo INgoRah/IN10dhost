@@ -19,6 +19,7 @@
 #include "ard_i2c.h"
 #include "fs_table.h"
 #include "plugins.h"
+#include "version.h"
 #include "switch_handler.h"
 
 extern OwDevices ow;
@@ -882,24 +883,73 @@ TEST_F(FsTest, MalformedBusPaths) {
 	EXPECT_EQ(res, -ENOENT);
 }
 
-TEST_F(FsTest, LogDirectory) {
+TEST_F(FsTest, StatusDirectory) {
 	struct stat st;
 	int res;
+	char buf[1024];
+	std::vector<std::string> seen;
+	auto record = [](void* b, const char* name, const struct stat*,
+					 off_t, enum fuse_fill_dir_flags) {
+		static_cast<std::vector<std::string>*>(b)->push_back(name);
+		return 0;
+	};
+	auto has = [&](const char* n) {
+		return std::find(seen.begin(), seen.end(), n) != seen.end();
+	};
 
-	res = fs_ops.getattr("/log", &st, nullptr);
+	res = fs_ops.getattr("/status", &st, nullptr);
 	EXPECT_EQ(res, 0);
 	EXPECT_TRUE(S_ISDIR(st.st_mode));
+	// listed in the root, /log is gone
+	fs_ops.readdir("/", &seen, record, 0, nullptr, (enum fuse_readdir_flags)0);
+	EXPECT_TRUE(has("status"));
+	EXPECT_FALSE(has("log"));
+	EXPECT_EQ(fs_ops.getattr("/log", &st, nullptr), -ENOENT);
+	EXPECT_NE(fs_ops.getattr("/log/1wire.vcd", &st, nullptr), 0);
 
-	res = fs_ops.getattr("/log/1wire.vcd", &st, nullptr);
+	seen.clear();
+	res = fs_ops.readdir("/status", &seen, record, 0, nullptr, (enum fuse_readdir_flags)0);
+	EXPECT_EQ(res, 0);
+	EXPECT_TRUE(has("1wire.vcd"));
+	EXPECT_TRUE(has("version"));
+	EXPECT_TRUE(has("health"));
+
+	res = fs_ops.getattr("/status/1wire.vcd", &st, nullptr);
 	EXPECT_EQ(res, 0);
 	EXPECT_TRUE(S_ISREG(st.st_mode));
 	EXPECT_GT(st.st_size, 0);
+	EXPECT_EQ(fs_ops.open("/status/1wire.vcd", nullptr), 0);
 
-	res = fs_ops.readdir("/log", nullptr, filler, 0, nullptr, (enum fuse_readdir_flags)0);
+	// version: the release, maybe with the git hash; size matches
+	res = fs_ops.getattr("/status/version", &st, nullptr);
 	EXPECT_EQ(res, 0);
+	res = fs_ops.read("/status/version", buf, sizeof(buf), 0, nullptr);
+	EXPECT_EQ(res, st.st_size);
+	std::string v(buf);
+	EXPECT_EQ(v.rfind(IN10DFS_VERSION, 0), 0u) << v;
+	EXPECT_EQ(v.back(), '\n');
+	EXPECT_EQ(v, std::string(version_string()) + "\n");
 
-	res = fs_ops.open("/log/1wire.vcd", nullptr);
+	// health: warnings and errors are counted even when not shown
+	LogLevel lvl = logger.get_level();
+	logger.set_level(LogLevel::NONE);
+	uint64_t w0 = logger.warnings().count, e0 = logger.errors().count;
+	logger.warn("status test warning");
+	logger.error("status test error");
+	logger.set_level(lvl);
+	EXPECT_EQ(logger.warnings().count, w0 + 1);
+	EXPECT_EQ(logger.errors().count, e0 + 1);
+
+	res = fs_ops.getattr("/status/health", &st, nullptr);
 	EXPECT_EQ(res, 0);
+	res = fs_ops.read("/status/health", buf, sizeof(buf), 0, nullptr);
+	EXPECT_EQ(res, st.st_size);
+	std::string h(buf);
+	EXPECT_EQ(h.rfind("uptime ", 0), 0u) << h;
+	EXPECT_NE(h.find(std::format("\nwarnings {}\n", w0 + 1)), std::string::npos) << h;
+	EXPECT_NE(h.find(std::format("\nerrors {}\n", e0 + 1)), std::string::npos) << h;
+	EXPECT_NE(h.find(" status test warning\n"), std::string::npos) << h;
+	EXPECT_NE(h.find(" status test error\n"), std::string::npos) << h;
 }
 
 TEST_F(FsTest, ReaddirBusLevel) {
@@ -1310,6 +1360,30 @@ TEST_F(FsTest, ArduinoPower) {
 	restored.from_json(j);
 	EXPECT_EQ(restored.power_total, 4242);
 	EXPECT_EQ(restored.power, 0);
+
+	// power_total can be set, e.g. to the meter's reading (Wh)
+	res = fs_ops.write("/AD.0900F8FF6677E2/power_total", "123456\n", 7, 0, nullptr);
+	EXPECT_EQ(res, 7);
+	res = fs_ops.read("/AD.0900F8FF6677E2/power_total", buf, sizeof(buf), 0, nullptr);
+	EXPECT_STREQ(buf, "123456");
+	EXPECT_EQ(arduino->to_json()["power_total"], 123456);
+	res = fs_ops.write("/AD.0900F8FF6677E2/power_total", "0", 2, 0, nullptr);
+	EXPECT_EQ(res, 2);
+	EXPECT_EQ(arduino->power_total, 0);
+	res = fs_ops.write("/AD.0900F8FF6677E2/power_total", "99999999", 8, 0, nullptr);
+	EXPECT_EQ(res, 8);
+	res = fs_ops.read("/AD.0900F8FF6677E2/power_total", buf, sizeof(buf), 0, nullptr);
+	EXPECT_STREQ(buf, "99999999");
+	// rejected, the counter keeps its value
+	for (const char* bad : { "-1", "abc", "", "12x", "100000000", "99999999999999999999" }) {
+		res = fs_ops.write("/AD.0900F8FF6677E2/power_total", bad, strlen(bad), 0, nullptr);
+		EXPECT_EQ(res, -EINVAL) << "'" << bad << "'";
+	}
+	EXPECT_EQ(arduino->power_total, 99999999);
+	// power stays read-only
+	int power_before = arduino->power;
+	fs_ops.write("/AD.0900F8FF6677E2/power", "5", 1, 0, nullptr);
+	EXPECT_EQ(arduino->power, power_before);
 
 	arduino->power = 0;
 	arduino->power_total = 0;
@@ -1828,4 +1902,84 @@ TEST_F(FsTest, DevNameAndTypeAreCopies) {
 	EXPECT_EQ(before, "kitchen");
 	EXPECT_EQ(dev->get_name(), "a much longer hallway name");
 	fs_ops.write("/29.0701F8FE6677F4/name", "\n", 1, 0, nullptr);
+}
+
+TEST_F(FsTest, SaveConfig) {
+	namespace fsys = std::filesystem;
+	char buf[1024];
+	int res;
+	std::string old_path = ow.get_data_path();
+	int old_interval = ow.get_save_interval();
+	fsys::path file = fsys::temp_directory_path() / "in10dfs_save_test.json";
+	fsys::path tmp = file.string() + ".tmp";
+	fsys::remove(file);
+	fsys::remove_all(tmp);
+	ow.set_data_path(file.string());
+	auto saved_ok = [&]() {
+		std::ifstream in(file);
+		if (!in)
+			return false;
+		json j = json::parse(in, nullptr, false);
+		return !j.is_discarded() && j.contains("devices") && j.contains("save_interval");
+	};
+
+	// settings/save: now, a complete file, no temporary one left
+	EXPECT_EQ(fs_ops.open("/settings/save", nullptr), 0);
+	res = fs_ops.write("/settings/save", "1\n", 2, 0, nullptr);
+	EXPECT_EQ(res, 2);
+	EXPECT_TRUE(saved_ok());
+	EXPECT_FALSE(fsys::exists(tmp));
+	fs_ops.read("/status/health", buf, sizeof(buf), 0, nullptr);
+	EXPECT_EQ(std::string(buf).find("last_save -"), std::string::npos) << buf;
+	EXPECT_NE(std::string(buf).find("\nlast_save 20"), std::string::npos) << buf;
+
+	// settings/save_interval: seconds, up to a day, stored in the config
+	res = fs_ops.write("/settings/save_interval", "3600\n", 5, 0, nullptr);
+	EXPECT_EQ(res, 5);
+	res = fs_ops.read("/settings/save_interval", buf, sizeof(buf), 0, nullptr);
+	EXPECT_STREQ(buf, "3600");
+	EXPECT_EQ(fs_ops.write("/settings/save_interval", "86400", 5, 0, nullptr), 5);
+	for (const char* bad : { "86401", "-1", "abc", "", "10s" })
+		EXPECT_EQ(fs_ops.write("/settings/save_interval", bad, strlen(bad), 0, nullptr), -EINVAL) << bad;
+	EXPECT_EQ(ow.get_save_interval(), 86400);
+	ow.save();
+	{
+		std::ifstream in(file);
+		EXPECT_EQ(json::parse(in)["save_interval"], 86400);
+	}
+
+	// the timer: due after the interval, not before; 0 is off
+	ow.set_save_interval(10);
+	auto t0 = HrClock::now();
+	ow.save_poll(t0);
+	fsys::remove(file);
+	EXPECT_EQ(ow.save_poll(t0 + std::chrono::seconds(5)), 0);
+	EXPECT_FALSE(fsys::exists(file));
+	EXPECT_EQ(ow.save_poll(t0 + std::chrono::seconds(10)), 1);
+	EXPECT_TRUE(saved_ok());
+	ow.set_save_interval(0);
+	fsys::remove(file);
+	EXPECT_EQ(ow.save_poll(t0 + std::chrono::hours(48)), 0);
+	EXPECT_FALSE(fsys::exists(file));
+
+	// a failing save leaves the old file as it was
+	{
+		std::ofstream(file) << "old";
+	}
+	fsys::create_directory(tmp);	// the temporary file cannot be written
+	LogLevel lvl = logger.get_level();
+	logger.set_level(LogLevel::NONE);
+	res = fs_ops.write("/settings/save", "1", 1, 0, nullptr);
+	logger.set_level(lvl);
+	EXPECT_LT(res, 0);
+	{
+		std::ifstream in(file);
+		std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+		EXPECT_EQ(content, "old");
+	}
+	fsys::remove_all(tmp);
+	fsys::remove(file);
+
+	ow.set_data_path(old_path);
+	ow.set_save_interval(old_interval);
 }

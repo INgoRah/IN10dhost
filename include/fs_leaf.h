@@ -4,7 +4,7 @@
 #include <vector>
 #include "fs_table.h"
 
-// The leaf files with real behaviour under /settings and /log, one
+// The leaf files with real behaviour under /settings and /status, one
 // flat table keyed by their full path so each entry's '/' marks its
 // own real directory. "plugins" stays in fs.cpp's settings[] array -
 // it is a dynamic subtree fs_table.h has no way to describe.
@@ -17,7 +17,15 @@ class FsLeaf {
 		int w_log(const char* buf, size_t size, int idx);
 		int r_poll(char* buf, size_t size, bool uncached, int idx);
 		int w_poll(const char* buf, size_t size, int idx);
+		int w_save(const char* buf, size_t size, int idx);
+		int r_save_interval(char* buf, size_t size, bool uncached, int idx);
+		int w_save_interval(const char* buf, size_t size, int idx);
 		int r_1wire(char* buf, size_t size, bool uncached, int idx);
+		int r_version(char* buf, size_t size, bool uncached, int idx);
+		int version_size(int idx) const;
+		int r_health(char* buf, size_t size, bool uncached, int idx);
+		int health_size(int idx) const;
+		std::string health_text() const;
 		static const FsEntry<FsLeaf> table[];
 		static const size_t n_table;
 	public:

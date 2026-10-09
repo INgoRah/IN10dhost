@@ -354,8 +354,8 @@ static int fs_readdir(const char* path_in, void* buf, fuse_fill_dir_t filler,
 		filler(buf, "..", nullptr, 0, static_cast<fuse_fill_dir_flags>(0));
 		return 0;
 	}
-	if (strcmp(path, "/log") == 0) {
-		for (const auto& n : fsLeaf.dir(string("log")))
+	if (strcmp(path, "/status") == 0) {
+		for (const auto& n : fsLeaf.dir(string("status")))
 			filler(buf, n.c_str(), nullptr, 0, static_cast<fuse_fill_dir_flags>(0));
 		filler(buf, ".", nullptr, 0, static_cast<fuse_fill_dir_flags>(0));
 		filler(buf, "..", nullptr, 0, static_cast<fuse_fill_dir_flags>(0));

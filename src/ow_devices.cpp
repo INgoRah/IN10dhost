@@ -1,4 +1,9 @@
+#include <cerrno>
+#include <cstring>
+#include <filesystem>
 #include <fstream>
+#include <fcntl.h>
+#include <unistd.h>
 #include <iostream>
 #include <string>
 #include <system_error> // for std::system_error in alarmHandler()
@@ -54,6 +59,7 @@ void to_json(json& j, const Config& c) {
 	j = json {
 		{"version", 1},
 		{"poll", c.poll},
+		{"save_interval", c.save_interval},
 		{"bus_count", c.bus_count},
 		{"busses", c.busses},
 		{"switches", c.switches}
@@ -102,6 +108,8 @@ void from_json(const json& j, Config& c) {
 	}
 	if (j.contains("poll"))
 		c.poll = j.at("poll").get<int>();
+	if (j.contains("save_interval"))
+		c.save_interval = j.at("save_interval").get<int>();
 }
 
 OwDevices::~OwDevices() {
@@ -159,6 +167,9 @@ int OwDevices::log_dump(char* buf, size_t size)
 
 void OwDevices::load(const std::string& path) {
 	json j;
+	data_path = path;
+	// the save timer counts from the start
+	last_save_tick = HrClock::now();
 	std::ifstream file(path);
 	if (!file) {
 		throw std::runtime_error("Cannot open config file: " + path);
@@ -188,8 +199,8 @@ void OwDevices::load(const std::string& path) {
 	plugins.action(ACT_INITIALIZED, 0); // loaded
 }
 
-void OwDevices::save(const std::string& path) {
-	std::ofstream file(path);
+int OwDevices::save(const std::string& path) {
+	std::lock_guard<std::mutex> lock(save_mtx);
 	cache.version = 1;
 	// this is just for information and not used in the system
 	for (auto& b : cache.busses)
@@ -203,7 +214,80 @@ void OwDevices::save(const std::string& path) {
 	catch (const std::exception& e) {
 		logger.error("Cannot save plugins");
 	}
-	file << j.dump(4); // pretty-print with 4-space indentation
+	std::string text = j.dump(4); // pretty-print with 4-space indentation
+	text += "\n";
+
+	// the safe pattern: never write the config file in place
+	std::string tmp = path + ".tmp";
+	int fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+	if (fd < 0) {
+		int err = errno;
+		logger.error(std::format("cannot save config {}: {}", tmp, strerror(err)));
+		return -err;
+	}
+	const char* p = text.data();
+	size_t left = text.size();
+	int err = 0;
+	while (left > 0) {
+		ssize_t n = ::write(fd, p, left);
+		if (n < 0) {
+			if (errno == EINTR)
+				continue;
+			err = errno;
+			break;
+		}
+		p += n;
+		left -= n;
+	}
+	// on the disk before it replaces the old file
+	if (!err && ::fsync(fd) != 0)
+		err = errno;
+	if (::close(fd) != 0 && !err)
+		err = errno;
+	if (!err && ::rename(tmp.c_str(), path.c_str()) != 0)
+		err = errno;
+	if (err) {
+		logger.error(std::format("cannot save config {}: {}", path, strerror(err)));
+		::unlink(tmp.c_str());
+		return -err;
+	}
+	// and the rename itself
+	std::string dir = std::filesystem::path(path).parent_path().string();
+	int dfd = ::open(dir.empty() ? "." : dir.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+	if (dfd >= 0) {
+		::fsync(dfd);
+		::close(dfd);
+	}
+	saved_at = std::chrono::system_clock::now();
+	logger.verbose("config saved to " + path);
+	return 0;
+}
+
+int OwDevices::save()
+{
+	if (data_path.empty()) {
+		logger.warn("no config file to save to");
+		return -ENOENT;
+	}
+	return save(data_path);
+}
+
+int OwDevices::save_poll(HrClock::time_point now)
+{
+	int secs = cache.save_interval;
+
+	if (secs <= 0)
+		return 0;
+	if (now - last_save_tick < std::chrono::seconds(secs))
+		return 0;
+	last_save_tick = now;
+	return save() == 0 ? 1 : 0;
+}
+
+std::chrono::system_clock::time_point OwDevices::last_saved()
+{
+	std::lock_guard<std::mutex> lock(save_mtx);
+	return saved_at;
 }
 
 void OwDevices::add_device(OwDev* dev)
@@ -468,6 +552,7 @@ int OwDevices::dev_poll()
 		ds->log_event('3',cnt);
 		// off timers of timed switches, 1 second resolution
 		swHdl.timer_poll();
+		save_poll(now);
 	}
 	for (auto& dev : cache.devices) {
 		int check = dev->poll_check();
