@@ -8,6 +8,7 @@
 #include "ow_dev.h"
 #include "interface/ds2408.h"
 #include "fs_table.h"
+#include "pin_role.h"
 
 #define DS2408_CFG_SIZE 26
 /** longest pin name, same as the size its fs entry reports */
@@ -35,6 +36,10 @@ class ds2408 : public OwDev, public IDS2408 {
 		int w_pin_name(const char* buf, size_t size, int idx);
 		int r_pin_func(char* buf, size_t size, bool uncached, int idx);
 		int w_pin_func(const char* buf, size_t size, int idx);
+		int r_pin_role(char* buf, size_t size, bool uncached, int idx);
+		int w_pin_role(const char* buf, size_t size, int idx);
+		int r_pin_room(char* buf, size_t size, bool uncached, int idx);
+		int w_pin_room(const char* buf, size_t size, int idx);
 		int r_threshold(char* buf, size_t size, bool uncached, int idx);
 		int w_threshold(const char* buf, size_t size, int idx);
 		int r_brightness(char* buf, size_t size, bool uncached, int idx);
@@ -58,6 +63,10 @@ class ds2408 : public OwDev, public IDS2408 {
 		int brightness = 0;
 		// user given name per pin, empty means the default "n.<pin>"
 		std::array<std::string, 8> pin_name;
+		// what is connected to a pin and where, see pin_role.h; only
+		// kept here, never written to the device
+		std::array<PinRole, 8> pin_role{};
+		std::array<std::string, 8> pin_room;
 		// activity latches collected by alarm_read() since they were last
 		// cleared by writing to a latch.* entry; other register reads
 		// (data[PIO_LATCH]) do not change it
@@ -132,6 +141,9 @@ class ds2408 : public OwDev, public IDS2408 {
 		bool pin_is_on(uint8_t pio) const;
 		// the name given to a pin, or "PIO.<n>" while it has none
 		std::string pin_label(int pio) const;
+		PinRole role(int pio) const;
+		// the room given to a pin, empty while it has none
+		std::string room(int pio) const;
 		int brightness_set(uint8_t brightness);
 		int threshold_set(uint8_t threshold);
 		int get_brightness() const;

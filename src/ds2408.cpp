@@ -35,6 +35,8 @@ const FsEntry<ds2408> ds2408::table[] = {
 	{ "cfg", 3 * DS2408_CFG_SIZE, 0, false, nullptr, nullptr, &ds2408::r_cfg, &ds2408::w_cfg },
 	{ "pin.*/name", PIN_NAME_MAX, 8, false, nullptr, nullptr, &ds2408::r_pin_name, &ds2408::w_pin_name },
 	{ "pin.*/func", 20, 8, false, nullptr, nullptr, &ds2408::r_pin_func, &ds2408::w_pin_func },
+	{ "pin.*/role", 10, 8, false, nullptr, nullptr, &ds2408::r_pin_role, &ds2408::w_pin_role },
+	{ "pin.*/room", PIN_NAME_MAX, 8, false, nullptr, nullptr, &ds2408::r_pin_room, &ds2408::w_pin_room },
 	{ "threshold", 3, 0, false, nullptr, nullptr, &ds2408::r_threshold, &ds2408::w_threshold },
 	{ "brightness", 3, 0, false, nullptr, nullptr, &ds2408::r_brightness, &ds2408::w_brightness },
 	{ "level.*", 3, 8, false, &ds2408::vis_level, nullptr, &ds2408::r_level, &ds2408::w_level },
@@ -49,7 +51,14 @@ json ds2408::to_json() const {
 	j["cfg"] = cfg;
 	j["threshold"] = threshold;
 	j["brightness"] = brightness;
-	j["pin_names"] = pin_name;
+	j["pins"] = json::array();
+	for (size_t i = 0; i < pin_name.size(); i++) {
+		j["pins"].push_back({
+			{ "name", pin_name[i] },
+			{ "role", pin_role_str(pin_role[i]) },
+			{ "room", pin_room[i] },
+		});
+	}
 
 	return j;
 };
@@ -66,8 +75,17 @@ void ds2408::from_json(const json& j) {
 	if (j.contains("brightness")) {
 		j.at("brightness").get_to(brightness);
 	}
-	if (j.contains("pin_names")) {
-		// tolerate a shorter list, the remaining pins keep their default
+	// tolerate a shorter list, the remaining pins keep their default
+	if (j.contains("pins")) {
+		const json& pins = j.at("pins");
+		for (size_t i = 0; i < pins.size() && i < pin_name.size(); i++) {
+			const json& p = pins.at(i);
+			pin_name[i] = p.value("name", "");
+			pin_role[i] = pin_role_parse(p.value("role", "")).value_or(PinRole::none);
+			pin_room[i] = p.value("room", "");
+		}
+	} else if (j.contains("pin_names")) {
+		// older configs only stored the names
 		const json& names = j.at("pin_names");
 		for (size_t i = 0; i < names.size() && i < pin_name.size(); i++)
 			names.at(i).get_to(pin_name[i]);
@@ -320,6 +338,16 @@ int ds2408::w_cfg(const char* buf, size_t size, int)
 	return size;
 }
 
+// drops the newline a shell redirect adds, or a C string's NUL
+static std::string pin_input(const char* buf, size_t size)
+{
+	std::string s(buf, size);
+
+	while (!s.empty() && (s.back() == '\n' || s.back() == '\r' || s.back() == '\0'))
+		s.pop_back();
+	return s;
+}
+
 int ds2408::r_pin_name(char* buf, size_t size, bool, int idx)
 {
 	auto lk = lock();
@@ -343,14 +371,66 @@ std::string ds2408::pin_label(int pio) const
 int ds2408::w_pin_name(const char* buf, size_t size, int idx)
 {
 	auto lk = lock();
-	std::string s(buf, size);
+	std::string s = pin_input(buf, size);
 
-	// trim the newline a shell redirect adds, or a C string's NUL
-	while (!s.empty() && (s.back() == '\n' || s.back() == '\r' || s.back() == '\0'))
-		s.pop_back();
 	if (s.size() > PIN_NAME_MAX)
 		return -EINVAL;
 	pin_name[idx] = std::move(s);
+	return size;
+}
+
+PinRole ds2408::role(int pio) const
+{
+	auto lk = lock();
+	if (pio < 0 || pio > 7)
+		return PinRole::none;
+	return pin_role[pio];
+}
+
+std::string ds2408::room(int pio) const
+{
+	auto lk = lock();
+	if (pio < 0 || pio > 7)
+		return std::string();
+	return pin_room[pio];
+}
+
+int ds2408::r_pin_role(char* buf, size_t size, bool, int idx)
+{
+	auto lk = lock();
+	std::snprintf(buf, size, "%s", pin_role_str(pin_role[idx]));
+	return std::strlen(buf);
+}
+
+// one of the names in pin_role.h, case-insensitive; an empty write
+// resets it to "none"
+int ds2408::w_pin_role(const char* buf, size_t size, int idx)
+{
+	auto lk = lock();
+	auto r = pin_role_parse(pin_input(buf, size));
+
+	if (!r)
+		return -EINVAL;
+	pin_role[idx] = *r;
+	return size;
+}
+
+int ds2408::r_pin_room(char* buf, size_t size, bool, int idx)
+{
+	auto lk = lock();
+	std::snprintf(buf, size, "%s", pin_room[idx].c_str());
+	return std::strlen(buf);
+}
+
+// free text, an empty write clears it
+int ds2408::w_pin_room(const char* buf, size_t size, int idx)
+{
+	auto lk = lock();
+	std::string s = pin_input(buf, size);
+
+	if (s.size() > PIN_NAME_MAX)
+		return -EINVAL;
+	pin_room[idx] = std::move(s);
 	return size;
 }
 
