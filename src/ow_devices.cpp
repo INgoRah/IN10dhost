@@ -466,6 +466,8 @@ int OwDevices::dev_poll()
 		last_sec = now;
 		cnt = plugins.action(ACT_PERIODIC_SECOND);
 		ds->log_event('3',cnt);
+		// off timers of timed switches, 1 second resolution
+		swHdl.timer_poll();
 	}
 	for (auto& dev : cache.devices) {
 		int check = dev->poll_check();

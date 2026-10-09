@@ -24,7 +24,7 @@ struct _sw_tbl sw_tbl[MAX_SWITCHES];
 const FsEntry<SwitchHandler> SwitchHandler::table[] = {
 	{ "add", 32, 0, false, nullptr, nullptr, nullptr, &SwitchHandler::w_add },
 	{ "del", 32, 0, false, nullptr, nullptr, nullptr, &SwitchHandler::w_del },
-	{ "list", 1024, 0, false, nullptr, nullptr, &SwitchHandler::r_list, nullptr },
+	{ "list", 0, 0, false, nullptr, &SwitchHandler::list_size, &SwitchHandler::r_list, nullptr },
 };
 const size_t SwitchHandler::n_table = sizeof(SwitchHandler::table) / sizeof(SwitchHandler::table[0]);
 
@@ -37,7 +37,9 @@ void to_json(json& j, const _sw_tbl& b) {
 		{"dst_bus", b.dst.da.bus},
 		{"dst_adr", b.dst.da.adr},
 		{"dst_pio", b.dst.da.pio},
-		{"dst_type", b.dst.da.type}
+		{"dst_type", b.dst.da.type},
+		{"secs", b.secs},
+		{"on_press", b.on_press}
 	};
 }
 
@@ -64,6 +66,11 @@ void from_json(const json& j, _sw_tbl& b) {
 		j.at("dst_type").get_to(d);
 		b.dst.da.type = d;
 	}
+	// older configs have no timed switches
+	if (j.contains("secs"))
+		j.at("secs").get_to(b.secs);
+	if (j.contains("on_press"))
+		j.at("on_press").get_to(b.on_press);
 }
 
 bool parse_buf(std::string_view buf, struct _sw_tbl& sw)
@@ -124,6 +131,27 @@ bool parse_buf(std::string_view buf, struct _sw_tbl& sw)
 	sw.dst.da.bus = (uint8_t)(vals[3] & 0xff);
 	sw.dst.da.adr = (uint8_t)(vals[4] & 0xff);
 	sw.dst.da.pio = (uint8_t)(vals[5] & 0xff);
+
+	// optional, a timed switch: [secs] [on_press]
+	// on_press: 0 a press restarts the timer, 1 it switches off
+	// Only taken when it is a number, so other trailing text is still
+	// ignored as before.
+	int opt[2] = { 0, SW_ON_PRESS_RETRIGGER };
+	for (int i = 0; i < 2; ++i) {
+		while (ptr < end && std::isspace(*ptr)) ptr++;
+		if (ptr == end || !std::isdigit(*ptr))
+			break;
+		auto [next, ec] = std::from_chars(ptr, end, opt[i]);
+		if (ec != std::errc{})
+			break;
+		ptr = next;
+	}
+	if (opt[0] > 0xffff || opt[1] > SW_ON_PRESS_OFF) {
+		logger.warn (std::format("timed switch out of range {}", buf));
+		return false;
+	}
+	sw.secs = (uint16_t)opt[0];
+	sw.on_press = (uint8_t)opt[1];
 
 	return true;
 }
@@ -259,11 +287,112 @@ bool SwitchHandler::switchHandle(uint8_t busNr, uint8_t adr1)
 				(int)cache.switches[i].dst.da.adr,
 				(int)cache.switches[i].dst.da.pio
 			));
-			/* toggle io or select levels */
-			actor_handle(cache.switches[i].dst, TOGGLE);
+			if (cache.switches[i].secs) {
+				switch_timed(cache.switches[i]);
+			} else {
+				/* toggle io or select levels */
+				actor_handle(cache.switches[i].dst, TOGGLE);
+				// a plain button decides for good, on or off: a timer
+				// some timed button started before is done either way
+				timer_stop(cache.switches[i].dst);
+			}
 		}
 	}
 	return false;
+}
+
+bool SwitchHandler::output_on(union pio dst)
+{
+	ds2408* dev = (ds2408*)ow->find(dst.da.bus, dst.da.adr, 0x29);
+
+	return dev && dev->pin_is_on(dst.da.pio);
+}
+
+/* A press of a timed switch. Off: switches the target on and starts
+   its timer - only that starts a timer. On: depends on the switch's
+   on_press
+   - SW_ON_PRESS_OFF: switches it off (and stops its timer, if any),
+     also when something else switched it on
+   - SW_ON_PRESS_RETRIGGER: restarts its timer; when something else
+     switched it on (no timer runs) it is left on, no timer started */
+void SwitchHandler::switch_timed(const struct _sw_tbl& sw)
+{
+	if (!output_on(sw.dst)) {
+		// a timer left over from before it was switched off elsewhere
+		// must not decide below
+		timer_stop(sw.dst);
+		actor_handle(sw.dst, ON);
+		timer_start(sw.dst, sw.secs);
+		return;
+	}
+	if (sw.on_press == SW_ON_PRESS_OFF) {
+		timer_stop(sw.dst);
+		actor_handle(sw.dst, OFF);
+		return;
+	}
+	if (!timer_running(sw.dst)) {
+		logger.verbose(std::format("{}.{}.{} already on, no timer",
+			(int)sw.dst.da.bus, (int)sw.dst.da.adr, (int)sw.dst.da.pio));
+		return;
+	}
+	// retrigger: stays on, counts from now again
+	timer_start(sw.dst, sw.secs);
+}
+
+void SwitchHandler::timer_start(union pio dst, uint16_t secs)
+{
+	std::lock_guard<std::mutex> lk(timers_mtx);
+	timers[dst.data] = HrClock::now() + std::chrono::seconds(secs);
+	logger.verbose(std::format("timer {}.{}.{} off in {}s",
+		(int)dst.da.bus, (int)dst.da.adr, (int)dst.da.pio, secs));
+}
+
+bool SwitchHandler::timer_stop(union pio dst)
+{
+	std::lock_guard<std::mutex> lk(timers_mtx);
+	return timers.erase(dst.data) > 0;
+}
+
+bool SwitchHandler::timer_running(union pio dst)
+{
+	std::lock_guard<std::mutex> lk(timers_mtx);
+	return timers.count(dst.data) > 0;
+}
+
+int SwitchHandler::timer_remaining(union pio dst) const
+{
+	std::lock_guard<std::mutex> lk(timers_mtx);
+	auto it = timers.find(dst.data);
+	if (it == timers.end())
+		return -1;
+	auto left = std::chrono::duration_cast<std::chrono::seconds>(it->second - HrClock::now()).count();
+	return left > 0 ? (int)left : 0;
+}
+
+int SwitchHandler::timer_poll(HrClock::time_point now)
+{
+	std::vector<union pio> expired;
+
+	{
+		std::lock_guard<std::mutex> lk(timers_mtx);
+		for (auto it = timers.begin(); it != timers.end();) {
+			if (now >= it->second) {
+				union pio p;
+				p.data = it->first;
+				expired.push_back(p);
+				it = timers.erase(it);
+			} else {
+				++it;
+			}
+		}
+	}
+	// switched outside timers_mtx, see there
+	for (const auto& p : expired) {
+		logger.verbose(std::format("timer {}.{}.{} expired, off",
+			(int)p.da.bus, (int)p.da.adr, (int)p.da.pio));
+		actor_handle(p, OFF);
+	}
+	return (int)expired.size();
 }
 
 bool SwitchHandler::dev_alarm(uint8_t bus, uint8_t adr[8])
@@ -338,18 +467,81 @@ int SwitchHandler::fs_open(string& path) const
 	return r == fs_table::NOT_FOUND ? -ENOENT : r;
 }
 
+/* The latch as written in /switches/add: 1..8 short press, 11..18
+   long press released, 21..28 long press started (see parse_buf) */
+static int latch_code(union s_adr src)
+{
+	switch (src.sa.press) {
+		case 1: return src.sa.latch + 10;
+		case 2: return src.sa.latch + 20;
+		default: return src.sa.latch;
+	}
+}
+
+/* "<device name>, <pin name> (latch 3, long)" */
+std::string SwitchHandler::src_label(union s_adr src) const
+{
+	ds2408* dev = (ds2408*)ow->find(src.sa.bus, src.sa.adr, 0x29);
+	std::string s = dev ? dev->display_name() + ", " + dev->pin_label(src.sa.latch - 1)
+		: std::format("unknown device {}.{}", (int)src.sa.bus, (int)src.sa.adr);
+
+	s += std::format(" (latch {}", (int)src.sa.latch);
+	if (src.sa.press == 1)
+		s += ", long";
+	else if (src.sa.press == 2)
+		s += ", long started";
+	return s + ")";
+}
+
+/* "<device name>, <pin name>" */
+std::string SwitchHandler::dst_label(union pio dst) const
+{
+	ds2408* dev = (ds2408*)ow->find(dst.da.bus, dst.da.adr, 0x29);
+
+	if (!dev)
+		return std::format("unknown device {}.{}", (int)dst.da.bus, (int)dst.da.adr);
+	return dev->display_name() + ", " + dev->pin_label(dst.da.pio);
+}
+
+/* One line per switch: first how it is added (so it can be copied to
+   /switches/add or del as is), then the device and pin names and for
+   a timed switch its timing and, while it runs, the target's timer:
+
+   1.2.5 -> 2.2.1 30 0: Hallway, Button (latch 5) -> Stairs, Light (PIO.1), timed 30s, press restarts, off in 12s
+*/
+std::string SwitchHandler::list_text() const
+{
+	std::string list = std::format("{} switches\n", cache.switches.size());
+
+	for (const auto& sw : cache.switches) {
+		list += std::format("{}.{}.{} -> {}.{}.{}",
+			(int)sw.src.sa.bus, (int)sw.src.sa.adr, latch_code(sw.src),
+			(int)sw.dst.da.bus, (int)sw.dst.da.adr, (int)sw.dst.da.pio);
+		if (sw.secs)
+			list += std::format(" {} {}", sw.secs, sw.on_press);
+		list += ": " + src_label(sw.src) + " -> " + dst_label(sw.dst);
+		if (sw.secs) {
+			list += std::format(", timed {}s, press {}", sw.secs,
+				sw.on_press == SW_ON_PRESS_OFF ? "off" : "restarts");
+			int left = timer_remaining(sw.dst);
+			if (left >= 0)
+				list += std::format(", off in {}s", left);
+		}
+		list += "\n";
+	}
+	return list;
+}
+
+int SwitchHandler::list_size(int) const
+{
+	return (int)list_text().size();
+}
+
 int SwitchHandler::r_list(char* buf, size_t size, bool, int)
 {
-	std::string list;
-	list += std::format("{} switches\n", cache.switches.size());
-	for (const auto& sw : cache.switches) {
-		list += std::format("{}.{}.{} {}.{}.{} ({} {})\n",
-			sw.src.sa.bus, sw.src.sa.adr,
-			(int)(sw.src.sa.latch + sw.src.sa.press * 20),
-			sw.dst.da.bus, sw.dst.da.adr, sw.dst.da.pio,
-			sw.src.data, sw.dst.data);
-	}
-	std::strncpy(buf, list.c_str(), size);
+	std::string list = list_text();
+
+	std::snprintf(buf, size, "%s", list.c_str());
 	return std::strlen(buf);
 }
 
@@ -371,15 +563,18 @@ int SwitchHandler::w_add(const char* buf, size_t size, int)
 			if (parse_buf(std::string_view(&buf[start], i - start), sw)) {
 				start = i + 1;
 				bool exists = false;
-				for (const auto& sw_i : cache.switches) {
+				for (auto& sw_i : cache.switches) {
 					if (sw.src.data == sw_i.src.data &&
 						sw.dst.data == sw_i.dst.data) {
+						// adding it again sets its timing anew
+						sw_i.secs = sw.secs;
+						sw_i.on_press = sw.on_press;
 						exists = true;
 						break;
 					}
 				}
 				if (exists) {
-					logger.info(std::format("switch {}.{}.{} -> {}.{}.{} already exists, ignoring add",
+					logger.info(std::format("switch {}.{}.{} -> {}.{}.{} already exists, timing updated",
 						(int)sw.src.sa.bus, (int)sw.src.sa.adr, (int)sw.src.sa.latch,
 						(int)sw.dst.da.bus, (int)sw.dst.da.adr, (int)sw.dst.da.pio));
 					continue;

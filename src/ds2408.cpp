@@ -212,11 +212,18 @@ int ds2408::w_cfg(const char* buf, size_t size, int)
 int ds2408::r_pin_name(char* buf, size_t size, bool, int idx)
 {
 	auto lk = lock();
-	if (pin_name[idx].empty())
-		std::snprintf(buf, size, "PIO.%d", idx);
-	else
-		std::snprintf(buf, size, "%s", pin_name[idx].c_str());
+	std::snprintf(buf, size, "%s", pin_label(idx).c_str());
 	return std::strlen(buf);
+}
+
+std::string ds2408::pin_label(int pio) const
+{
+	auto lk = lock();
+	if (pio < 0 || pio > 7)
+		return std::string("?");
+	if (pin_name[pio].empty())
+		return std::format("PIO.{}", pio);
+	return pin_name[pio];
 }
 
 // Handled here rather than by the base class, whose fs_write() matches
@@ -506,6 +513,16 @@ uint8_t ds2408::latch_reset()
 		return 0xff;
 
 	return tmp;
+}
+
+bool ds2408::pin_is_on(uint8_t pio) const
+{
+	auto lk = lock();
+	if (pio > 7)
+		return false;
+	if (cfg[CFG_PIN_ID + pio] == CFG_OUT_PWM)
+		return level_pct[pio] > 0;
+	return (data[PIO_OUT] & (1 << pio)) == 0;
 }
 
 uint8_t ds2408::pin_switch(uint8_t pio, enum _pio_mode state, uint8_t lvl)
