@@ -35,6 +35,7 @@ class Ard_i2c : public OwDev{
 		int w_mode(const char* buf, size_t size, int idx);
 		int r_power(char* buf, size_t size, bool uncached, int idx);
 		int r_pow_total(char* buf, size_t size, bool uncached, int idx);
+		int w_pow_total(const char* buf, size_t size, int idx);
 		int w_test(const char* buf, size_t size, int idx);
 		int r_int_min(char* buf, size_t size, bool uncached, int idx);
 		int r_int_max(char* buf, size_t size, bool uncached, int idx);

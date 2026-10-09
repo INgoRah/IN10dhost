@@ -121,10 +121,10 @@ TEST_F(DevTest, add_devices)
 	EXPECT_EQ(devs.size(), 2);
 
 	// dump the recorded 1-Wire trace through the real FUSE read path
-	// (matches the size fs_getattr advertises for /log/1wire.vcd)
+	// (matches the size fs_getattr advertises for /status/1wire.vcd)
 	// buf size is AI generated
 	std::vector<char> vcd_buf(218 + 1024 * 30);
-	int vcd_res = fs_ops.read("/log/1wire.vcd", vcd_buf.data(), vcd_buf.size(), 0, nullptr);
+	int vcd_res = fs_ops.read("/status/1wire.vcd", vcd_buf.data(), vcd_buf.size(), 0, nullptr);
 	EXPECT_GT(vcd_res, 0);
 	std::ofstream out("1wire.vcd", std::ios::binary);
 	out.write(vcd_buf.data(), vcd_res);

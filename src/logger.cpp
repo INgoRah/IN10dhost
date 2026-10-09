@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <iostream>
 #include <string>
 #include <unistd.h> // for isatty
@@ -24,10 +25,30 @@ std::string Logger::levelToString(LogLevel level) {
 }
 #endif
 
+Logger::Recent Logger::warnings() const
+{
+	std::lock_guard<std::mutex> lk(recent_mtx);
+	return recent_warn;
+}
+
+Logger::Recent Logger::errors() const
+{
+	std::lock_guard<std::mutex> lk(recent_mtx);
+	return recent_err;
+}
+
 void Logger::log(LogLevel level, const std::string& msg) {
 #ifndef NO_TERM
 	bool is_terminal = isatty(STDOUT_FILENO);
 #endif
+	if (level == LogLevel::WARN || level == LogLevel::ERROR) {
+		// counted even when the level does not show them
+		std::lock_guard<std::mutex> lk(recent_mtx);
+		Recent& r = level == LogLevel::WARN ? recent_warn : recent_err;
+		r.count++;
+		r.last = msg;
+		r.when = std::chrono::system_clock::now();
+	}
 	if (_level < level) {
 		return; // Skip messages below the current log level
 	}
@@ -38,8 +59,10 @@ void Logger::log(LogLevel level, const std::string& msg) {
 	} else {
 #endif
 		// Background: Use systemd journal prefixes
-		// systemd parses "<N>" at the start of a line as priority N
-		std::cout << "<" << static_cast<int>(level) << ">" << msg << std::endl;
+		// systemd parses "<N>" at the start of a line as priority N,
+		// 0..7 only: VERBOSE (8) is logged as debug (7), an "<8>"
+		// would end up in the message text at the default priority
+		std::cout << "<" << std::min(static_cast<int>(level), 7) << ">" << msg << std::endl;
 #ifndef NO_TERM
 	}
 #endif
