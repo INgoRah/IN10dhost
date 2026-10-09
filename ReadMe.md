@@ -60,6 +60,42 @@ Full handling of arduino interrupts
 
 Full switching
 
+## saving the config
+
+The config (`data.json`, see `-d`) is saved at shutdown, on demand and,
+if set, periodically:
+
+```sh
+echo 1 > /mnt/1wire/settings/save              # save now
+echo 3600 > /mnt/1wire/settings/save_interval  # every hour, 0 = off (default), up to 86400
+```
+
+A save never overwrites the file in place: it writes `data.json.tmp`,
+syncs it to disk and renames it over `data.json`. A crash or power loss
+leaves either the old or the new file, never a broken one.
+`status/health` shows the time of the last save.
+
+## status
+
+`/status` shows how the daemon is doing:
+
+- `version`: the release from `include/version.h`, with the git commit
+  it was built from (`-dirty` for local changes) unless it is a Debian
+  package build: `0.4.0 (6aea5439)`
+- `health`: uptime in seconds, the number of warnings and errors since
+  the start (also those the log level does not show) and the last one
+  of each with its time
+- `1wire.vcd`: the recent 1-Wire bus traffic as a VCD trace
+
+```
+uptime 86400
+warnings 3
+errors 0
+last_warning 2026-10-09 08:12:03 20.0200F8FE66771E: DS2450 read result CRC mismatch
+last_error -
+last_save 2026-10-09 08:00:00
+```
+
 ## switches
 
 A switch connects a button input (latch) to an output (PIO). Add one by

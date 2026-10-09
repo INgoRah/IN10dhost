@@ -26,6 +26,7 @@
         }
     },
     "poll": 0,
+    "save_interval": 0,
     "switches": [],
     "version": 1
 }

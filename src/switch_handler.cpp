@@ -400,8 +400,11 @@ bool SwitchHandler::dev_alarm(uint8_t bus, uint8_t adr[8])
 	if (adr[0] == 0x29) {
 		uint8_t res, to = 8;
 		ds2408* dev = (ds2408*)ow->find(bus, adr[1], 0x29);
-		if (!dev)
+		if (!dev) {
+			logger.warn(std::format("Wrong Alarm ({:#x}) {}.{} {}", adr[0], bus, adr[1], adr[2]));
 			return false;
+		}
+		logger.debug(std::format("Alarm ({:#x}) {}.{} ({})", adr[0], bus, adr[1], dev->display_name()));
 		ds->log_event('1',adr[1]);
 		uint8_t stat, press;
 		{
@@ -598,7 +601,6 @@ int SwitchHandler::w_del(const char* buf, size_t size, int)
 	for (size_t i = 0; i < size; i++) {
 		if (buf[i] == '\n' || buf[i] == '\0') {
 			struct _sw_tbl sw;
-			logger.verbose(std::format("adding? {}", std::string(buf)));
 			if (parse_buf(std::string_view(&buf[start], i - start), sw)) {
 				start = i + 1;
 				for (auto it = cache.switches.begin();
