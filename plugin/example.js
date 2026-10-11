@@ -20,12 +20,15 @@ const ACT_PERIODIC_SECOND = 4;
 const ACT_ALARM_BEFORE    = 6;
 const ACT_ALARM_AFTER     = 7;
 const ACT_DEV_CHANGE      = 8;
+const ACT_DEV_WATCHDOG    = 9;
 
 /* a switch we care about, and the light it should drive */
 const BUTTON = "29.0200FDFF6677F8";
 const LAMP   = "29.0500FAFF6677FB";
 
 let seconds = 0;
+/* last brightness handed on, for a device that lost it */
+let brightness = -1;
 
 function onAction(code, val, data)
 {
@@ -54,9 +57,19 @@ function onAction(code, val, data)
             if (data.type == "ds2450") {
                 const b = Math.min(255, Math.round(data.volt_a * 51));
                 ow.log(data.rom + " brightness is now " + b);
+                brightness = b;
                 ow.brightness_set(LAMP, b);
             }
         }
+        return 1;
+
+    /* a ds2408 was reset by its watchdog; the daemon already restored
+       its outputs, levels and its last brightness/threshold - hand it
+       the current brightness instead, if there is a newer one */
+    case ACT_DEV_WATCHDOG:
+        if (data && data.rom == LAMP && brightness >= 0 &&
+            brightness != data.brightness)
+            ow.brightness_set(data.rom, brightness);
         return 1;
 
     /* once a second: read a sensor and switch the lamp on when it gets

@@ -119,24 +119,33 @@ uint8_t OwDev::crc8(const uint8_t *addr, uint8_t len)
 	return crc;
 }
 
-void OwDev::update()
+string OwDev::canonical_rom(string rom, uint8_t* addr)
 {
-	int pos;
+	uint8_t a[8] = {};
 
 	// Check if the string is long enough and doesn't already have the dot
 	if (rom.length() >= 2 && rom[2] != '.')
 		rom.insert(2, ".");
-	if (rom.length() >= (3 + 2 * 6))
-		rom.erase(3 + 2 * 6, 2);
-	addr[0] = std::strtoull(rom.substr(0, 2).c_str(), nullptr, 16);
-	pos = 3;
-	for (int i = 1; i < 7; i++) {
-		addr[i] = std::strtoull(rom.substr(pos, 2).c_str(), nullptr, 16);
-		pos += 2;
-	}
-	addr[7] = crc8 (addr, 7);
+	// a short one (a broken config) reads as zeroes, not as an
+	// exception from substr()
+	auto byte = [&rom](size_t pos) {
+		return pos < rom.size()
+			? (uint8_t)std::strtoul(rom.substr(pos, 2).c_str(), nullptr, 16) : 0;
+	};
+	a[0] = byte(0);
+	for (int i = 1, pos = 3; i < 7; i++, pos += 2)
+		a[i] = byte(pos);
+	a[7] = crc8(a, 7);
+	if (addr)
+		std::memcpy(addr, a, sizeof(a));
 
-	rom = std::format("{}{:02X}", rom, addr[7]);
+	return std::format("{:02X}.{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}",
+		a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7]);
+}
+
+void OwDev::update()
+{
+	rom = canonical_rom(rom, addr);
 	string s = rom;
 	s.erase(2, 1);
 	rom_code = std::strtoull(s.c_str(), nullptr, 16);

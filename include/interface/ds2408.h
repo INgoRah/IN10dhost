@@ -27,6 +27,9 @@
 #define PIO_LATCH 2
 /* register 5: Status */
 #define STAT 5
+/* status bits: the device was reset by its watchdog and lost its
+   outputs, levels, threshold and brightness */
+#define STAT_WATCHDOG 0x88
 /* register 6: reserved, but used for press time */
 #define PIO_TIME 6
 

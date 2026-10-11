@@ -88,6 +88,11 @@ void Cli::parse(int& argc, char* argv[])
 				// last use of value in this iteration - it is
 				// re-created at the top of every loop pass
 				data_path = std::move(value);
+		} else if (match_value_opt(argc, argv, i, nullptr, "--log-dir", value, consumed)) {
+			if (value.empty())
+				fprintf(stderr, "--log-dir requires a value, keeping '%s'\n", log_dir.c_str());
+			else
+				log_dir = std::move(value);
 		} else {
 			continue;
 		}
@@ -109,6 +114,8 @@ void Cli::print_help(const char* prog_name) const
 	printf("  -s, --soft                       Soft start (reserved, not yet acted on)\n");
 	printf("  -d, --data <path>                Path to data.json\n");
 	printf("                                   (default: <current directory>/data.json)\n");
+	printf("  --log-dir <path>                 Directory for saved 1-Wire traces\n");
+	printf("                                   (default: %s, else $HOME)\n", LOG_DIR_DEFAULT);
 	printf("  -h, --help                       Show this help, then FUSE's own help\n");
 	printf("\n");
 }

@@ -44,7 +44,8 @@ enum action_code {
 	ACT_PERIODIC_SECOND = 4,
 	ACT_ALARM_BEFORE = 6,
 	ACT_ALARM_AFTER = 7,
-	ACT_DEV_CHANGE = 8
+	ACT_DEV_CHANGE = 8,
+	ACT_DEV_WATCHDOG = 9
 };
 
 /* Payload handed to Plugin::action().
@@ -88,6 +89,11 @@ public:
 			0 - ok, nothing done and continue processing alarms (default)
 			1 - Handled, continue processing alarms
 			2 - Handled and no more action allowed, stop processing alarms
+		8 - a device changed, ev.data: bus, type, rom and the new state
+		9 - a ds2408 was reset by its watchdog, ev.val = bus number,
+		    ev.data: bus, type, rom, brightness, threshold. Its cached
+		    outputs, levels, threshold and brightness are already
+		    restored; the place to hand it a current brightness.
 	*/
 	virtual int action(const ActionEvent& ev) = 0;
 

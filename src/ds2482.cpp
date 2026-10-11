@@ -37,6 +37,7 @@
 #include <cerrno>
 #include <format>
 #include <cinttypes>
+#include <chrono>
 
 // for data logger
 #include <iostream>
@@ -70,7 +71,13 @@ typedef struct {
 	uint8_t state;
 	uint8_t data;
 } log_data;
-RingBuffer<log_data, 2048> data_log;
+#define LOG_ENTRIES 2048
+RingBuffer<log_data, LOG_ENTRIES> data_log;
+
+/* VCD header (with a 32 char date) and per entry at most
+   "#<20 digits>\n" + "b<8> a\n" + "b<8> b\n" */
+#define LOG_HEADER_MAX 300
+#define LOG_ENTRY_MAX 46
 
 
 DS2482::DS2482(const std::string& i2c_dev, int address)
@@ -116,6 +123,11 @@ void byte_to_binary_str(unsigned char byte, char* out_str) {
     out_str[8] = '\0';
 }
 
+size_t DS2482::log_size()
+{
+	return LOG_HEADER_MAX + LOG_ENTRIES * LOG_ENTRY_MAX;
+}
+
 int DS2482::log_dump(char* buf, size_t size)
 {
     char* current_ptr = buf;
@@ -146,7 +158,9 @@ int DS2482::log_dump(char* buf, size_t size)
 		}
 	};
  	// Appending VCD header blocks
-	append_to_buf("$date\n  Today, 2026\n$end\n");
+	std::string date = std::format("{:%F %T} UTC",
+		std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now()));
+	append_to_buf("$date\n  %s\n$end\n", date.c_str());
 	append_to_buf("$timescale\n  1us\n$end\n");
 	append_to_buf("$scope module 1wire $end\n");
 	// Define variables

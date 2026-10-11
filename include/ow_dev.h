@@ -54,8 +54,15 @@ class OwDev : IFs, public IDev {
 		HrClock::time_point last_poll;
 		// polling interval in seconds, 0 means no polling, default is 0
 		uint16_t poll_interval = 0;
-		uint8_t crc8(const uint8_t *addr, uint8_t len);
 	public:
+		// pure, no device state: static so canonical_rom() can use it
+		static uint8_t crc8(const uint8_t *addr, uint8_t len);
+		/* The ROM as devices carry it: "29.0200FDFF6677F8" - the dot
+		   after the family, upper case hex, and the last byte always
+		   the CRC8 of the first 7, whatever was given there (or
+		   nothing, "290200FDFF6677" works as well). addr, when given,
+		   gets the 8 bytes. */
+		static string canonical_rom(string rom, uint8_t* addr = nullptr);
 		// Timing check ("is it due?"), shared by every device type. When
 		// due, it also advances last_poll to schedule the next poll, so it
 		// may only be called once per cycle. Not virtual: derived classes

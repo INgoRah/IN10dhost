@@ -67,6 +67,11 @@ class OwDevices : public IDevices
 		HrClock::time_point last_save_tick;
 		// wall clock time of the last successful save, for status/health
 		std::chrono::system_clock::time_point saved_at{};
+		// where log_save() puts the 1-Wire traces, see set_log_dir()
+		std::string log_dir;
+		// one trace save at a time, and when the last one was written
+		std::mutex log_mtx;
+		HrClock::time_point last_log_save{};
 
 	public:
 		OwDevices(DS2482 *ds) { this->ds = ds; }
@@ -126,6 +131,17 @@ class OwDevices : public IDevices
 		std::vector<OwDev*> list_devices(int bus);
 
 		int log_dump(char* buf, size_t size);
+		/* Writes the 1-Wire trace (status/1wire.vcd) to
+		   <log dir>/1wire-<YYYYMMDD-HHMMSS>.vcd, so it survives a
+		   restart. Only the newest LOG_KEEP traces are kept. Unless
+		   forced, a save within LOG_SAVE_MIN_SECS of the last one is
+		   skipped: a device stuck in a watchdog loop must not flood
+		   the disk. Returns the file written, empty if none. */
+		std::string log_save(bool force = true);
+		/* the directory for log_save(); falls back to $HOME when it
+		   cannot be created */
+		void set_log_dir(const std::string& dir) { log_dir = dir; }
+		const std::string& get_log_dir() const { return log_dir; }
 		bool alarmHandler(uint8_t busNr, uint8_t target = 0x29);
 #if 0
 		uint8_t getVersion(uint8_t bus, uint8_t id);

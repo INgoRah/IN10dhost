@@ -1,5 +1,8 @@
 #include <cerrno>
+#include <cstdlib>
 #include <cstring>
+#include <ctime>
+#include <strings.h>
 #include <filesystem>
 #include <fstream>
 #include <fcntl.h>
@@ -163,6 +166,86 @@ void OwDevices::init_busses()
 int OwDevices::log_dump(char* buf, size_t size)
 {
 	return ds->log_dump(buf, size);
+}
+
+/* traces kept by log_save(), older ones are removed */
+#define LOG_KEEP 20
+/* minimum time between two not forced log_save() calls */
+#define LOG_SAVE_MIN_SECS 60
+
+/* log_dir, created if needed, else $HOME; empty if neither works */
+static std::filesystem::path log_target(const std::string& log_dir)
+{
+	std::error_code ec;
+
+	if (!log_dir.empty()) {
+		std::filesystem::create_directories(log_dir, ec);
+		if (std::filesystem::is_directory(log_dir, ec) &&
+		    ::access(log_dir.c_str(), W_OK) == 0)
+			return log_dir;
+	}
+	const char* home = std::getenv("HOME");
+	if (home && *home && ::access(home, W_OK) == 0)
+		return home;
+	return {};
+}
+
+/* "20261011-081203" in local time */
+static std::string file_stamp()
+{
+	time_t now = ::time(nullptr);
+	struct tm tm;
+	char buf[32];
+
+	localtime_r(&now, &tm);
+	strftime(buf, sizeof(buf), "%Y%m%d-%H%M%S", &tm);
+	return buf;
+}
+
+std::string OwDevices::log_save(bool force)
+{
+	std::lock_guard<std::mutex> lock(log_mtx);
+	auto now = HrClock::now();
+
+	if (!force && last_log_save != HrClock::time_point{} &&
+	    now - last_log_save < std::chrono::seconds(LOG_SAVE_MIN_SECS)) {
+		logger.verbose("1-Wire trace saved recently, skipped");
+		return {};
+	}
+	std::filesystem::path dir = log_target(log_dir);
+	if (dir.empty()) {
+		logger.error(std::format("no writable directory for the 1-Wire trace ({})", log_dir));
+		return {};
+	}
+
+	std::vector<char> buf(DS2482::log_size());
+	// never empty, there is always the VCD header
+	int n = ds->log_dump(buf.data(), buf.size());
+	std::filesystem::path file = dir / ("1wire-" + file_stamp() + ".vcd");
+	std::ofstream out(file, std::ios::binary | std::ios::trunc);
+	out.write(buf.data(), n);
+	out.close();
+	if (!out) {
+		logger.error("cannot write 1-Wire trace " + file.string());
+		return {};
+	}
+	last_log_save = now;
+	logger.info("1-Wire trace saved to " + file.string());
+
+	// keep the newest LOG_KEEP, the names sort by time
+	std::vector<std::filesystem::path> old;
+	std::error_code ec;
+	for (const auto& e : std::filesystem::directory_iterator(dir, ec)) {
+		std::string name = e.path().filename().string();
+		if (name.starts_with("1wire-") && name.ends_with(".vcd"))
+			old.push_back(e.path());
+	}
+	if (old.size() > LOG_KEEP) {
+		std::sort(old.begin(), old.end());
+		for (size_t i = 0; i < old.size() - LOG_KEEP; i++)
+			std::filesystem::remove(old[i], ec);
+	}
+	return file.string();
 }
 
 void OwDevices::load(const std::string& path) {
@@ -401,6 +484,12 @@ void OwDevices::update_data()
 // called after scan to creat a device if needed and
 // add it to the caches
 void OwDevices::update_device(int bus, string rom) {
+	// the ROM the device will carry: the duplicate check must use it,
+	// a wrong CRC would otherwise never match the device made before
+	string canon = OwDev::canonical_rom(rom);
+	if (rom.size() == canon.size() && strcasecmp(rom.c_str(), canon.c_str()) != 0)
+		logger.warn(std::format("device {}: CRC wrong, taken as {}", rom, canon));
+	rom = std::move(canon);
 	if (find(rom) != nullptr) {
 		logger.verbose(std::format("device {} already found", rom));
 		// dev->set_state(DS_RUNNING);

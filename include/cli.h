@@ -8,6 +8,8 @@
 
 // Default GPIO line for the Arduino interrupt, used unless overridden.
 #define GPIO_LINE_DEFAULT 6
+// Default directory for the saved 1-Wire traces, next to the plugins.
+#define LOG_DIR_DEFAULT "/opt/lib/in10dfs"
 
 class Cli {
 public:
@@ -26,6 +28,11 @@ public:
 	// one, since "current directory" is a property of the caller, not
 	// of argv.
 	std::string data_path;
+
+	// Set by --log-dir <path> or --log-dir=<path>: where the 1-Wire
+	// traces are saved (see OwDevices::log_save()). Must persist across
+	// reboots, so not /tmp.
+	std::string log_dir = LOG_DIR_DEFAULT;
 
 	// Set by -h/--help. parse() only records this; it's up to the
 	// caller to call print_help() and decide what to do next (main.cpp
@@ -48,6 +55,9 @@ public:
 	//   -d <path> | --data <path> |
 	//   -d=<path> | --data=<path>        Path to data.json (see
 	//                                     data_path above).
+	//   --log-dir <path> |
+	//   --log-dir=<path>                 Directory for saved 1-Wire
+	//                                     traces (see log_dir).
 	//   -h | --help                      Sets help_requested; left in
 	//                                     argv (not consumed) so
 	//                                     fuse_main() also prints its

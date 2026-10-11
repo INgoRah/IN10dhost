@@ -96,6 +96,25 @@ last_error -
 last_save 2026-10-09 08:00:00
 ```
 
+`1wire.vcd` only holds the last few thousand bus events and is gone
+with a restart, so it is also saved as `1wire-<YYYYMMDD-HHMMSS>.vcd`
+into `/opt/lib/in10dfs` (`--log-dir` for another one, `$HOME` if it
+cannot be written): at shutdown, when a ds2408 reports a watchdog reset
+(at most once a minute) and on demand. The newest 20 are kept.
+
+```sh
+echo 1 > /mnt/1wire/settings/vcd_save          # save the trace now
+```
+
+## ds2408 watchdog
+
+A ds2408 reset by its watchdog loses its outputs, PWM levels, threshold
+and brightness. The alarm handling notices it from the status register,
+writes the cached state back (the outputs as they were before the
+reset), counts it in `<rom>/watchdog` and hands plugins an
+`ACT_DEV_WATCHDOG` event, e.g. for a script to apply a current
+brightness (see `plugin/example.js`).
+
 ## switches
 
 A switch connects a button input (latch) to an output (PIO). Add one by

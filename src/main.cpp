@@ -282,6 +282,7 @@ string setup()
 	// also when loading fails (no file yet): settings/save and the save
 	// timer write there
 	ow.set_data_path(f);
+	ow.set_log_dir(cli.log_dir);
 	try {
 		ow.load(f.c_str());
 	}
@@ -342,6 +343,8 @@ int main(int argc, char* argv[])
 	}catch (const std::exception& e) {
 		printf("worker stopping failed with an exception: %s\n", e.what());
 	}
+	// the trace of the last minutes, for a look after the restart
+	ow.log_save();
 	try {
 		// failures are logged by save() itself
 		if (ow.save(f) != 0)

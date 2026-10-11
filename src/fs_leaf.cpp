@@ -19,6 +19,8 @@ const FsEntry<FsLeaf> FsLeaf::table[] = {
 	{ "settings/save_interval", 5, 0, false, nullptr, nullptr, &FsLeaf::r_save_interval, &FsLeaf::w_save_interval },
 	// write anything: saves the config now
 	{ "settings/save", 1, 0, false, nullptr, nullptr, nullptr, &FsLeaf::w_save },
+	// write anything: saves status/1wire.vcd to the log dir now
+	{ "settings/vcd_save", 1, 0, false, nullptr, nullptr, nullptr, &FsLeaf::w_1wire_save },
 	{ "status/version", 0, 0, false, nullptr, &FsLeaf::version_size, &FsLeaf::r_version, nullptr },
 	{ "status/health", 0, 0, false, nullptr, &FsLeaf::health_size, &FsLeaf::r_health, nullptr },
 	// TODO query the real size: ow.log_size()
@@ -108,6 +110,13 @@ int FsLeaf::w_save_interval(const char* buf, size_t size, int)
 int FsLeaf::r_1wire(char* buf, size_t size, bool, int)
 {
 	return ow.log_dump(buf, size);
+}
+
+int FsLeaf::w_1wire_save(const char*, size_t size, int)
+{
+	if (ow.log_save().empty())
+		return -EIO;
+	return size;
 }
 
 int FsLeaf::r_version(char* buf, size_t size, bool, int)

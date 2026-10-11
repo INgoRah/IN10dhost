@@ -4,6 +4,8 @@
 #include <algorithm>
 #include <vector>
 #include <fstream>
+#include <filesystem>
+#include <unistd.h>
 #include <fuse3/fuse.h>
 
 #include <gtest/gtest.h>
@@ -1423,6 +1425,110 @@ TEST_F(FsTest, Ds2450PollNotifiesPlugins) {
 
 	logger.set_level(lvl);
 	plugins.remove("faulty");
+}
+
+/* A watchdog reset reported by the status register, through the alarm
+   handling: the cached state goes back to the device and the plugins
+   hear about it. */
+TEST_F(FsTest, Ds2408Watchdog) {
+	namespace fs = std::filesystem;
+	char buf[16] = {};
+	auto watchdog = [&](const std::string& rom) {
+		std::memset(buf, 0, sizeof(buf));
+		fs_ops.read(("/" + rom + "/watchdog").c_str(), buf, sizeof(buf), 0, nullptr);
+		return std::string(buf);
+	};
+	// traces of the watchdog go here, not to the real $HOME
+	fs::path dir = fs::temp_directory_path() / std::format("in10dfs-wdt-{}", getpid());
+	std::string old_dir = ow.get_log_dir();
+	ow.set_log_dir(dir.string());
+
+	std::string rom = OwDev::canonical_rom("29.1600FDFF6677");
+	ow.update_device(2, rom);
+	ow.update_data();
+	ow.begin();
+	swHdl.begin(&ds);
+	ds2408* dev = (ds2408*)ow.find(rom);
+	ASSERT_NE(dev, nullptr);
+
+	plugins.remove("faulty");
+	plugins.load(json{ { "faulty", { { "mode", "record" } } } });
+	LogLevel lvl = logger.get_level();
+	logger.set_level(LogLevel::NONE);
+
+	// the state to restore: outputs, a PWM level, threshold, brightness
+	dev->cfg[CFG_PIN_ID + 1] = CFG_OUT_PWM;
+	EXPECT_EQ(dev->pio_set(0xF5), 0xAA);
+	EXPECT_EQ(dev->level_set(1, 40), 0xAA);
+	EXPECT_EQ(dev->threshold_set(30), 0);
+	EXPECT_EQ(dev->brightness_set(50), 0);
+	EXPECT_EQ(watchdog(rom), "0");
+
+	// the alarm read reports the watchdog: restored, counted, notified
+	dev->sim_stat = STAT_WATCHDOG;
+	EXPECT_TRUE(swHdl.dev_alarm(2, dev->addr));
+	EXPECT_FALSE(dev->watchdog_pending());
+	EXPECT_EQ(watchdog(rom), "1");
+	EXPECT_EQ(dev->data[PIO_OUT], 0xF5);
+	EXPECT_EQ(dev->level_pct[1], 40);
+	json cfg = plugins.config_of("faulty");
+	EXPECT_EQ(cfg["watchdogs"], 1);
+	EXPECT_EQ(cfg["last_watchdog"]["rom"], rom);
+	EXPECT_EQ(cfg["last_watchdog"]["type"], "ds2408");
+	EXPECT_EQ(cfg["last_watchdog"]["bus"], 2);
+	EXPECT_EQ(cfg["last_watchdog"]["brightness"], 50);
+	EXPECT_EQ(cfg["last_watchdog"]["threshold"], 30);
+
+	// still reported (firmware not clearing it): restored again, with
+	// the outputs the restore wrote
+	EXPECT_TRUE(swHdl.dev_alarm(2, dev->addr));
+	EXPECT_EQ(watchdog(rom), "2");
+	EXPECT_EQ(dev->data[PIO_OUT], 0xF5);
+
+	// gone: a plain alarm again, nothing restored
+	dev->sim_stat = 0;
+	EXPECT_TRUE(swHdl.dev_alarm(2, dev->addr));
+	EXPECT_EQ(watchdog(rom), "2");
+	EXPECT_EQ(plugins.config_of("faulty")["watchdogs"], 2);
+
+	// the device does not take the restore: reported, still counted,
+	// the plugins hear about it all the same
+	dev->sim_stat = STAT_WATCHDOG;
+	dev->sim_fail = true;
+	dev->reg_read(true);
+	EXPECT_EQ(dev->watchdog_restore(), -EAGAIN);
+	EXPECT_EQ(watchdog(rom), "3");
+	EXPECT_TRUE(swHdl.dev_alarm(2, dev->addr));
+	EXPECT_EQ(watchdog(rom), "4");
+	EXPECT_EQ(plugins.config_of("faulty")["watchdogs"], 3);
+	dev->sim_fail = false;
+	dev->sim_stat = 0;
+	dev->reg_read(true);
+	// nothing pending: no restore, no event
+	EXPECT_EQ(dev->watchdog_restore(), 0);
+	swHdl.dev_watchdog(dev);
+	EXPECT_EQ(watchdog(rom), "4");
+	EXPECT_EQ(plugins.config_of("faulty")["watchdogs"], 3);
+
+	// reset before the outputs were ever known (seen by begin()'s
+	// read): levels and the rest are restored, the outputs are not
+	std::string rom2 = OwDev::canonical_rom("29.1700FDFF6677");
+	ow.update_device(2, rom2);
+	ow.update_data();
+	ds2408* dev2 = (ds2408*)ow.find(rom2);
+	ASSERT_NE(dev2, nullptr);
+	dev2->sim_stat = STAT_WATCHDOG;
+	dev2->data[PIO_OUT] = 0x00;
+	ow.begin();
+	EXPECT_TRUE(dev2->watchdog_pending());
+	EXPECT_EQ(dev2->watchdog_restore(), 0);
+	EXPECT_EQ(dev2->data[PIO_OUT], 0x00);
+	EXPECT_EQ(watchdog(rom2), "1");
+
+	logger.set_level(lvl);
+	plugins.remove("faulty");
+	ow.set_log_dir(old_dir);
+	fs::remove_all(dir);
 }
 
 TEST_F(FsTest, Ds2408WriteCfg) {
