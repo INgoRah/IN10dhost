@@ -1792,6 +1792,140 @@ TEST_F(FsTest, Ds2408PinRoleRoom) {
 	EXPECT_EQ(dev->room(2), "");
 }
 
+// /role lists the pins by role across devices, and switches them
+TEST_F(FsTest, RoleDirs) {
+	std::vector<std::string> seen;
+	auto record = [](void* buf, const char* name, const struct stat*,
+					 off_t, enum fuse_fill_dir_flags) {
+		static_cast<std::vector<std::string>*>(buf)->push_back(name);
+		return 0;
+	};
+	auto has = [&](const char* n) {
+		return std::find(seen.begin(), seen.end(), n) != seen.end();
+	};
+	const std::string rom = "29.0701F8FE6677F4";
+	const std::string base = "/" + rom;
+	char buf[256];
+	struct stat st;
+	int res;
+
+	ow.update_device(1, rom);
+	ow.update_data();
+	// switching goes over the (simulated) bus, which needs dev->ds
+	ow.begin();
+	ds2408* dev = (ds2408*)ow.find(0x290701F8FE6677F4);
+	ASSERT_NE(dev, nullptr);
+	for (int i = 0; i < 8; i++) {
+		std::string pin = base + "/pin." + std::to_string(i);
+		fs_ops.write((pin + "/role").c_str(), "", 0, 0, nullptr);
+		fs_ops.write((pin + "/room").c_str(), "", 0, 0, nullptr);
+		fs_ops.write((pin + "/name").c_str(), "", 0, 0, nullptr);
+	}
+	// 2, 3 lights, 4 a socket, 5 an input, all outputs off
+	dev->cfg[CFG_PIN_ID + 2] = CFG_OUT_LOW;
+	dev->cfg[CFG_PIN_ID + 3] = CFG_OUT_LOW;
+	dev->cfg[CFG_PIN_ID + 4] = CFG_OUT_LOW;
+	dev->cfg[CFG_PIN_ID + 5] = CFG_PASS;
+	dev->data[PIO_OUT] = 0xff;
+	fs_ops.write((base + "/pin.2/role").c_str(), "light", 5, 0, nullptr);
+	fs_ops.write((base + "/pin.2/room").c_str(), "Kitchen", 7, 0, nullptr);
+	fs_ops.write((base + "/pin.2/name").c_str(), "Ceiling", 7, 0, nullptr);
+	fs_ops.write((base + "/pin.3/role").c_str(), "light", 5, 0, nullptr);
+	fs_ops.write((base + "/pin.4/role").c_str(), "socket", 6, 0, nullptr);
+	fs_ops.write((base + "/pin.5/role").c_str(), "contact", 7, 0, nullptr);
+
+	fs_ops.readdir("/", &seen, record, 0, nullptr, (enum fuse_readdir_flags)0);
+	EXPECT_TRUE(has("role"));
+	seen.clear();
+	res = fs_ops.getattr("/role", &st, nullptr);
+	EXPECT_EQ(res, 0);
+	EXPECT_TRUE(S_ISDIR(st.st_mode));
+	fs_ops.readdir("/role", &seen, record, 0, nullptr, (enum fuse_readdir_flags)0);
+	EXPECT_TRUE(has("light"));
+	EXPECT_TRUE(has("motion"));
+	EXPECT_FALSE(has("none"));
+	seen.clear();
+	EXPECT_EQ(fs_ops.getattr("/role/lamp", &st, nullptr), -ENOENT);
+	EXPECT_EQ(fs_ops.getattr("/role/none", &st, nullptr), -ENOENT);
+	EXPECT_EQ(fs_ops.getattr("/role/LIGHT", &st, nullptr), -ENOENT);
+	res = fs_ops.getattr("/role/light/", &st, nullptr);
+	EXPECT_EQ(res, 0);
+	EXPECT_TRUE(S_ISDIR(st.st_mode));
+
+	fs_ops.readdir("/role/light", &seen, record, 0, nullptr, (enum fuse_readdir_flags)0);
+	EXPECT_TRUE(has("all"));
+	EXPECT_TRUE(has("list"));
+	EXPECT_TRUE(has((rom + ".2").c_str()));
+	EXPECT_TRUE(has((rom + ".3").c_str()));
+	EXPECT_FALSE(has((rom + ".4").c_str()));
+	seen.clear();
+	res = fs_ops.getattr(("/role/light/" + rom + ".2").c_str(), &st, nullptr);
+	EXPECT_EQ(res, 0);
+	EXPECT_TRUE(S_ISREG(st.st_mode));
+	EXPECT_EQ(fs_ops.getattr(("/role/light/" + rom + ".4").c_str(), &st, nullptr), -ENOENT);
+	EXPECT_EQ(fs_ops.open(("/role/light/" + rom + ".2").c_str(), nullptr), 0);
+
+	memset(buf, 0, sizeof(buf));
+	res = fs_ops.read("/role/light/all", buf, sizeof(buf), 0, nullptr);
+	EXPECT_EQ(res, 1);
+	EXPECT_STREQ(buf, "0");
+
+	// master switch: both lights, not the socket
+	res = fs_ops.write("/role/light/all", "1\n", 2, 0, nullptr);
+	EXPECT_EQ(res, 2);
+	EXPECT_TRUE(dev->pin_is_on(2));
+	EXPECT_TRUE(dev->pin_is_on(3));
+	EXPECT_FALSE(dev->pin_is_on(4));
+	memset(buf, 0, sizeof(buf));
+	fs_ops.read("/role/light/all", buf, sizeof(buf), 0, nullptr);
+	EXPECT_STREQ(buf, "2");
+
+	std::string line2 = rom + ".2\ton\tKitchen\tCeiling\n";
+	std::string line3 = rom + ".3\ton\t\tPIO.3\n";
+	memset(buf, 0, sizeof(buf));
+	res = fs_ops.read("/role/light/list", buf, sizeof(buf), 0, nullptr);
+	EXPECT_EQ(std::string(buf, res), line2 + line3);
+	res = fs_ops.getattr("/role/light/list", &st, nullptr);
+	EXPECT_EQ(st.st_size, (off_t)(line2 + line3).size());
+	// read in pieces, as a long list would be
+	memset(buf, 0, sizeof(buf));
+	res = fs_ops.read("/role/light/list", buf, sizeof(buf), line2.size(), nullptr);
+	EXPECT_EQ(std::string(buf, res), line3);
+	res = fs_ops.read("/role/light/list", buf, sizeof(buf), (line2 + line3).size(), nullptr);
+	EXPECT_EQ(res, 0);
+	EXPECT_EQ(fs_ops.write("/role/light/list", "1", 1, 0, nullptr), -EPERM);
+
+	res = fs_ops.write("/role/light/all", "0", 1, 0, nullptr);
+	EXPECT_EQ(res, 1);
+	EXPECT_FALSE(dev->pin_is_on(2));
+	EXPECT_FALSE(dev->pin_is_on(3));
+	EXPECT_EQ(fs_ops.write("/role/light/all", "2", 1, 0, nullptr), -EINVAL);
+	EXPECT_EQ(fs_ops.write("/role/light/all", "on", 2, 0, nullptr), -EINVAL);
+
+	// one pin
+	res = fs_ops.write(("/role/light/" + rom + ".3").c_str(), "1", 1, 0, nullptr);
+	EXPECT_EQ(res, 1);
+	EXPECT_TRUE(dev->pin_is_on(3));
+	EXPECT_FALSE(dev->pin_is_on(2));
+	memset(buf, 0, sizeof(buf));
+	fs_ops.read(("/role/light/" + rom + ".3").c_str(), buf, sizeof(buf), 0, nullptr);
+	EXPECT_STREQ(buf, "1");
+	// an input is listed but not switched
+	fs_ops.readdir("/role/contact", &seen, record, 0, nullptr, (enum fuse_readdir_flags)0);
+	EXPECT_TRUE(has((rom + ".5").c_str()));
+	seen.clear();
+	EXPECT_EQ(fs_ops.write(("/role/contact/" + rom + ".5").c_str(), "1", 1, 0, nullptr), -EPERM);
+	EXPECT_EQ(fs_ops.write("/role/contact/all", "1", 1, 0, nullptr), 1);
+	EXPECT_EQ(fs_ops.write("/role/light", "1", 1, 0, nullptr), -EISDIR);
+
+	for (int i = 2; i <= 5; i++) {
+		std::string pin = base + "/pin." + std::to_string(i);
+		fs_ops.write((pin + "/role").c_str(), "", 0, 0, nullptr);
+		fs_ops.write((pin + "/room").c_str(), "", 0, 0, nullptr);
+		fs_ops.write((pin + "/name").c_str(), "", 0, 0, nullptr);
+	}
+}
+
 // defined in src/ow_devices.cpp, what load() uses per device
 extern std::unique_ptr<OwDev> make_device_from_json(const json& j);
 

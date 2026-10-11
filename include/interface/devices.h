@@ -1,5 +1,7 @@
 #pragma once
 #include <string>
+#include <vector>
+#include "pin_role.h"
 
 class IDev {
 public:
@@ -10,9 +12,30 @@ public:
 	virtual std::string get_name() const = 0;
 };
 
+/* A pin that was given a role, see IDevices::pins(). A copy, taken under
+   the device lock. */
+struct PinInfo {
+	std::string rom;
+	int pin;
+	/* the pin's name, "PIO.<n>" while it has none */
+	std::string name;
+	PinRole role;
+	std::string room;
+	/* configured as an output; only outputs are switched by role */
+	bool output;
+	/* an output: whether it is on as far as known; an input: its sensed
+	   level, as sensed.<n> reports it */
+	bool on;
+};
+
 class IDevices {
 public:
 	virtual ~IDevices() {};
     virtual IDev* get_dev(uint64_t targetCode) = 0;
+	/* every pin with a role, or with PinRole::none for any role */
+	virtual std::vector<PinInfo> pins(PinRole role = PinRole::none) = 0;
+	/* Switches every output pin with that role on or off, leaving the
+	   ones already there alone. Returns how many could not be
+	   switched, 0 when all went fine. */
+	virtual int role_switch(PinRole role, bool on) = 0;
 };
-

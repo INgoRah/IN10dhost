@@ -84,6 +84,13 @@ union pio {
 /** Switch the target off and stop the timer */
 #define SW_ON_PRESS_OFF 1
 
+/* Target 0.0.0 of a switch: every light off (pins with role "light",
+ * see /role), instead of one pin */
+inline bool is_all_off(union pio dst)
+{
+	return dst.da.type == TYPE_DS29X && dst.da.bus == 0 && dst.da.adr == 0 && dst.da.pio == 0;
+}
+
 struct _sw_tbl {
 	union s_adr src;
 	union pio dst;
@@ -162,6 +169,8 @@ class SwitchHandler : IFs {
 		std::map<uint16_t, HrClock::time_point> timers;
 		mutable std::mutex timers_mtx;
 		void switch_timed(const struct _sw_tbl& sw);
+		// target 0.0.0, see is_all_off()
+		void all_off();
 		bool output_on(union pio dst);
 		// fs_table.h handlers
 		int r_list(char* buf, size_t size, bool uncached, int idx);

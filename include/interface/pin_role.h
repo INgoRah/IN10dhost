@@ -1,5 +1,5 @@
-#ifndef _PIN_ROLE_H
-#define _PIN_ROLE_H
+#ifndef _IPIN_ROLE_H
+#define _IPIN_ROLE_H
 #include <algorithm>
 #include <cctype>
 #include <optional>

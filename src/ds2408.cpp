@@ -1,3 +1,4 @@
+#include <bit>
 #include <fstream>
 #include <iostream>
 #include <algorithm>
@@ -395,6 +396,48 @@ std::string ds2408::room(int pio) const
 	return pin_room[pio];
 }
 
+void ds2408::pins_get(std::vector<PinInfo>& out, PinRole r) const
+{
+	auto lk = lock();
+	for (int i = 0; i < 8; i++) {
+		if (pin_role[i] == PinRole::none || (r != PinRole::none && pin_role[i] != r))
+			continue;
+		bool output = pin_is_output(i);
+		out.push_back(PinInfo{ rom, i, pin_label(i), pin_role[i], pin_room[i], output,
+			output ? pin_is_on(i) : (data[PIO_LS] & (1 << i)) != 0 });
+	}
+}
+
+// PWM pins one by one, the plain outputs together with a single pio_set()
+int ds2408::role_switch(PinRole r, bool on)
+{
+	auto lk = lock();
+	uint8_t set = 0, clr = 0;
+	int failed = 0;
+
+	if (r == PinRole::none)
+		return 0;
+	for (int i = 0; i < 8; i++) {
+		if (pin_role[i] != r || !pin_is_output(i) || pin_is_on(i) == on)
+			continue;
+		if (cfg[CFG_PIN_ID + i] == CFG_OUT_PWM) {
+			if (pin_switch(i, on ? ON : OFF) != 0)
+				failed++;
+		} else if (on) {
+			// active low, see pin_switch()
+			clr |= 1 << i;
+		} else {
+			set |= 1 << i;
+		}
+	}
+	if (set | clr) {
+		uint8_t pio = (data[PIO_OUT] | set) & ~clr;
+		if (pio_set(pio) != 0xAA)
+			failed += std::popcount((uint8_t)(set | clr));
+	}
+	return failed;
+}
+
 int ds2408::r_pin_role(char* buf, size_t size, bool, int idx)
 {
 	auto lk = lock();
@@ -541,12 +584,20 @@ bool ds2408::vis_pio(int idx) const
 	// .ALL and .BYTE are always there, as in owfs
 	if (idx >= IDX_ALL)
 		return true;
-	switch (cfg[CFG_PIN_ID + idx]) {
+	return pin_is_output(idx);
+}
+
+bool ds2408::pin_is_output(int pio) const
+{
+	auto lk = lock();
+	if (pio < 0 || pio > 7)
+		return false;
+	switch (cfg[CFG_PIN_ID + pio]) {
 		case 0xff:
 		case 0:
 			return false;
 		default:
-			return (cfg[CFG_PIN_ID + idx] & CFG_OUT_MASK) != 0;
+			return (cfg[CFG_PIN_ID + pio] & CFG_OUT_MASK) != 0;
 	}
 }
 
@@ -830,13 +881,30 @@ uint8_t ds2408::pio_set(uint8_t pio)
 	if (r == 0xAA)
 		out_known = true;
 	if (r == 0xAA && data[PIO_OUT] != pio) {
+		uint8_t diff = data[PIO_OUT] ^ pio;
+		json changed = json::array();
+
 		data[PIO_OUT] = pio;
+		// the plain outputs that changed, with what they are, so a
+		// script can tell a light from a socket without its own table
+		for (int i = 0; i < 8; i++) {
+			if (!(diff & (1 << i)) || !pin_is_output(i) || cfg[CFG_PIN_ID + i] == CFG_OUT_PWM)
+				continue;
+			changed.push_back({
+				{"pin", i},
+				{"on", pin_is_on(i)},
+				{"name", pin_label(i)},
+				{"role", pin_role_str(pin_role[i])},
+				{"room", pin_room[i]}
+			});
+		}
 		// sent once the device is unlocked, see OwDev::notify_change()
 		notify_change(json{
 			{"bus", bus},
 			{"type", type},
 			{"rom", rom.c_str()},
-			{"pio", pio}
+			{"pio", pio},
+			{"changed", changed}
 		});
 	}
 	return r;

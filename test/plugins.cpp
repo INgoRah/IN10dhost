@@ -152,12 +152,27 @@ static std::string js_path()
 }
 
 static const char js_src[] = R"JS(
+		var last = null;
 		function onAction(code, val, data) {
 			switch (code) {
 			case 3:                     /* ACT_READY */
 				return 7;
 			case 8:                     /* ACT_DEV_CHANGE */
+				last = data;
 				return data ? data.pio : 0;
+			case 1:                     /* ACT_CFG_SAVE: what the last change carried */
+				if (!last || !last.changed || last.changed.length != 1)
+					return -1;
+				var c = last.changed[0];
+				return c.pin + (c.on ? 10 : 0) + (c.role == "light" ? 100 : 0)
+					+ (c.room == "Kitchen" ? 1000 : 0);
+			case 9:                     /* ACT_DEV_WATCHDOG: role calls */
+				if (!data || !data.role)
+					return 0;
+				var p = ow.pins(data.role);
+				return p.length + 10 * ow.pins().length
+					+ (p.length && p[0].room == "Kitchen" && p[0].output ? 100 : 0)
+					+ (ow.role_switch(data.role, data.on) ? 1000 : 0);
 			case 6:                     /* ACT_ALARM_BEFORE: throws */
 				throw new Error("boom");
 			case 7:                     /* ACT_ALARM_AFTER: never returns */
@@ -372,6 +387,65 @@ TEST(plugins, JsEngineDs2408Calls)
 	ret = plugins.action(ACT_PERIODIC_SECOND, 0, &data);
 	logger.set_level(lvl);
 	EXPECT_EQ(ret - base, 0);
+}
+
+// The roles reach scripts twice: in the change event of a ds2408, and
+// through ow.pins() / ow.role_switch()
+TEST(plugins, JsEnginePinRoles)
+{
+	if (!jsengine_available())
+		GTEST_SKIP() << "built without quickjs";
+
+	ow.init();
+	ow.update_device(1, "29.0701F8FE6677F4");
+	ow.update_data();
+	ow.begin();
+	ds2408* dev = (ds2408*)ow.find(0x290701F8FE6677F4);
+	ASSERT_NE(dev, nullptr);
+	for (int i = 0; i < 8; i++)
+		dev->cfg[CFG_PIN_ID + i] = CFG_OUT_LOW;
+	dev->data[PIO_OUT] = 0xff;
+	json j = dev->to_json();
+	json& pins = j["pins"];
+	for (auto& p : pins) {
+		p["role"] = "none";
+		p["room"] = "";
+	}
+	pins[2]["role"] = "light";
+	pins[2]["room"] = "Kitchen";
+	pins[3]["role"] = "socket";
+	dev->from_json(j);
+	load_js_once();
+	LogLevel lvl = logger.get_level();
+	logger.set_level(LogLevel::NONE);
+
+	// the last change is what the script reports for ACT_CFG_SAVE
+	plugins.action(ACT_DEV_CHANGE, 0, nullptr);
+	int base = plugins.action(ACT_CFG_SAVE) + 1;
+	dev->pio_set(0xff & ~(1 << 2));
+	EXPECT_EQ(plugins.action(ACT_CFG_SAVE) - base, 1112);
+
+	// ow.pins() and ow.role_switch() from the script
+	json data = { { "on", false } };
+	base = plugins.action(ACT_DEV_WATCHDOG, 0, &data);
+	data["role"] = "light";
+	EXPECT_EQ(plugins.action(ACT_DEV_WATCHDOG, 0, &data) - base, 1121);
+	EXPECT_FALSE(dev->pin_is_on(2));
+	data["role"] = "Socket";
+	data["on"] = true;
+	EXPECT_EQ(plugins.action(ACT_DEV_WATCHDOG, 0, &data) - base, 1021);
+	EXPECT_TRUE(dev->pin_is_on(3));
+	EXPECT_FALSE(dev->pin_is_on(2));
+	// an unknown role throws in the script
+	data["role"] = "lamp";
+	EXPECT_EQ(plugins.action(ACT_DEV_WATCHDOG, 0, &data) - base, 0);
+	logger.set_level(lvl);
+
+	for (auto& p : pins) {
+		p["role"] = "none";
+		p["room"] = "";
+	}
+	dev->from_json(j);
 }
 
 // One thread changes a device through the file system (its change event

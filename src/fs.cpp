@@ -9,6 +9,7 @@
 #include "fs.h"
 #include "fs_table.h"
 #include "fs_leaf.h"
+#include "fs_role.h"
 #include "ow_devices.h"
 #include "plugins.h"
 #include "switch_handler.h"
@@ -29,6 +30,8 @@ static struct filetype root_dir[] = {
 	{ "alarm", 0 },
 	{ "uncached", 0 },
 	{ "switches", 0 },
+	/* the pins by role, see fs_role.h */
+	{ "role", 0 },
 };
 
 static struct filetype settings[] = {
@@ -245,6 +248,20 @@ static int fs_getattr(const char* path_in, struct stat* st, struct fuse_file_inf
 		st->st_nlink = 2;
 		return 0;
 	}
+	attr = fs_role::attr(spath);
+	if (attr != fs_table::NOT_FOUND) {
+		if (attr < 0)
+			return attr;
+		if (attr == 0) {
+			st->st_mode = S_IFDIR | 0755;
+			st->st_nlink = 2;
+		} else {
+			st->st_mode = S_IFREG | 0666;
+			st->st_nlink = 1;
+			st->st_size = attr;
+		}
+		return 0;
+	}
 	if (extract_subpath(spath, "settings")) {
 		for (const auto& s : settings)
 			if (check_path(spath, s, st))
@@ -309,6 +326,15 @@ static int fs_readdir(const char* path_in, void* buf, fuse_fill_dir_t filler,
 	string spath(path);
 	spath.erase(0, 1);
 
+	{
+		std::vector<string> names;
+		int res = fs_role::dir(spath, names);
+		if (res != fs_table::NOT_FOUND) {
+			for (const auto& n : names)
+				filler(buf, n.c_str(), nullptr, 0, static_cast<fuse_fill_dir_flags>(0));
+			return res;
+		}
+	}
 	ret = extract_subpath(spath, "uncached");
 	if (ret) {
 		if (spath.length() == 0) {
@@ -415,6 +441,11 @@ static int fs_open(const char* path_in, struct fuse_file_info*)
 
 	if (fsLeaf.open(spath) == 0)
 		return 0;
+	{
+		int attr = fs_role::attr(spath);
+		if (attr != fs_table::NOT_FOUND)
+			return attr > 0 ? 0 : (attr == 0 ? -EISDIR : attr);
+	}
 	// a loaded plugin's control file; explicit rather than relying on
 	// the SwitchHandler fallback at the end to wave it through
 	if (!plugin_name(path).empty())
@@ -444,6 +475,11 @@ static int fs_read(const char* path_in, char* buf, size_t size, off_t offset,
 	const char* path = alias.c_str();
 	string spath(path);
 	spath.erase(0, 1);
+	{
+		int res = fs_role::read(spath, buf, size, offset);
+		if (res != fs_table::NOT_FOUND)
+			return res;
+	}
 	(void)offset;
 	{
 		int res = fsLeaf.read(spath, buf, size, false);
@@ -492,6 +528,11 @@ static int fs_write(const char* path_in, const char* buf, size_t size,
 	spath.erase(0, 1);
 	{
 		int res = fsLeaf.write(spath, buf, size);
+		if (res != fs_table::NOT_FOUND)
+			return res;
+	}
+	{
+		int res = fs_role::write(spath, buf, size);
 		if (res != fs_table::NOT_FOUND)
 			return res;
 	}

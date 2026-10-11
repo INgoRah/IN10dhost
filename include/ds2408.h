@@ -8,7 +8,7 @@
 #include "ow_dev.h"
 #include "interface/ds2408.h"
 #include "fs_table.h"
-#include "pin_role.h"
+#include "interface/pin_role.h"
 
 #define DS2408_CFG_SIZE 26
 /** longest pin name, same as the size its fs entry reports */
@@ -142,6 +142,14 @@ class ds2408 : public OwDev, public IDS2408 {
 		// the name given to a pin, or "PIO.<n>" while it has none
 		std::string pin_label(int pio) const;
 		PinRole role(int pio) const;
+		// configured as an output (plain or PWM), see vis_pio()
+		bool pin_is_output(int pio) const;
+		// appends the pins that have a role, all of them for
+		// PinRole::none; see IDevices::pins()
+		void pins_get(std::vector<PinInfo>& out, PinRole role) const;
+		// switches the output pins with that role, see
+		// IDevices::role_switch(); returns how many failed
+		int role_switch(PinRole role, bool on);
 		// the room given to a pin, empty while it has none
 		std::string room(int pio) const;
 		int brightness_set(uint8_t brightness);

@@ -130,6 +130,14 @@ echo "1.2.6 2.2.1 30 1" > /mnt/1wire/switches/add     # on for 30s, press again:
 
 Latch 11..18 is a long press, 21..28 the start of a long press.
 
+The target `0.0.0` switches every light off, all pins with the role
+`light` (see roles and rooms below), and stops their off timers. It
+takes no timing:
+
+```sh
+echo "1.2.4 0.0.0" > /mnt/1wire/switches/add          # all lights off
+```
+
 `/switches/list` shows one line per switch. It starts the way the
 switch was added, so it can be copied to `add` or `del` as is, followed
 by the device and pin names (the rom and `PIO.<n>` while none are set,
@@ -164,6 +172,36 @@ that switches on for a while.
 
 The timer belongs to the output, so all timed switches of one output
 share it. Adding a switch that exists already sets its timing anew.
+
+## roles and rooms
+
+Every ds2408 pin can be told what is connected to it and where, besides
+its `func` (how the pin behaves). Both are only kept in the config,
+never written to the device:
+
+```sh
+echo light   > /mnt/1wire/29.0701F8FE6677F4/pin.2/role
+echo Kitchen > /mnt/1wire/29.0701F8FE6677F4/pin.2/room
+```
+
+The roles are `light`, `socket`, `fan`, `heating`, `blind` (outputs),
+`button`, `contact`, `motion` (inputs) and `none`, the default. An empty
+write resets the role to `none` and clears the room.
+
+`/role/<role>/` collects the pins of one role across all devices:
+
+```sh
+cat /mnt/1wire/role/light/all        # how many lights are on
+echo 0 > /mnt/1wire/role/light/all   # switch all lights off
+cat /mnt/1wire/role/light/list       # <rom>.<pin>  on|off  room  name
+cat /mnt/1wire/role/light/29.0701F8FE6677F4.2      # 1 on, 0 off
+echo 1 > /mnt/1wire/role/light/29.0701F8FE6677F4.2
+```
+
+Only outputs are switched; an input with a role is listed with its
+sensed level. Scripts get the same through `ow.pins()` and
+`ow.role_switch()`, and a ds2408's change event names the role and room
+of every output that changed (see `plugin/README.md`).
 
 ## mode: soft
  - no reading of any device status or config
