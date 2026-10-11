@@ -13,13 +13,15 @@ class ds2450 : public OwDev, public IDS2450 {
 		float volt_a, volt_b, volt_c, volt_d;
 		int volt_update(uint8_t ch);
 		int fs_read_volt(uint8_t ch, char* buf, bool uncached);
-		// fs_table.h handler for "volt.*" (A -> 0, B -> 1, C -> 2, D -> 3)
+		// fs_table.h handler for "volt.*" (A -> 0, B -> 1, C -> 2, D -> 3,
+		// ALL -> 4)
 		int r_volt(char* buf, size_t size, bool uncached, int idx);
 		static const FsEntry<ds2450> table[];
 		static const size_t n_table;
 #ifdef TESTING
 		// GTest testing support
 		FRIEND_TEST(FsTest, Ds2450PollNotifiesPlugins);
+		FRIEND_TEST(FsTest, Ds2450VoltAll);
 #endif
 	public:
 		using OwDev::OwDev;

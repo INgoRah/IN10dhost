@@ -25,6 +25,10 @@ class ds2408 : public OwDev, public IDS2408 {
 		int r_sensed(char* buf, size_t size, bool uncached, int idx);
 		int r_latched(char* buf, size_t size, bool uncached, int idx);
 		int w_latched(const char* buf, size_t size, int idx);
+		// PIO.* of all pins as a bit mask, bit set = on (see pin_is_on())
+		uint8_t pio_mask() const;
+		// switches every pin to the state its bit in "on" asks for
+		void pio_mask_set(uint8_t on);
 		int r_cfg(char* buf, size_t size, bool uncached, int idx);
 		int w_cfg(const char* buf, size_t size, int idx);
 		int r_pin_name(char* buf, size_t size, bool uncached, int idx);
@@ -55,7 +59,7 @@ class ds2408 : public OwDev, public IDS2408 {
 		// user given name per pin, empty means the default "n.<pin>"
 		std::array<std::string, 8> pin_name;
 		// activity latches collected by alarm_read() since they were last
-		// cleared by writing 0 to a latched.* entry; other register reads
+		// cleared by writing to a latch.* entry; other register reads
 		// (data[PIO_LATCH]) do not change it
 		uint8_t latched = 0;
 		// activity latches as reg_read() got them, before it reset them

@@ -62,7 +62,7 @@ static string plugin_name(const char* path)
 static void fs_dir_devs(fuse_fill_dir_t filler, void *buf, bool alarm = false);
 
 /* "/alarm" lists the alarming devices; below it everything is the same
-   as in the root, so "/alarm/<rom>/latched.0" is "/<rom>/latched.0".
+   as in the root, so "/alarm/<rom>/latch.0" is "/<rom>/latch.0".
    Every entry point maps the path through this first. */
 static string alarm_alias(const char* path)
 {

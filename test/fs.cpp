@@ -292,9 +292,9 @@ TEST_F(FsTest, DevDirs) {
 
 	res = fs_ops.read("/29.0701F8FE6677F4/pin.0", buf, 32, 0, nullptr);
 	EXPECT_GE(res, 0);
-	res = fs_ops.read("/29.0701F8FE6677F4/latched.0", buf, 2, 0, nullptr);
+	res = fs_ops.read("/29.0701F8FE6677F4/latch.0", buf, 2, 0, nullptr);
 	EXPECT_EQ(res, 1);
-	res = fs_ops.write("/29.0701F8FE6677F4/latched.0", buf, 3, 0, nullptr);
+	res = fs_ops.write("/29.0701F8FE6677F4/latch.0", buf, 3, 0, nullptr);
 	EXPECT_GE(res, 0);
 }
 
@@ -596,8 +596,8 @@ TEST_F(FsTest, Ds2408PioVisibility) {
 	EXPECT_NE(std::find(seen.begin(), seen.end(), "sensed.0"), seen.end());
 	EXPECT_EQ(std::find(seen.begin(), seen.end(), "PIO.0"), seen.end());
 
-	// latched.* and pin.* are unconditional regardless of cfg
-	EXPECT_NE(std::find(seen.begin(), seen.end(), "latched.0"), seen.end());
+	// latch.* and pin.* are unconditional regardless of cfg
+	EXPECT_NE(std::find(seen.begin(), seen.end(), "latch.0"), seen.end());
 	EXPECT_NE(std::find(seen.begin(), seen.end(), "pin.0"), seen.end());
 }
 
@@ -637,7 +637,7 @@ TEST_F(FsTest, Ds2408WriteDoesNotCrossContaminate) {
 	EXPECT_EQ(dev->name, "original");
 
 	// writing to sensed.0 (a read-only sensor value) must not reset the
-	// activity latches the way writing to latched.0 deliberately does
+	// activity latches the way writing to latch.0 deliberately does
 	dev->data[PIO_LATCH] = 0xAB;
 	res = fs_ops.write("/29.0701F8FE6677F4/sensed.0", (char*)"1", 1, 0, nullptr);
 	EXPECT_GE(res, 0);
@@ -661,9 +661,9 @@ TEST_F(FsTest, Ds2408Gaps) {
 	ds2408* dev = (ds2408*)ow.find(0x290701F8FE6677F4);
 	ASSERT_NE(dev, nullptr);
 
-	// "latched.N" attribute is queried by getattr but not exercised by
+	// "latch.N" attribute is queried by getattr but not exercised by
 	// any existing read/write test
-	res = fs_ops.getattr("/29.0701F8FE6677F4/latched.0", &st, nullptr);
+	res = fs_ops.getattr("/29.0701F8FE6677F4/latch.0", &st, nullptr);
 	EXPECT_EQ(res, 0);
 	EXPECT_TRUE(S_ISREG(st.st_mode));
 
@@ -1391,6 +1391,54 @@ TEST_F(FsTest, ArduinoPower) {
 	arduino->power_total = 0;
 }
 
+// volt.ALL lists all four channels, as owfs does for the aggregate
+TEST_F(FsTest, Ds2450VoltAll) {
+	std::vector<std::string> seen;
+	auto record = [](void* buf, const char* name, const struct stat*,
+					 off_t, enum fuse_fill_dir_flags) {
+		static_cast<std::vector<std::string>*>(buf)->push_back(name);
+		return 0;
+	};
+	char buf[64] = {};
+	struct stat st;
+
+	ow.update_device(0, "20.0200F8FE66771E");
+	ow.update_data();
+	// the uncached read converts over the (simulated) bus, needs dev->ds
+	ow.begin();
+	ds2450* dev = (ds2450*)ow.find(0x200200F8FE66771E);
+	ASSERT_NE(dev, nullptr);
+
+	fs_ops.readdir("/20.0200F8FE66771E", &seen, record, 0, nullptr, (enum fuse_readdir_flags)0);
+	EXPECT_NE(std::find(seen.begin(), seen.end(), "volt.ALL"), seen.end());
+	// no BYTE: only bitfields have one
+	EXPECT_EQ(std::find(seen.begin(), seen.end(), "volt.BYTE"), seen.end());
+	EXPECT_EQ(fs_ops.getattr("/20.0200F8FE66771E/volt.ALL", &st, nullptr), 0);
+	EXPECT_TRUE(S_ISREG(st.st_mode));
+	EXPECT_EQ(st.st_size, 4 * 4 + 3);
+
+	dev->volt_a = 1.5f;
+	dev->volt_b = 0.0f;
+	dev->volt_c = 5.1f;
+	dev->volt_d = 2.25f;
+	int res = fs_ops.read("/20.0200F8FE66771E/volt.ALL", buf, sizeof(buf), 0, nullptr);
+	EXPECT_EQ(std::string(buf, res > 0 ? res : 0), "1.50,0.00,5.10,2.25");
+	// a single channel is unchanged
+	res = fs_ops.read("/20.0200F8FE66771E/volt.C", buf, sizeof(buf), 0, nullptr);
+	EXPECT_EQ(std::string(buf, res > 0 ? res : 0), "5.10");
+
+	// uncached converts every channel; without I2C the ADC reads 0
+	LogLevel lvl = logger.get_level();
+	// the simulated bus fails the CRC checks, which is only logged
+	logger.set_level(LogLevel::NONE);
+	res = fs_ops.read("/uncached/20.0200F8FE66771E/volt.ALL", buf, sizeof(buf), 0, nullptr);
+	logger.set_level(lvl);
+	EXPECT_EQ(std::string(buf, res > 0 ? res : 0), "0.00,0.00,0.00,0.00");
+
+	// too small for four values
+	EXPECT_EQ(fs_ops.read("/20.0200F8FE66771E/volt.ALL", buf, 10, 0, nullptr), -EINVAL);
+}
+
 TEST_F(FsTest, Ds2450PollNotifiesPlugins) {
 	ow.update_device(0, "20.0200F8FE66771E");
 	ow.update_data();
@@ -1786,7 +1834,7 @@ TEST_F(FsTest, Ds2408AlarmLatches) {
 	};
 	auto latched = [&](int i) {
 		char buf[8];
-		std::string path = "/29.0701F8FE6677F4/latched." + std::to_string(i);
+		std::string path = "/29.0701F8FE6677F4/latch." + std::to_string(i);
 		fs_ops.read(path.c_str(), buf, sizeof(buf), 0, nullptr);
 		return std::string(buf);
 	};
@@ -1800,7 +1848,7 @@ TEST_F(FsTest, Ds2408AlarmLatches) {
 	swHdl.begin(&ds);
 	ds2408* dev = (ds2408*)ow.find(0x290701F8FE6677F4);
 	ASSERT_NE(dev, nullptr);
-	fs_ops.write("/29.0701F8FE6677F4/latched.0", "0", 1, 0, nullptr);
+	fs_ops.write("/29.0701F8FE6677F4/latch.0", "0", 1, 0, nullptr);
 	EXPECT_FALSE(in_alarm(dev->rom));
 
 	// an alarm: what the register read leaves in data[PIO_LATCH] is kept
@@ -1811,7 +1859,7 @@ TEST_F(FsTest, Ds2408AlarmLatches) {
 	EXPECT_TRUE(dev->alarm);
 	EXPECT_TRUE(in_alarm(dev->rom));
 	// the read reset the latch on the device, data[] mirrors that; the
-	// latches stay available through latched.* only
+	// latches stay available through latch.* only
 	EXPECT_EQ(dev->data[PIO_LATCH], 0);
 	EXPECT_EQ(latched(0), "1");
 	EXPECT_EQ(latched(1), "0");
@@ -1830,12 +1878,6 @@ TEST_F(FsTest, Ds2408AlarmLatches) {
 	swHdl.dev_alarm(1, adr);
 	EXPECT_EQ(latched(3), "0");
 
-	// only 0 clears, anything else is rejected and changes nothing
-	for (const char* v : { "1", "", "x" })
-		EXPECT_EQ(fs_ops.write("/29.0701F8FE6677F4/latched.5", v, strlen(v), 0, nullptr), -EINVAL) << v;
-	EXPECT_TRUE(in_alarm(dev->rom));
-	EXPECT_EQ(latched(0), "1");
-
 	// below /alarm the device is the same as in the root: a directory
 	// with its own entries (not the alarm list again), readable files
 	std::string adir = "/alarm/" + dev->rom;
@@ -1850,7 +1892,7 @@ TEST_F(FsTest, Ds2408AlarmLatches) {
 		std::string p = adir + "/" + name;
 		EXPECT_EQ(fs_ops.getattr(p.c_str(), &st, nullptr), 0) << p;
 	}
-	std::string alatch = adir + "/latched.0";
+	std::string alatch = adir + "/latch.0";
 	char buf[8];
 	EXPECT_EQ(fs_ops.open(alatch.c_str(), nullptr), 0);
 	EXPECT_EQ(fs_ops.read(alatch.c_str(), buf, sizeof(buf), 0, nullptr), 1);
@@ -1862,12 +1904,110 @@ TEST_F(FsTest, Ds2408AlarmLatches) {
 
 	// 0 to any latch, here through the /alarm path, clears all of them
 	// and the alarm
-	std::string alatch5 = adir + "/latched.5";
+	std::string alatch5 = adir + "/latch.5";
 	EXPECT_EQ(fs_ops.write(alatch5.c_str(), "0\n", 2, 0, nullptr), 2);
 	EXPECT_FALSE(dev->alarm);
 	EXPECT_FALSE(in_alarm(dev->rom));
 	for (int i = 0; i < 8; i++)
 		EXPECT_EQ(latched(i), "0") << i;
+}
+
+// owfs compatible aggregates: PIO.ALL/BYTE, sensed.ALL/BYTE, latch.ALL/BYTE
+TEST_F(FsTest, Ds2408Aggregates) {
+	std::vector<std::string> seen;
+	auto record = [](void* buf, const char* name, const struct stat*,
+					 off_t, enum fuse_fill_dir_flags) {
+		static_cast<std::vector<std::string>*>(buf)->push_back(name);
+		return 0;
+	};
+	auto rd = [](const char* file) {
+		char buf[32] = {};
+		std::string path = std::string("/29.0701F8FE6677F4/") + file;
+		int res = fs_ops.read(path.c_str(), buf, sizeof(buf), 0, nullptr);
+		return res < 0 ? std::to_string(res) : std::string(buf, res);
+	};
+	auto wr = [](const char* file, const char* v) {
+		std::string path = std::string("/29.0701F8FE6677F4/") + file;
+		return fs_ops.write(path.c_str(), v, strlen(v), 0, nullptr);
+	};
+	uint8_t adr[8] = { 0x29, 0x07, 0x01, 0xF8, 0xFE, 0x66, 0x77, 0xF4 };
+
+	ow.update_device(1, "29.0701F8FE6677F4");
+	ow.update_data();
+	// pio_set()/level_set() and the alarm read go over the (simulated)
+	// bus, which needs dev->ds
+	ow.begin();
+	swHdl.begin(&ds);
+	ds2408* dev = (ds2408*)ow.find(0x290701F8FE6677F4);
+	ASSERT_NE(dev, nullptr);
+	for (int i = 0; i < 8; i++)
+		dev->cfg[CFG_PIN_ID + i] = CFG_OUT_LOW;
+	dev->cfg[CFG_PIN_ID + 3] = CFG_OUT_PWM;
+
+	// always listed, like in owfs
+	fs_ops.readdir("/29.0701F8FE6677F4", &seen, record, 0, nullptr, (enum fuse_readdir_flags)0);
+	for (const char* n : { "PIO.ALL", "PIO.BYTE", "sensed.ALL", "sensed.BYTE",
+			"latch.ALL", "latch.BYTE" })
+		EXPECT_NE(std::find(seen.begin(), seen.end(), n), seen.end()) << n;
+	// room for eight comma separated values, and for 255
+	struct stat st;
+	EXPECT_EQ(fs_ops.getattr("/29.0701F8FE6677F4/PIO.ALL", &st, nullptr), 0);
+	EXPECT_EQ(st.st_size, 8 * 3 + 7);
+	EXPECT_EQ(fs_ops.getattr("/29.0701F8FE6677F4/latch.BYTE", &st, nullptr), 0);
+	EXPECT_EQ(st.st_size, 3);
+
+	// PIO: inverted output latch, bit 0 first
+	dev->data[PIO_OUT] = 0xff & ~0x05;
+	EXPECT_EQ(rd("PIO.ALL"), "1,0,1,0,0,0,0,0");
+	EXPECT_EQ(rd("PIO.BYTE"), "5");
+	// not caught by the plain BYTE (raw output latch)
+	EXPECT_EQ(rd("BYTE"), std::to_string(0xff & ~0x05));
+
+	// writing: plain outputs in the latch, the PWM pin by its level
+	EXPECT_EQ(wr("PIO.ALL", "0,1,0,1,0,0,0,1\n"), 16);
+	EXPECT_EQ(dev->data[PIO_OUT] & 0xf7, 0xff & ~0x82 & 0xf7);
+	EXPECT_EQ(rd("level.3"), "100");
+	EXPECT_EQ(rd("PIO.BYTE"), std::to_string(0x8a));
+	EXPECT_EQ(wr("PIO.BYTE", "1"), 1);
+	EXPECT_EQ(rd("PIO.ALL"), "1,0,0,0,0,0,0,0");
+	EXPECT_EQ(rd("level.3"), "0");
+	for (const char* v : { "", "1,0", "1,0,0,0,0,0,0,0,0", "2,0,0,0,0,0,0,0", "x" })
+		EXPECT_EQ(wr("PIO.ALL", v), -EINVAL) << v;
+	for (const char* v : { "", "256", "-1", "1x" })
+		EXPECT_EQ(wr("PIO.BYTE", v), -EINVAL) << v;
+	EXPECT_EQ(rd("PIO.BYTE"), "1");
+
+	// sensed: the logic state as is, read only (a write is ignored, as
+	// for sensed.N)
+	dev->data[PIO_LS] = 0x81;
+	EXPECT_EQ(rd("sensed.ALL"), "1,0,0,0,0,0,0,1");
+	EXPECT_EQ(rd("sensed.BYTE"), "129");
+	wr("sensed.ALL", "0,0,0,0,0,0,0,0");
+	wr("sensed.BYTE", "0");
+	EXPECT_EQ(dev->data[PIO_LS], 0x81);
+	EXPECT_EQ(rd("sensed.BYTE"), "129");
+
+	// latch: the latches collected by the alarm handling
+	dev->data[STAT] = 0;
+	dev->data[PIO_LATCH] = 0x06;
+	swHdl.dev_alarm(1, adr);
+	EXPECT_TRUE(dev->alarm);
+	EXPECT_EQ(rd("latch.ALL"), "0,1,1,0,0,0,0,0");
+	EXPECT_EQ(rd("latch.BYTE"), "6");
+	// any value written to any of them clears all, as in owfs
+	EXPECT_EQ(wr("latch.ALL", "x"), 1);
+	EXPECT_FALSE(dev->alarm);
+	EXPECT_EQ(rd("latch.BYTE"), "0");
+	dev->data[PIO_LATCH] = 0x01;
+	swHdl.dev_alarm(1, adr);
+	EXPECT_EQ(rd("latch.0"), "1");
+	EXPECT_EQ(wr("latch.BYTE", "1"), 1);
+	EXPECT_EQ(rd("latch.0"), "0");
+	dev->data[PIO_LATCH] = 0x01;
+	swHdl.dev_alarm(1, adr);
+	EXPECT_EQ(wr("latch.4", "1"), 1);
+	EXPECT_FALSE(dev->alarm);
+	EXPECT_EQ(rd("latch.ALL"), "0,0,0,0,0,0,0,0");
 }
 
 // A device change raised while the device is locked reaches the plugins
