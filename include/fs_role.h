@@ -6,7 +6,7 @@
 
 // The pins by role across all devices, under /role:
 //
-//   role/                    one directory per role (see pin_role.h)
+//   role/                    one directory per role (see interface/pin.h)
 //   role/<role>/all          read: how many outputs with that role are
 //                            on; write 0 or 1: switch them all
 //   role/<role>/list         one line per pin: "<rom>.<pin>\ton|off\t

@@ -8,7 +8,7 @@
 #include "ow_dev.h"
 #include "interface/ds2408.h"
 #include "fs_table.h"
-#include "interface/pin_role.h"
+#include "interface/pin.h"
 
 #define DS2408_CFG_SIZE 26
 /** longest pin name, same as the size its fs entry reports */
@@ -61,12 +61,9 @@ class ds2408 : public OwDev, public IDS2408 {
 		static const size_t n_table;
 		int threshold = 0;
 		int brightness = 0;
-		// user given name per pin, empty means the default "n.<pin>"
-		std::array<std::string, 8> pin_name;
-		// what is connected to a pin and where, see pin_role.h; only
+		// name, role, room and level per pin, see interface/pin.h; only
 		// kept here, never written to the device
-		std::array<PinRole, 8> pin_role{};
-		std::array<std::string, 8> pin_room;
+		std::array<Pin, 8> pins;
 		// activity latches collected by alarm_read() since they were last
 		// cleared by writing to a latch.* entry; other register reads
 		// (data[PIO_LATCH]) do not change it
@@ -74,8 +71,6 @@ class ds2408 : public OwDev, public IDS2408 {
 		// activity latches as reg_read() got them, before it reset them
 		// on the device (which also clears data[PIO_LATCH])
 		uint8_t last_latch = 0;
-		// level per pin in percent as last applied by level_set()
-		std::array<uint8_t, 8> level_pct{};
 		// data[PIO_OUT] holds what the device really drives, not the
 		// zeroes (= all on) it starts with
 		bool out_known = false;

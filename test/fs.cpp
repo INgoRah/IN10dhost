@@ -1520,7 +1520,7 @@ TEST_F(FsTest, Ds2408Watchdog) {
 	EXPECT_FALSE(dev->watchdog_pending());
 	EXPECT_EQ(watchdog(rom), "1");
 	EXPECT_EQ(dev->data[PIO_OUT], 0xF5);
-	EXPECT_EQ(dev->level_pct[1], 40);
+	EXPECT_EQ(dev->pins[1].level, 40);
 	json cfg = plugins.config_of("faulty");
 	EXPECT_EQ(cfg["watchdogs"], 1);
 	EXPECT_EQ(cfg["last_watchdog"]["rom"], rom);

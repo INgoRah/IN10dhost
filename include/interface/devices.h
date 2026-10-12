@@ -1,7 +1,7 @@
 #pragma once
 #include <string>
 #include <vector>
-#include "pin_role.h"
+#include "pin.h"
 
 class IDev {
 public:
@@ -13,19 +13,16 @@ public:
 };
 
 /* A pin that was given a role, see IDevices::pins(). A copy, taken under
-   the device lock. */
-struct PinInfo {
+   the device lock; name is what the pin is shown as, "PIO.<n>" while it
+   has none. */
+struct PinInfo : Pin {
 	std::string rom;
-	int pin;
-	/* the pin's name, "PIO.<n>" while it has none */
-	std::string name;
-	PinRole role;
-	std::string room;
+	int pin = 0;
 	/* configured as an output; only outputs are switched by role */
-	bool output;
+	bool output = false;
 	/* an output: whether it is on as far as known; an input: its sensed
 	   level, as sensed.<n> reports it */
-	bool on;
+	bool on = false;
 };
 
 class IDevices {

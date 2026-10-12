@@ -1,5 +1,5 @@
-#ifndef _IPIN_ROLE_H
-#define _IPIN_ROLE_H
+#ifndef _IPIN_H
+#define _IPIN_H
 #include <algorithm>
 #include <cctype>
 #include <optional>
@@ -52,5 +52,18 @@ inline std::optional<PinRole> pin_role_parse(std::string s)
 	}
 	return std::nullopt;
 }
+
+// What the host knows about a pin of a device, besides the device's own
+// config and registers (which stay with the device: they are read and
+// written a byte or a block at a time, for all pins together).
+struct Pin {
+	// user given name, empty means the default "PIO.<n>"
+	std::string name;
+	PinRole role = PinRole::none;
+	std::string room;
+	// PWM level in percent as last applied by the device's level_set();
+	// not saved with the config
+	uint8_t level = 0;
+};
 
 #endif
