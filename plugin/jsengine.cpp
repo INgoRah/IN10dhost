@@ -1,10 +1,18 @@
 /*
  * QuickJS scripting plugin.
  *
- * Loads the .js file named by the "script" key of its plugin config and
- * forwards every ActionEvent to a global onAction(code, val, data)
- * function in it. data is the event payload as a plain JS object, or
- * null when the action carries none.
+ * Loads the .js files listed under the "scripts" key of its plugin
+ * config (or the one under "script") and forwards every ActionEvent to
+ * a global onAction(code, val, data) function in each, in the order of
+ * the list, adding up what they return. data is the event payload as a
+ * plain JS object, or null when the action carries none.
+ *
+ *   "jsengine": { "scripts": [ "/opt/lib/in10dfs/a.js", "/opt/lib/in10dfs/b.js" ] }
+ *
+ * Every script runs in a context of its own: they do not see each
+ * other's globals, so each can define its own onAction, onRead and
+ * onWrite, and a script that fails to load or throws leaves the others
+ * running.
  *
  * Scripts reach the 1-Wire devices through the global "ow" object:
  *   ow.log(msg)              write to the daemon log
@@ -29,10 +37,21 @@
  *                            room, output, on}, ...]
  *   ow.role_switch(role, on) switch every output with that role on or
  *                            off, true when all of them switched
+ *   ow.file_add(path, size)  add a file to the file system, e.g.
+ *                            "status/my_stuff" (see IPluginFiles),
+ *                            true when it could be added
+ *   ow.file_remove(path)     and remove it again
  *
- * The script is reloaded on its own when the file changes on disk: every
+ * Reading one of these files calls onRead(path) in the script, what it
+ * returns is the file's content (null or undefined: not readable).
+ * Writing calls onWrite(path, data) with the written text, returning
+ * false refuses it; without onWrite the files are read only. A reload
+ * of the script drops its files, the new version adds its own.
+ *
+ * A script is reloaded on its own when its file changes on disk: every
  * event first compares the file's modification time, and on a change
- * its contents, with what was last loaded. ACT_PERIODIC_SECOND arrives
+ * its contents, with what was last loaded; the other scripts keep
+ * running untouched. ACT_PERIODIC_SECOND arrives
  * every second, so an edit is live within about a second. A reload
  * starts the script from a clean global object, like loading it anew.
  *
@@ -40,15 +59,20 @@
  * payloads also carry - JS numbers cannot hold a 64 bit rom code
  * exactly, so the string is the only safe round trip.
  */
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <format>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <mutex>
+#include <set>
 #include <sstream>
 #include <string>
+#include <vector>
 
 #include "plugin.h"
 #include "interface/ds2408.h"
@@ -65,14 +89,27 @@ private:
 	ILogger* logger;
 	IDevices* devices;
 	JSRuntime* rt;
-	JSContext* ctx;
-	std::string script;
-	/* contents of the script as last loaded, so a reload with an
-	   unedited file is a no-op instead of wiping the script's state */
-	uint64_t script_hash;
-	/* modification time of the script as last loaded, so most events
-	   only cost a stat() rather than hashing the file */
-	std::filesystem::file_time_type script_mtime;
+	/* One script file, run in a context of its own: scripts do not see
+	   each other's globals, and each is loaded and reloaded on its own */
+	struct Script {
+		JsEngine* engine;
+		std::string path;
+		JSContext* ctx = nullptr;
+		/* contents as last loaded, so a reload with an unedited file
+		   is a no-op instead of wiping the script's state */
+		uint64_t hash = 0;
+		/* modification time as last loaded, so most events only cost a
+		   stat() rather than hashing the file */
+		std::filesystem::file_time_type mtime{};
+		/* the files it added, dropped when it is reloaded */
+		std::set<std::string> files;
+	};
+	/* in the order of the config, which is the order events reach them;
+	   by pointer, each context's opaque points at its Script */
+	std::vector<std::unique_ptr<Script>> scripts;
+	/* ACT_INITIALIZED and ACT_READY as far as they came, in order: a
+	   script reloaded later gets them again, see replay() */
+	std::vector<int> seen;
 	/* QuickJS is single threaded, but action() is reached both from the
 	   FUSE threads and from the background poll worker */
 	std::recursive_mutex mtx;
@@ -80,6 +117,18 @@ private:
 	   otherwise re-enter through ds2408::pio_set() without end */
 	int depth;
 	std::chrono::steady_clock::time_point deadline;
+
+	static Script* script_of(JSContext* ctx)
+	{
+		return (Script*)JS_GetContextOpaque(ctx);
+	}
+
+	static JsEngine* engine_of(JSContext* ctx)
+	{
+		Script* sc = script_of(ctx);
+
+		return sc ? sc->engine : nullptr;
+	}
 
 	static uint64_t rom_to_code(const char* rom)
 	{
@@ -94,7 +143,7 @@ private:
 	   when the argument is missing or no such device exists. */
 	static IDev* arg_dev(JSContext* ctx, int argc, JSValueConst* argv)
 	{
-		JsEngine* self = (JsEngine*)JS_GetContextOpaque(ctx);
+		JsEngine* self = engine_of(ctx);
 
 		if (argc < 1 || self == nullptr || self->devices == nullptr)
 			return nullptr;
@@ -109,7 +158,7 @@ private:
 
 	static JSValue js_log(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv)
 	{
-		JsEngine* self = (JsEngine*)JS_GetContextOpaque(ctx);
+		JsEngine* self = engine_of(ctx);
 
 		if (argc < 1 || self == nullptr || self->logger == nullptr)
 			return JS_UNDEFINED;
@@ -281,7 +330,7 @@ private:
 
 	static JSValue js_pins(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv)
 	{
-		JsEngine* self = (JsEngine*)JS_GetContextOpaque(ctx);
+		JsEngine* self = engine_of(ctx);
 		PinRole role = PinRole::none;
 
 		if (argc > 0 && !JS_IsUndefined(argv[0]) && !arg_role(ctx, argv[0], role))
@@ -307,7 +356,7 @@ private:
 
 	static JSValue js_role_switch(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv)
 	{
-		JsEngine* self = (JsEngine*)JS_GetContextOpaque(ctx);
+		JsEngine* self = engine_of(ctx);
 		PinRole role;
 
 		if (argc < 2 || self == nullptr || self->devices == nullptr)
@@ -321,6 +370,46 @@ private:
 		return JS_NewBool(ctx, self->devices->role_switch(role, on != 0) == 0);
 	}
 
+	static JSValue js_file_add(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv)
+	{
+		JsEngine* self = engine_of(ctx);
+		int32_t size;
+
+		if (argc < 2 || self == nullptr || self->files == nullptr)
+			return JS_FALSE;
+		if (JS_ToInt32(ctx, &size, argv[1]) < 0)
+			return JS_EXCEPTION;
+		const char* path = JS_ToCString(ctx, argv[0]);
+		if (path == nullptr)
+			return JS_EXCEPTION;
+		/* the host knows the files by plugin, the scripts of this one
+		   must not take each other's either */
+		Script* sc = script_of(ctx);
+		bool ok = self->script_owning(path) == nullptr || self->script_owning(path) == sc;
+		ok = ok && self->files->file_add(self, path, size);
+		if (ok)
+			sc->files.insert(path);
+		JS_FreeCString(ctx, path);
+
+		return JS_NewBool(ctx, ok);
+	}
+
+	static JSValue js_file_remove(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv)
+	{
+		JsEngine* self = engine_of(ctx);
+
+		if (argc < 1 || self == nullptr || self->files == nullptr)
+			return JS_FALSE;
+		const char* path = JS_ToCString(ctx, argv[0]);
+		if (path == nullptr)
+			return JS_EXCEPTION;
+		Script* sc = script_of(ctx);
+		bool ok = sc->files.erase(path) > 0 && self->files->file_remove(self, path);
+		JS_FreeCString(ctx, path);
+
+		return JS_NewBool(ctx, ok);
+	}
+
 	/* Runs periodically while script code executes; a non zero return
 	   aborts it, which is what stops a runaway loop from hanging the
 	   whole daemon. */
@@ -331,7 +420,7 @@ private:
 		return std::chrono::steady_clock::now() > self->deadline ? 1 : 0;
 	}
 
-	void log_exception(const char* what)
+	void log_exception(JSContext* ctx, const char* what)
 	{
 		JSValue e = JS_GetException(ctx);
 		const char* msg = JS_ToCString(ctx, e);
@@ -358,7 +447,8 @@ private:
 	}
 
 	/* Arms the watchdog, runs fn, and reports anything it threw. */
-	JSValue call_guarded(JSValue fn, JSValue self_obj, int argc, JSValue* argv, const char* what)
+	JSValue call_guarded(JSContext* ctx, JSValue fn, JSValue self_obj, int argc, JSValue* argv,
+		const char* what)
 	{
 		deadline = std::chrono::steady_clock::now() +
 			std::chrono::milliseconds(SCRIPT_TIMEOUT_MS);
@@ -366,12 +456,12 @@ private:
 		JSValue res = JS_Call(ctx, fn, self_obj, argc, argv);
 		depth--;
 		if (JS_IsException(res))
-			log_exception(what);
+			log_exception(ctx, what);
 
 		return res;
 	}
 
-	void register_globals()
+	void register_globals(JSContext* ctx)
 	{
 		JSValue global = JS_GetGlobalObject(ctx);
 		JSValue owobj = JS_NewObject(ctx);
@@ -400,38 +490,67 @@ private:
 			JS_NewCFunction(ctx, js_pins, "pins", 1));
 		JS_SetPropertyStr(ctx, owobj, "role_switch",
 			JS_NewCFunction(ctx, js_role_switch, "role_switch", 2));
+		JS_SetPropertyStr(ctx, owobj, "file_add",
+			JS_NewCFunction(ctx, js_file_add, "file_add", 2));
+		JS_SetPropertyStr(ctx, owobj, "file_remove",
+			JS_NewCFunction(ctx, js_file_remove, "file_remove", 1));
 		JS_SetPropertyStr(ctx, global, "ow", owobj);
 		JS_FreeValue(ctx, global);
 	}
 
-	/* Throws away the context and builds a fresh one, so a reloaded
-	   script starts from a clean global object instead of inheriting
-	   whatever the previous version defined. The runtime is kept. */
-	bool reset_context()
+	/* the script that added path, nullptr if none did */
+	Script* script_owning(const std::string& path)
 	{
-		if (ctx) {
-			JS_FreeContext(ctx);
-			ctx = nullptr;
+		for (auto& sc : scripts)
+			if (sc->files.count(path))
+				return sc.get();
+		return nullptr;
+	}
+
+	/* the files of a script that goes away with its context */
+	void drop_files(Script& sc)
+	{
+		if (files)
+			for (const auto& f : sc.files)
+				files->file_remove(this, f);
+		sc.files.clear();
+	}
+
+	void free_context(Script& sc)
+	{
+		drop_files(sc);
+		if (sc.ctx) {
+			JS_FreeContext(sc.ctx);
+			sc.ctx = nullptr;
 		}
-		ctx = JS_NewContext(rt);
-		if (ctx == nullptr) {
+	}
+
+	/* Throws away the script's context and builds a fresh one, so a
+	   reloaded script starts from a clean global object instead of
+	   inheriting whatever the previous version defined. The runtime is
+	   shared and kept. */
+	bool reset_context(Script& sc)
+	{
+		free_context(sc);
+		sc.ctx = JS_NewContext(rt);
+		if (sc.ctx == nullptr) {
 			if (logger)
-				logger->error("jsengine: cannot create context");
+				logger->error(std::format("jsengine: cannot create context for {}", sc.path));
 			return false;
 		}
-		JS_SetContextOpaque(ctx, this);
-		register_globals();
+		JS_SetContextOpaque(sc.ctx, &sc);
+		register_globals(sc.ctx);
 
 		return true;
 	}
 
-	void load_script()
+	void load_script(Script& sc)
 	{
-		std::ifstream f(script);
+		std::ifstream f(sc.path);
 
 		if (!f) {
 			if (logger)
-				logger->error(std::format("jsengine: cannot open script {}", script));
+				logger->error(std::format("jsengine: cannot open script {}", sc.path));
 			return;
 		}
 		std::stringstream buf;
@@ -440,140 +559,110 @@ private:
 
 		deadline = std::chrono::steady_clock::now() +
 			std::chrono::milliseconds(SCRIPT_TIMEOUT_MS);
-		JSValue res = JS_Eval(ctx, src.c_str(), src.size(), script.c_str(),
+		JSValue res = JS_Eval(sc.ctx, src.c_str(), src.size(), sc.path.c_str(),
 			JS_EVAL_TYPE_GLOBAL);
 		if (JS_IsException(res))
-			log_exception(script.c_str());
+			log_exception(sc.ctx, sc.path.c_str());
 		else if (logger)
-			logger->info(std::format("jsengine: loaded {}", script));
-		JS_FreeValue(ctx, res);
+			logger->info(std::format("jsengine: loaded {}", sc.path));
+		JS_FreeValue(sc.ctx, res);
+	}
+
+	/* A script reloaded after the start missed ACT_INITIALIZED and
+	   ACT_READY, which is where a script typically sets itself up (adds
+	   its files, ...). They are handed to it again, to it alone. */
+	void replay(Script& sc)
+	{
+		for (int code : seen)
+			script_action(sc, ActionEvent{ code, 0, nullptr });
+	}
+
+	/* (Re)loads a script from its file as it is now */
+	void start_script(Script& sc)
+	{
+		std::error_code ec;
+
+		sc.hash = file_hash(sc.path);
+		sc.mtime = std::filesystem::last_write_time(sc.path, ec);
+		if (reset_context(sc))
+			load_script(sc);
 	}
 
 	/* Reloads the script if the file changed on disk since it was last
 	   loaded. A missing file (an editor in the middle of replacing it)
 	   is left for the next event to look at. */
-	void check_script()
+	void check_script(Script& sc)
 	{
 		std::error_code ec;
 
-		if (script.empty())
+		auto mtime = std::filesystem::last_write_time(sc.path, ec);
+		if (ec || mtime == sc.mtime)
 			return;
-		auto mtime = std::filesystem::last_write_time(script, ec);
-		if (ec || mtime == script_mtime)
-			return;
-		script_mtime = mtime;
+		sc.mtime = mtime;
 		/* touched or saved unchanged: keep the running script's state */
-		uint64_t hash = file_hash(script);
-		if (hash == 0 || hash == script_hash)
+		uint64_t hash = file_hash(sc.path);
+		if (hash == 0 || hash == sc.hash)
 			return;
-		script_hash = hash;
+		sc.hash = hash;
 		if (logger)
-			logger->info(std::format("jsengine: {} changed, reloading", script));
-		if (reset_context())
-			load_script();
-	}
-
-public:
-	JsEngine() : logger(nullptr), devices(nullptr), rt(nullptr), ctx(nullptr),
-		script_hash(0), depth(0) {}
-
-	void info() override {
-		std::cout << "QuickJS engine " << JS_GetVersion() << std::endl;
-	}
-
-	void init(ILogger* logger, IDevices* devices) override
-	{
-		this->logger = logger;
-		this->devices = devices;
-
-		rt = JS_NewRuntime();
-		if (rt == nullptr) {
-			logger->error("jsengine: cannot create runtime");
-			return;
+			logger->info(std::format("jsengine: {} changed, reloading", sc.path));
+		if (reset_context(sc)) {
+			load_script(sc);
+			replay(sc);
 		}
-		JS_SetInterruptHandler(rt, js_interrupt, this);
-		ctx = JS_NewContext(rt);
-		if (ctx == nullptr) {
-			logger->error("jsengine: cannot create context");
-			JS_FreeRuntime(rt);
-			rt = nullptr;
-			return;
-		}
-		JS_SetContextOpaque(ctx, this);
-		register_globals();
-		logger->debug("jsengine: initialized");
 	}
 
-	void exit() override
+	/* Calls the script function name(path[, data]) for a file of a
+	   script. Sets res, the caller frees it in ctx; an errno when there
+	   is nothing to call or it threw. */
+	int call_file(const char* name, const string& path, const char* data, size_t size,
+		JSValue& res, JSContext*& ctx)
 	{
-		std::lock_guard<std::recursive_mutex> lock(mtx);
-
-		/* freeing runs the garbage collector, also stack checked */
+		if (depth > 0)
+			return -EBUSY;
 		enter();
-		if (ctx) {
-			JS_FreeContext(ctx);
-			ctx = nullptr;
+		Script* sc = script_owning(path);
+		if (sc == nullptr)
+			return -ENOENT;
+		/* an edited script is loaded before, like for an action; that
+		   may well have dropped this file */
+		check_script(*sc);
+		if (sc->ctx == nullptr || sc->files.count(path) == 0)
+			return -ENOENT;
+		ctx = sc->ctx;
+		JSValue global = JS_GetGlobalObject(ctx);
+		JSValue fn = JS_GetPropertyStr(ctx, global, name);
+		int err = 0;
+
+		if (JS_IsFunction(ctx, fn)) {
+			JSValue argv[2];
+			argv[0] = JS_NewString(ctx, path.c_str());
+			argv[1] = data ? JS_NewStringLen(ctx, data, size) : JS_UNDEFINED;
+			res = call_guarded(ctx, fn, global, data ? 2 : 1, argv, name);
+			if (JS_IsException(res)) {
+				JS_FreeValue(ctx, res);
+				err = -EIO;
+			}
+			JS_FreeValue(ctx, argv[0]);
+			JS_FreeValue(ctx, argv[1]);
+		} else {
+			err = -EACCES;
 		}
-		if (rt) {
-			JS_FreeRuntime(rt);
-			rt = nullptr;
-		}
-		logger = nullptr;
-		devices = nullptr;
+		JS_FreeValue(ctx, fn);
+		JS_FreeValue(ctx, global);
+
+		return err;
 	}
 
-	json config_get() const override
+	/* onAction() of one script, 0 when it has none or it threw */
+	int32_t script_action(Script& sc, const ActionEvent& ev)
 	{
-		json j;
-		j["script"] = script;
-
-		return j;
-	}
-
-	/* Also the reload path: Plugins::reload() hands an unchanged
-	   plugin its own config back so it can re-read external files. */
-	void config_set(const json& j) override
-	{
-		std::lock_guard<std::recursive_mutex> lock(mtx);
-		std::string want = j.value("script", "");
-		uint64_t hash = file_hash(want);
-
-		if (rt == nullptr || want.empty())
-			return;
-		enter();
-		/* same file, same contents: leave the running script and its
-		   state alone rather than re-evaluating it for nothing */
-		if (ctx && want == script && hash == script_hash)
-			return;
-		script = want;
-		script_hash = hash;
-		{
-			std::error_code ec;
-			script_mtime = std::filesystem::last_write_time(script, ec);
-		}
-		if (reset_context())
-			load_script();
-	}
-
-	int action(const ActionEvent& ev) override
-	{
-		std::lock_guard<std::recursive_mutex> lock(mtx);
 		int32_t ret = 0;
 
-		if (ctx == nullptr)
+		check_script(sc);
+		if (sc.ctx == nullptr)
 			return 0;
-		if (depth > 0) {
-			/* reached from inside a script callback, e.g. the script
-			   drove a PIO and ds2408::pio_set() dispatched
-			   ACT_DEV_CHANGE straight back at us */
-			if (logger)
-				logger->warn(std::format("jsengine: dropping re-entrant action {}", ev.code));
-			return 0;
-		}
-		enter();
-		check_script();
-		if (ctx == nullptr)
-			return 0;
+		JSContext* ctx = sc.ctx;
 		JSValue global = JS_GetGlobalObject(ctx);
 		JSValue fn = JS_GetPropertyStr(ctx, global, "onAction");
 
@@ -589,11 +678,11 @@ public:
 			if (JS_IsException(argv[2])) {
 				/* report it here rather than hand the script an
 				   exception object as its payload */
-				log_exception("event payload");
+				log_exception(ctx, "event payload");
 				argv[2] = JS_NULL;
 			}
 
-			JSValue res = call_guarded(fn, global, 3, argv, "onAction");
+			JSValue res = call_guarded(ctx, fn, global, 3, argv, "onAction");
 			if (!JS_IsException(res))
 				JS_ToInt32(ctx, &ret, res);
 			JS_FreeValue(ctx, res);
@@ -604,6 +693,188 @@ public:
 		JS_FreeValue(ctx, global);
 
 		return ret;
+	}
+
+public:
+	JsEngine() : logger(nullptr), devices(nullptr), rt(nullptr), depth(0) {}
+
+	void info() override {
+		std::cout << "QuickJS engine " << JS_GetVersion() << std::endl;
+	}
+
+	/* only the runtime, the scripts come with the config */
+	void init(ILogger* logger, IDevices* devices) override
+	{
+		this->logger = logger;
+		this->devices = devices;
+
+		rt = JS_NewRuntime();
+		if (rt == nullptr) {
+			logger->error("jsengine: cannot create runtime");
+			return;
+		}
+		JS_SetInterruptHandler(rt, js_interrupt, this);
+		logger->debug("jsengine: initialized");
+	}
+
+	void exit() override
+	{
+		std::lock_guard<std::recursive_mutex> lock(mtx);
+
+		/* freeing runs the garbage collector, also stack checked */
+		enter();
+		for (auto& sc : scripts)
+			free_context(*sc);
+		scripts.clear();
+		if (rt) {
+			JS_FreeRuntime(rt);
+			rt = nullptr;
+		}
+		logger = nullptr;
+		devices = nullptr;
+	}
+
+	/* "script" for a single one, as configs before there were several */
+	json config_get() const override
+	{
+		json j;
+
+		if (scripts.size() == 1) {
+			j["script"] = scripts[0]->path;
+		} else {
+			j["scripts"] = json::array();
+			for (const auto& sc : scripts)
+				j["scripts"].push_back(sc->path);
+		}
+		return j;
+	}
+
+	/* "scripts": a list of files, or "script": one. Also the reload
+	   path: Plugins::reload() hands an unchanged plugin its own config
+	   back so it can re-read external files. A script that stays in the
+	   list keeps running, with its state, unless its file changed; one
+	   that is no longer in it is stopped. */
+	void config_set(const json& j) override
+	{
+		std::lock_guard<std::recursive_mutex> lock(mtx);
+		std::vector<std::string> want;
+
+		if (rt == nullptr)
+			return;
+		if (j.contains("scripts")) {
+			for (const auto& p : j.at("scripts"))
+				if (p.is_string() && !p.get<std::string>().empty())
+					want.push_back(p.get<std::string>());
+		} else if (!j.value("script", "").empty()) {
+			want.push_back(j.value("script", ""));
+		} else {
+			return;
+		}
+		enter();
+		/* the new list in place before any script starts, so a script
+		   adding a file sees those of every other one */
+		std::vector<std::unique_ptr<Script>> next;
+		std::vector<Script*> start;
+		for (const auto& path : want) {
+			if (std::any_of(next.begin(), next.end(),
+					[&](const auto& sc) { return sc->path == path; }))
+				continue;
+			auto it = std::find_if(scripts.begin(), scripts.end(),
+				[&](const auto& sc) { return sc && sc->path == path; });
+			if (it != scripts.end()) {
+				next.push_back(std::move(*it));
+				/* same contents: leave it and its state alone rather
+				   than re-evaluating it for nothing */
+				if (next.back()->ctx == nullptr || file_hash(path) != next.back()->hash)
+					start.push_back(next.back().get());
+				continue;
+			}
+			next.push_back(std::make_unique<Script>());
+			next.back()->engine = this;
+			next.back()->path = path;
+			start.push_back(next.back().get());
+		}
+		/* what is left was taken out of the list */
+		for (auto& sc : scripts)
+			if (sc) {
+				if (logger)
+					logger->info(std::format("jsengine: stopping {}", sc->path));
+				free_context(*sc);
+			}
+		scripts = std::move(next);
+		for (Script* sc : start) {
+			start_script(*sc);
+			replay(*sc);
+		}
+	}
+
+	/* every script in turn, the results added up like the host does
+	   for the plugins */
+	int action(const ActionEvent& ev) override
+	{
+		std::lock_guard<std::recursive_mutex> lock(mtx);
+		int ret = 0;
+
+		if (depth > 0) {
+			/* reached from inside a script callback, e.g. the script
+			   drove a PIO and ds2408::pio_set() dispatched
+			   ACT_DEV_CHANGE straight back at us */
+			if (logger)
+				logger->warn(std::format("jsengine: dropping re-entrant action {}", ev.code));
+			return 0;
+		}
+		enter();
+		for (auto& sc : scripts)
+			ret += script_action(*sc, ev);
+		// after sending it, or a script reloaded during it got it twice
+		if ((ev.code == ACT_INITIALIZED || ev.code == ACT_READY) &&
+				std::find(seen.begin(), seen.end(), ev.code) == seen.end())
+			seen.push_back(ev.code);
+
+		return ret;
+	}
+
+	int fs_read(const string& path, char* buf, size_t size) override
+	{
+		std::lock_guard<std::recursive_mutex> lock(mtx);
+		JSValue res;
+		JSContext* ctx = nullptr;
+		int err = call_file("onRead", path, nullptr, 0, res, ctx);
+
+		if (err)
+			return err;
+		if (JS_IsNull(res) || JS_IsUndefined(res)) {
+			JS_FreeValue(ctx, res);
+			return -EACCES;
+		}
+		/* anything else as text, a number reads as "42" */
+		size_t len;
+		const char* str = JS_ToCStringLen(ctx, &len, res);
+		JS_FreeValue(ctx, res);
+		if (str == nullptr) {
+			log_exception(ctx, "onRead result");
+			return -EIO;
+		}
+		len = std::min(len, size);
+		std::memcpy(buf, str, len);
+		JS_FreeCString(ctx, str);
+
+		return (int)len;
+	}
+
+	int fs_write(const string& path, const char* buf, size_t size) override
+	{
+		std::lock_guard<std::recursive_mutex> lock(mtx);
+		JSValue res;
+		JSContext* ctx = nullptr;
+		int err = call_file("onWrite", path, buf, size, res, ctx);
+
+		if (err)
+			return err;
+		bool refused = JS_IsBool(res) && !JS_ToBool(ctx, res);
+		JS_FreeValue(ctx, res);
+
+		return refused ? -EINVAL : (int)size;
 	}
 };
 

@@ -15,3 +15,7 @@ class IFs {
 		virtual int fs_open(string& path) const = 0;
 		virtual int fs_write(string& path, const char* buf, size_t size) = 0;
 };
+
+/* Whether a plugin file at path (relative to the root, see IPluginFiles)
+   would clash with the daemon's own entries, defined in fs.cpp */
+bool fs_builtin_taken(const string& path);

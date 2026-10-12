@@ -6,7 +6,7 @@
 
 using std::string;
 
-class Plugins {
+class Plugins : public IPluginFiles {
 	private:
 		std::filesystem::path exec_path;
 		std::vector<Plugin*> plugins;
@@ -37,9 +37,36 @@ class Plugins {
 		   object when the plugin throws. */
 		json read_config(Plugin* plugin_ptr);
 		void apply_config(Plugin* plugin_ptr, const json& cfg);
+		/* the files the plugins added, by path; see IPluginFiles */
+		struct PluginFile {
+			Plugin* owner;
+			int size;
+		};
+		std::map<string, PluginFile> files;
+		/* Guards files. Taken alone or under mtx, never the other way
+		   round: a plugin adds files from init(), under mtx. */
+		std::mutex files_mtx;
+		/* drops all files of a plugin that goes away */
+		void files_drop(Plugin* owner);
+		/* ACT_INITIALIZED and ACT_READY as far as they were sent, in
+		   order, for a plugin loaded later to catch up on */
+		std::vector<int> seen;
+		/* one plugin's action(), guarded against it throwing */
+		int call_action(Plugin* plugin_ptr, const ActionEvent& ev);
+		/* hands a plugin loaded after the start the lifecycle events it
+		   missed, see seen; to it alone, after its config is applied */
+		void catch_up(Plugin* plugin_ptr);
 	public:
 		Plugins() { init(); }
-		~Plugins() { cleanup(); }
+		// a destructor must not throw (std::terminate()): whatever
+		// cleanup() raises at shutdown is dropped, the logger may be
+		// gone already
+		~Plugins() {
+			try {
+				cleanup();
+			} catch (...) {
+			}
+		}
 		int cleanup();
 		/* Reloads plugins whose library changed, and re-applies the
 		   config of the rest so they can re-read external files such
@@ -60,4 +87,19 @@ class Plugins {
 		   data, when given, must stay alive for the duration of the
 		   call - plugins are not allowed to retain it. */
 		int action(int code, int val = 0, const json* data = nullptr);
+
+		// IPluginFiles
+		bool file_add(Plugin* owner, const string& path, int size) override;
+		bool file_remove(Plugin* owner, const string& path) override;
+		/* For the file system, path without leading or trailing '/':
+		   > 0 a plugin file of that size, 0 a directory on the way to
+		   one, -ENOENT neither */
+		int file_attr(const string& path);
+		/* the names of the plugin files and directories directly in dir,
+		   "" for the root */
+		std::vector<string> file_dir(const string& dir);
+		/* hand a read or write to the plugin that added path; -ENOENT
+		   when none did */
+		int file_read(const string& path, char* buf, size_t size);
+		int file_write(const string& path, const char* buf, size_t size);
 };

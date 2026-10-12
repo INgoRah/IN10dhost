@@ -9,6 +9,9 @@
  *   { "faulty": { "mode": "config_get" } }  throw from config_get()
  *   { "faulty": { "mode": "config_set" } }  throw from config_set()
  *
+ *   { "faulty": { "mode": "fs_read" } }     add status/faulty, throw from
+ *                                          reading it
+ *
  * Adding "_odd" to any of those throws something that is not derived
  * from std::exception, to reach the loader's catch(...) instead.
  *
@@ -68,6 +71,14 @@ public:
 		// take the mode first so the very call that sets it can throw
 		mode = j.value("mode", "");
 		fail("config_set");
+		if (mode.rfind("fs_read", 0) == 0)
+			files->file_add(this, "status/faulty", 8);
+	}
+
+	int fs_read(const std::string&, char*, size_t) override
+	{
+		fail("fs_read");
+		return 0;
 	}
 
 	int action(const ActionEvent& ev) override
