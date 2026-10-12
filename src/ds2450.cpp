@@ -32,7 +32,8 @@ extern Plugins plugins;
 // ds2450.h; this counts as class scope for access control, so it can
 // take the address of the private r_volt() handler directly
 const FsEntry<ds2450> ds2450::table[] = {
-	{ "volt.*", 4, 4, /* alpha */ true, nullptr, nullptr, &ds2450::r_volt, nullptr },
+	// volt.A .. volt.D and volt.ALL (idx 4), as in owfs
+	{ "volt.*", 4, 4, /* alpha */ true, nullptr, nullptr, &ds2450::r_volt, nullptr, AGG_ALL },
 };
 const size_t ds2450::n_table = sizeof(ds2450::table) / sizeof(ds2450::table[0]);
 
@@ -59,14 +60,29 @@ int ds2450::fs_attr(std::string& path) const
 // again (it is recursive) because static analysis cannot follow the call
 // through the table's member pointers and would see unguarded access.
 
-// only ever called with idx 0..3 (A..D), once fs_table.h has already
-// matched "volt.*" in path
+// only ever called with idx 0..3 (A..D), or 4 for volt.ALL, once
+// fs_table.h has already matched "volt.*" in path
 int ds2450::r_volt(char* buf, size_t size, bool uncached, int idx)
 {
 	auto lk = lock();
-	if (size < 5)
+	if (idx < 4) {
+		if (size < 5)
+			return -EINVAL;
+		return fs_read_volt((uint8_t)idx, buf, uncached);
+	}
+	// volt.ALL: "A,B,C,D" as owfs lists an aggregate
+	if (size < 4 * 6)
 		return -EINVAL;
-	return fs_read_volt((uint8_t)idx, buf, uncached);
+	int len = 0;
+	for (uint8_t ch = 0; ch < 4; ch++) {
+		if (ch)
+			buf[len++] = ',';
+		int r = fs_read_volt(ch, buf + len, uncached);
+		if (r < 0)
+			return r;
+		len += r;
+	}
+	return len;
 }
 
 // Converts and reads channel ch from the device and stores the result
@@ -91,13 +107,12 @@ int ds2450::volt_update(uint8_t ch)
 	return 0;
 }
 
+// Returns the length written to buf, or -EAGAIN if an uncached read
+// could not convert (volt_update() reports that positive)
 int ds2450::fs_read_volt(uint8_t ch, char* buf, bool uncached)
 {
-	if (uncached) {
-		int r = volt_update(ch);
-		if (r != 0)
-			return r;
-	}
+	if (uncached && volt_update(ch) != 0)
+		return -EAGAIN;
 	std::sprintf(buf, "%1.2f", adc_get(ch));
 
 	return std::strlen(buf);

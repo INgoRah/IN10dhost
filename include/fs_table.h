@@ -21,6 +21,15 @@
 // disk, "A" -> 0, "B" -> 1, and so on. One entry replaces what used to
 // be a hand-written 0..N loop either way.
 //
+// Set aggregate to also get the owfs style "ALL" instance after the
+// numbered ones, and with AGG_ALL_BYTE also "BYTE": "PIO.*" with
+// count=8 and AGG_ALL_BYTE then covers PIO.0 .. PIO.7, PIO.ALL and
+// PIO.BYTE, "volt.*" with count=4, alpha and AGG_ALL volt.A .. volt.D
+// and volt.ALL. The callbacks receive idx = count for ALL and idx =
+// count + 1 for BYTE. The visible callback is asked for those too.
+// getattr() reports room for count comma separated values of suglen
+// each for ALL, and for the largest count bit number for BYTE.
+//
 // A name can also contain a slash to describe a file one level under
 // a directory that is never listed as its own entry: pin dot star
 // slash name, and pin dot star slash func, together are enough to
@@ -31,6 +40,15 @@
 // of these all the way, so the "directory" itself never needs one.
 // (Spelled out above instead of written with the literal characters,
 // since a slash right after a star would close this very comment.)
+// see the comment on FsEntry::aggregate
+enum FsAggregate : uint8_t {
+	AGG_NONE,
+	// '*' also expands to ALL, e.g. volt.ALL
+	AGG_ALL,
+	// ALL and BYTE, for bitfields like PIO.ALL and PIO.BYTE
+	AGG_ALL_BYTE,
+};
+
 template <class T>
 struct FsEntry {
 	const char *name;
@@ -51,6 +69,9 @@ struct FsEntry {
 	int (T::*size_cb)(int idx) const;
 	int (T::*read)(char *buf, size_t size, bool uncached, int idx);
 	int (T::*write)(const char *buf, size_t size, int idx);
+	// AGG_ALL: '*' also expands to ALL (idx = count), AGG_ALL_BYTE
+	// additionally to BYTE (idx = count + 1), see above
+	FsAggregate aggregate = AGG_NONE;
 };
 
 namespace fs_table {
@@ -62,15 +83,33 @@ constexpr int NOT_FOUND = INT_MIN;
 
 namespace detail {
 
-	// name with '*' replaced by idx, as a decimal number or as a
-	// capital letter (idx 0 -> 'A') depending on alpha
-	inline std::string instance_name(const char *name, int idx, bool alpha)
+	// number of instances '*' expands to, 0 for a name without one
+	template <class T>
+	int instances(const FsEntry<T> &e)
+	{
+		if (!e.count)
+			return 0;
+		return e.count + (e.aggregate == AGG_ALL_BYTE ? 2 : e.aggregate == AGG_ALL ? 1 : 0);
+	}
+
+	// name with '*' replaced by idx: a decimal number or a capital
+	// letter (idx 0 -> 'A') depending on alpha, or ALL/BYTE for the
+	// aggregate instances
+	template <class T>
+	std::string instance_name(const FsEntry<T> &e, const char *name, int idx)
 	{
 		std::string s(name);
 		size_t pos = s.find('*');
 		if (pos == std::string::npos)
 			return s;
-		s.replace(pos, 1, alpha ? std::string(1, (char)('A' + idx)) : std::to_string(idx));
+		std::string label;
+		if (e.aggregate != AGG_NONE && idx == e.count)
+			label = "ALL";
+		else if (e.aggregate == AGG_ALL_BYTE && idx == e.count + 1)
+			label = "BYTE";
+		else
+			label = e.alpha ? std::string(1, (char)('A' + idx)) : std::to_string(idx);
+		s.replace(pos, 1, label);
 		return s;
 	}
 
@@ -92,8 +131,11 @@ namespace detail {
 				}
 				continue;
 			}
-			for (int j = 0; j < e.count; j++) {
-				if (path.find(instance_name(e.name, j, e.alpha)) != std::string::npos) {
+			// ALL/BYTE first: "volt.A" is a substring of "volt.ALL"
+			int extra = instances(e) - e.count;
+			for (int k = 0; k < instances(e); k++) {
+				int j = k < extra ? e.count + k : k - extra;
+				if (path.find(instance_name(e, e.name, j)) != std::string::npos) {
 					idx = j;
 					return &e;
 				}
@@ -132,9 +174,9 @@ namespace detail {
 			size_t slash = name.find('/');
 			if (slash == std::string::npos)
 				continue;
-			for (int j = 0; j < std::max(e.count, 1); j++) {
+			for (int j = 0; j < std::max(instances(e), 1); j++) {
 				int idx = e.count ? j : -1;
-				std::string prefix = instance_name(name.substr(0, slash).c_str(), idx, e.alpha);
+				std::string prefix = instance_name(e, name.substr(0, slash).c_str(), idx);
 				if (names_dir(path, prefix))
 					return true;
 			}
@@ -168,11 +210,11 @@ std::vector<std::string> dir(const T &self, const FsEntry<T> *table, size_t n,
 		size_t slash = name.find('/');
 		if (slash == std::string::npos)
 			continue;
-		for (int j = 0; j < std::max(e.count, 1); j++) {
+		for (int j = 0; j < std::max(detail::instances(e), 1); j++) {
 			int idx = e.count ? j : -1;
-			std::string prefix = detail::instance_name(name.substr(0, slash).c_str(), idx, e.alpha);
+			std::string prefix = detail::instance_name(e, name.substr(0, slash).c_str(), idx);
 			if (detail::names_dir(path, prefix))
-				out.push_back(detail::instance_name(name.substr(slash + 1).c_str(), idx, e.alpha));
+				out.push_back(detail::instance_name(e, name.substr(slash + 1).c_str(), idx));
 		}
 	}
 	if (!out.empty())
@@ -182,12 +224,12 @@ std::vector<std::string> dir(const T &self, const FsEntry<T> *table, size_t n,
 		const FsEntry<T> &e = table[i];
 		std::string name(e.name);
 		size_t slash = name.find('/');
-		for (int j = 0; j < std::max(e.count, 1); j++) {
+		for (int j = 0; j < std::max(detail::instances(e), 1); j++) {
 			int idx = e.count ? j : -1;
 			if (e.visible && !(self.*e.visible)(idx))
 				continue;
-			std::string inst = detail::instance_name(
-				(slash == std::string::npos ? name : name.substr(0, slash)).c_str(), idx, e.alpha);
+			std::string inst = detail::instance_name(e,
+				(slash == std::string::npos ? name : name.substr(0, slash)).c_str(), idx);
 			if (std::find(out.begin(), out.end(), inst) == out.end())
 				out.push_back(std::move(inst));
 		}
@@ -195,7 +237,8 @@ std::vector<std::string> dir(const T &self, const FsEntry<T> *table, size_t n,
 	return out;
 }
 
-// getattr(): 0 for an implied directory, else suglen or size_cb(idx).
+// getattr(): 0 for an implied directory, else suglen or size_cb(idx);
+// for the ALL/BYTE instances of an aggregate entry see FsEntry.
 // Matches unconditionally - see the "visible" comment on FsEntry.
 template <class T>
 int attr(const T &self, const FsEntry<T> *table, size_t n, const std::string &path)
@@ -203,6 +246,10 @@ int attr(const T &self, const FsEntry<T> *table, size_t n, const std::string &pa
 	int idx;
 	const FsEntry<T> *e = detail::match(table, n, path, idx);
 
+	if (e && e->aggregate != AGG_NONE && idx == e->count)
+		return e->count * e->suglen + e->count - 1;
+	if (e && e->aggregate == AGG_ALL_BYTE && idx == e->count + 1)
+		return (int)std::to_string((1ULL << e->count) - 1).size();
 	if (e)
 		return e->size_cb ? (self.*e->size_cb)(idx) : e->suglen;
 	if (detail::implied_dir(table, n, path))

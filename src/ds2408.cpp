@@ -24,11 +24,14 @@ extern Plugins plugins;
 // out-of-line definition of the private static members declared in
 // ds2408.h; this counts as class scope for access control, so it can
 // take the address of the private handlers below directly
+// PIO.*, sensed.* and latch.* are aggregates: besides .0 .. .7 also
+// .ALL (idx 8) and .BYTE (idx 9), as in owfs. Matching is by substring
+// and the first hit wins, so they have to come before the plain "BYTE".
 const FsEntry<ds2408> ds2408::table[] = {
+	{ "PIO.*", 3, 8, false, &ds2408::vis_pio, nullptr, &ds2408::r_pio, &ds2408::w_pio, AGG_ALL_BYTE },
+	{ "sensed.*", 2, 8, false, &ds2408::vis_sensed, nullptr, &ds2408::r_sensed, nullptr, AGG_ALL_BYTE },
+	{ "latch.*", 2, 8, false, &ds2408::vis_latched, nullptr, &ds2408::r_latched, &ds2408::w_latched, AGG_ALL_BYTE },
 	{ "BYTE", 3, 0, false, nullptr, nullptr, &ds2408::r_byte, &ds2408::w_byte },
-	{ "PIO.*", 3, 8, false, &ds2408::vis_pio, nullptr, &ds2408::r_pio, &ds2408::w_pio },
-	{ "sensed.*", 2, 8, false, &ds2408::vis_sensed, nullptr, &ds2408::r_sensed, nullptr },
-	{ "latched.*", 2, 8, false, &ds2408::vis_latched, nullptr, &ds2408::r_latched, &ds2408::w_latched },
 	{ "cfg", 3 * DS2408_CFG_SIZE, 0, false, nullptr, nullptr, &ds2408::r_cfg, &ds2408::w_cfg },
 	{ "pin.*/name", PIN_NAME_MAX, 8, false, nullptr, nullptr, &ds2408::r_pin_name, &ds2408::w_pin_name },
 	{ "pin.*/func", 20, 8, false, nullptr, nullptr, &ds2408::r_pin_func, &ds2408::w_pin_func },
@@ -100,9 +103,116 @@ int ds2408::w_byte(const char* buf, size_t size, int)
 	}
 }
 
+// the aggregate instances of PIO.*, sensed.* and latch.*, see table
+enum { IDX_ALL = 8, IDX_BYTE = 9 };
+
+// "b0,b1,...,b7" as owfs writes a bitfield's .ALL
+static int fmt_all(char* buf, uint8_t bits)
+{
+	char* p = buf;
+	for (int i = 0; i < 8; i++)
+		p += std::sprintf(p, i ? ",%d" : "%d", (bits >> i) & 1);
+	return p - buf;
+}
+
+// a written value without a C string's NUL or the newline of a shell
+// redirect
+static std::string trimmed(const char* buf, size_t size)
+{
+	std::string s(buf, size);
+
+	s = s.substr(0, s.find('\0'));
+	while (!s.empty() && std::isspace((unsigned char)s.back()))
+		s.pop_back();
+	return s;
+}
+
+// .ALL as fmt_all() writes it: exactly eight comma separated 0 or 1
+static bool parse_all(const std::string& s, uint8_t& bits)
+{
+	std::stringstream ss(s);
+	std::string item;
+	int i = 0;
+
+	bits = 0;
+	while (std::getline(ss, item, ',')) {
+		while (!item.empty() && std::isspace((unsigned char)item.front()))
+			item.erase(0, 1);
+		while (!item.empty() && std::isspace((unsigned char)item.back()))
+			item.pop_back();
+		if (i > 7 || (item != "0" && item != "1"))
+			return false;
+		if (item == "1")
+			bits |= 1 << i;
+		i++;
+	}
+	return i == 8;
+}
+
+// .BYTE: a number 0..255
+static bool parse_byte(const std::string& s, uint8_t& bits)
+{
+	try {
+		size_t end;
+		int v = std::stoi(s, &end);
+		if (end != s.size() || v < 0 || v > 255)
+			return false;
+		bits = (uint8_t)v;
+		return true;
+	} catch (const std::invalid_argument&) {
+		return false;
+	} catch (const std::out_of_range&) {
+		return false;
+	}
+}
+
+// one bit, .ALL or .BYTE of bits, depending on idx
+static int fmt_bits(char* buf, int idx, uint8_t bits)
+{
+	if (idx == IDX_ALL)
+		return fmt_all(buf, bits);
+	if (idx == IDX_BYTE)
+		return std::sprintf(buf, "%d", bits);
+	return std::sprintf(buf, "%d", (bits >> idx) & 1);
+}
+
+uint8_t ds2408::pio_mask() const
+{
+	auto lk = lock();
+	uint8_t bits = 0;
+
+	for (uint8_t i = 0; i < 8; i++)
+		if (pin_is_on(i))
+			bits |= 1 << i;
+	return bits;
+}
+
+void ds2408::pio_mask_set(uint8_t on)
+{
+	auto lk = lock();
+	uint8_t tmp = data[PIO_OUT];
+
+	for (uint8_t i = 0; i < 8; i++) {
+		bool want = on & (1 << i);
+		if (cfg[CFG_PIN_ID + i] == CFG_OUT_PWM) {
+			if (want != pin_is_on(i))
+				pin_switch(i, want ? ON : OFF);
+		} else if (want) {
+			// active low, see pin_switch()
+			tmp &= ~(1 << i);
+		} else {
+			tmp |= 1 << i;
+		}
+	}
+	// all plain outputs in one write
+	pio_set(tmp);
+}
+
 int ds2408::r_pio(char* buf, size_t, bool, int idx)
 {
 	auto lk = lock();
+	if (idx >= IDX_ALL)
+		return fmt_bits(buf, idx, pio_mask());
 	if (cfg[CFG_PIN_ID + idx] == CFG_OUT_PWM)
 		std::sprintf(buf, "%d", level_pct[idx]);
 	else
@@ -114,6 +224,15 @@ int ds2408::r_pio(char* buf, size_t, bool, int idx)
 int ds2408::w_pio(const char* buf, size_t size, int idx)
 {
 	auto lk = lock();
+	if (idx >= IDX_ALL) {
+		uint8_t bits;
+		std::string s = trimmed(buf, size);
+
+		if (!(idx == IDX_ALL ? parse_all(s, bits) : parse_byte(s, bits)))
+			return -EINVAL;
+		pio_mask_set(bits);
+		return size;
+	}
 	try {
 		uint8_t tmp = (uint8_t)(std::stoi(buf) & 0xff);
 		logger.verbose(std::format("set PIO.{} = {}", idx, tmp));
@@ -132,31 +251,22 @@ int ds2408::r_sensed(char* buf, size_t, bool, int idx)
 {
 	auto lk = lock();
 	/* sensed from register 0x88 */
-	std::sprintf(buf, "%d", (data[PIO_LS] & (0x1 << idx)) ? 1 : 0);
-	return std::strlen(buf);
+	return fmt_bits(buf, idx, data[PIO_LS]);
 }
 
 int ds2408::r_latched(char* buf, size_t, bool, int idx)
 {
 	auto lk = lock();
 	/* activity latch as collected by the alarm handling, alarm_read() */
-	std::sprintf(buf, "%d", (latched & (0x1 << idx)) ? 1 : 0);
-	return std::strlen(buf);
+	return fmt_bits(buf, idx, latched);
 }
 
-// Writing 0 to any latched.N clears all latches of the device and its
-// alarm flag, which also drops it from /alarm. Nothing else clears them.
-int ds2408::w_latched(const char* buf, size_t size, int)
+// Writing anything to latch.N, latch.ALL or latch.BYTE clears all
+// latches of the device and its alarm flag, which also drops it from
+// /alarm - the value is ignored, as in owfs. Nothing else clears them.
+int ds2408::w_latched(const char*, size_t size, int)
 {
 	auto lk = lock();
-	std::string s(buf, size);
-
-	// a C string's NUL, or the newline of a shell redirect
-	s = s.substr(0, s.find('\0'));
-	while (!s.empty() && std::isspace((unsigned char)s.back()))
-		s.pop_back();
-	if (s != "0")
-		return -EINVAL;
 	if (data[PIO_LATCH] != 0) {
 		logger.verbose(rom + " latch reset: cleared from the file system");
 		// coverity[sleep] - bus mutex must be held for the whole 1-Wire
@@ -348,6 +458,9 @@ int ds2408::r_watchdog(char* buf, size_t, bool, int)
 bool ds2408::vis_pio(int idx) const
 {
 	auto lk = lock();
+	// .ALL and .BYTE are always there, as in owfs
+	if (idx >= IDX_ALL)
+		return true;
 	switch (cfg[CFG_PIN_ID + idx]) {
 		case 0xff:
 		case 0:
@@ -401,6 +514,9 @@ int ds2408::w_level(const char* buf, size_t size, int idx)
 bool ds2408::vis_sensed(int idx) const
 {
 	auto lk = lock();
+	// .ALL and .BYTE are always there, as in owfs
+	if (idx >= IDX_ALL)
+		return true;
 	switch (cfg[CFG_PIN_ID + idx]) {
 		case 0xff:
 		case 0:
@@ -413,6 +529,9 @@ bool ds2408::vis_sensed(int idx) const
 bool ds2408::vis_latched(int idx) const
 {
 	auto lk = lock();
+	// .ALL and .BYTE are always there, as in owfs
+	if (idx >= IDX_ALL)
+		return true;
 	switch (cfg[CFG_PIN_ID + idx]) {
 		case 0xff:
 		case 0:
@@ -646,7 +765,7 @@ uint8_t ds2408::pio_set(uint8_t pio)
 /* Register read for an alarm, called from the alarm handling. The read
  * also resets the latches on the device, so the ones it got are handed
  * back in latch for the caller to work on, and added to the ones kept
- * for latched.* (a second alarm before they were cleared does not lose
+ * for latch.* (a second alarm before they were cleared does not lose
  * the first). The device is flagged for /alarm. Returns what
  * reg_read() returns. */
 uint8_t ds2408::alarm_read(uint8_t& latch)
