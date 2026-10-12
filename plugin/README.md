@@ -77,6 +77,25 @@ Available to scripts:
 | `ow.threshold_set(rom, value)` | brightness 0..255 above which a ds2408's timed lights switch |
 | `ow.temp(rom)` | read a ds1820 temperature, `null` if that rom is not one |
 | `ow.volt(rom, channel)` | read a cached ds2450 voltage |
+| `ow.pins([role])` | the pins with that role (`"light"`, ...), or with any role, as `[{rom, pin, name, role, room, output, on}, ...]` |
+| `ow.role_switch(role, on)` | switch every output with that role on (`true`/`ow.ON`) or off, true when all of them switched |
+
+An unknown role throws a `RangeError`. For an input `on` is its sensed
+level, for an output whether it is on.
+
+A ds2408's `ACT_DEV_CHANGE` payload carries, besides the raw `pio`
+byte, a `changed` list with the outputs that changed: `{pin, on, name,
+role, room}`. That is enough to notice a light coming on while nobody
+is home:
+
+```js
+case ACT_DEV_CHANGE:
+    if (data && data.changed)
+        for (const c of data.changed)
+            if (c.role == "light" && c.on && away)
+                ow.log(c.room + " " + c.name + " switched on");
+    return 1;
+```
 
 The ds2408 calls return true on success and false when `rom` is not a
 ds2408 or the bus transfer failed. A `pin` outside 0..7 or a value

@@ -8,6 +8,7 @@
 #include "ow_dev.h"
 #include "interface/ds2408.h"
 #include "fs_table.h"
+#include "interface/pin.h"
 
 #define DS2408_CFG_SIZE 26
 /** longest pin name, same as the size its fs entry reports */
@@ -35,6 +36,10 @@ class ds2408 : public OwDev, public IDS2408 {
 		int w_pin_name(const char* buf, size_t size, int idx);
 		int r_pin_func(char* buf, size_t size, bool uncached, int idx);
 		int w_pin_func(const char* buf, size_t size, int idx);
+		int r_pin_role(char* buf, size_t size, bool uncached, int idx);
+		int w_pin_role(const char* buf, size_t size, int idx);
+		int r_pin_room(char* buf, size_t size, bool uncached, int idx);
+		int w_pin_room(const char* buf, size_t size, int idx);
 		int r_threshold(char* buf, size_t size, bool uncached, int idx);
 		int w_threshold(const char* buf, size_t size, int idx);
 		int r_brightness(char* buf, size_t size, bool uncached, int idx);
@@ -56,8 +61,9 @@ class ds2408 : public OwDev, public IDS2408 {
 		static const size_t n_table;
 		int threshold = 0;
 		int brightness = 0;
-		// user given name per pin, empty means the default "n.<pin>"
-		std::array<std::string, 8> pin_name;
+		// name, role, room and level per pin, see interface/pin.h; only
+		// kept here, never written to the device
+		std::array<Pin, 8> pins;
 		// activity latches collected by alarm_read() since they were last
 		// cleared by writing to a latch.* entry; other register reads
 		// (data[PIO_LATCH]) do not change it
@@ -65,8 +71,6 @@ class ds2408 : public OwDev, public IDS2408 {
 		// activity latches as reg_read() got them, before it reset them
 		// on the device (which also clears data[PIO_LATCH])
 		uint8_t last_latch = 0;
-		// level per pin in percent as last applied by level_set()
-		std::array<uint8_t, 8> level_pct{};
 		// data[PIO_OUT] holds what the device really drives, not the
 		// zeroes (= all on) it starts with
 		bool out_known = false;
@@ -132,6 +136,17 @@ class ds2408 : public OwDev, public IDS2408 {
 		bool pin_is_on(uint8_t pio) const;
 		// the name given to a pin, or "PIO.<n>" while it has none
 		std::string pin_label(int pio) const;
+		PinRole role(int pio) const;
+		// configured as an output (plain or PWM), see vis_pio()
+		bool pin_is_output(int pio) const;
+		// appends the pins that have a role, all of them for
+		// PinRole::none; see IDevices::pins()
+		void pins_get(std::vector<PinInfo>& out, PinRole role) const;
+		// switches the output pins with that role, see
+		// IDevices::role_switch(); returns how many failed
+		int role_switch(PinRole role, bool on);
+		// the room given to a pin, empty while it has none
+		std::string room(int pio) const;
 		int brightness_set(uint8_t brightness);
 		int threshold_set(uint8_t threshold);
 		int get_brightness() const;

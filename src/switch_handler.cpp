@@ -155,6 +155,11 @@ bool parse_buf(std::string_view buf, struct _sw_tbl& sw)
 	}
 	sw.secs = (uint16_t)opt[0];
 	sw.on_press = (uint8_t)opt[1];
+	if (is_all_off(sw.dst) && sw.secs) {
+		logger.warn(std::format("all lights off takes no timing, ignored: {}", buf));
+		sw.secs = 0;
+		sw.on_press = SW_ON_PRESS_RETRIGGER;
+	}
 
 	return true;
 }
@@ -290,7 +295,9 @@ bool SwitchHandler::switchHandle(uint8_t busNr, uint8_t adr1)
 				(int)cache.switches[i].dst.da.adr,
 				(int)cache.switches[i].dst.da.pio
 			));
-			if (cache.switches[i].secs) {
+			if (is_all_off(cache.switches[i].dst)) {
+				all_off();
+			} else if (cache.switches[i].secs) {
 				switch_timed(cache.switches[i]);
 			} else {
 				/* toggle io or select levels */
@@ -302,6 +309,32 @@ bool SwitchHandler::switchHandle(uint8_t busNr, uint8_t adr1)
 		}
 	}
 	return false;
+}
+
+/* Every light off, as writing 0 to /role/light/all does. Their off
+   timers are stopped as well, so none of them switches a light off
+   later that was switched on again in the meantime. */
+void SwitchHandler::all_off()
+{
+	std::vector<union pio> running;
+
+	{
+		std::lock_guard<std::mutex> lk(timers_mtx);
+		for (const auto& t : timers) {
+			union pio p;
+			p.data = t.first;
+			running.push_back(p);
+		}
+	}
+	// outside timers_mtx: role() takes the device lock, see there
+	for (const auto& p : running) {
+		ds2408* dev = (ds2408*)ow->find(p.da.bus, p.da.adr, 0x29);
+		if (dev && dev->role(p.da.pio) == PinRole::light)
+			timer_stop(p);
+	}
+	logger.verbose("all lights off");
+	// coverity[sleep] - bus mutex must be held
+	ow->role_switch(PinRole::light, false);
 }
 
 bool SwitchHandler::output_on(union pio dst)
@@ -528,6 +561,8 @@ std::string SwitchHandler::src_label(union s_adr src) const
 /* "<device name>, <pin name>" */
 std::string SwitchHandler::dst_label(union pio dst) const
 {
+	if (is_all_off(dst))
+		return "all lights off";
 	ds2408* dev = (ds2408*)ow->find(dst.da.bus, dst.da.adr, 0x29);
 
 	if (!dev)

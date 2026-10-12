@@ -530,3 +530,58 @@ TEST_F(SwTest, SwitchList)
 	fs_ops.write("/29.0202ABBD6677D4/pin.2/name", "\n", 1, 0, nullptr);
 	swHdl.timer_poll(HrClock::now() + std::chrono::seconds(60));
 }
+
+// Target 0.0.0 switches every light off, whatever device it is on
+TEST_F(SwTest, AllLightsOff)
+{
+	char buf[2048];
+	uint8_t adr[] = { 0x29, 0x02, 0x01, 0xab, 0xbd, 0x66, 0x77, 0x9a };
+	ds2408* src = (ds2408*)ow.find(0x290201ABBD66779A);
+	ds2408* dst = (ds2408*)ow.find(0x290202ABBD6677D4);
+	ASSERT_NE(src, nullptr);
+	ASSERT_NE(dst, nullptr);
+	for (int i = 0; i < 4; i++)
+		dst->cfg[CFG_PIN_ID + i] = CFG_OUT_LOW;
+	// 0, 1 lights, 2 a socket
+	fs_ops.write("/29.0202ABBD6677D4/pin.0/role", "light", 5, 0, nullptr);
+	fs_ops.write("/29.0202ABBD6677D4/pin.1/role", "light", 5, 0, nullptr);
+	fs_ops.write("/29.0202ABBD6677D4/pin.2/role", "socket", 6, 0, nullptr);
+	for (int i = 0; i < 3; i++)
+		dst->pin_switch(i, ON);
+	ASSERT_TRUE(dst->pin_is_on(0));
+	ASSERT_TRUE(dst->pin_is_on(1));
+	// a light with its off timer running
+	union pio light1 = {};
+	light1.da.bus = 2;
+	light1.da.adr = 2;
+	light1.da.pio = 1;
+	swHdl.timer_start(light1, 30);
+
+	// timing makes no sense here and is dropped
+	const char* add = "1.2.3 0.0.0 30 1";
+	fs_ops.write("/switches/add", add, strlen(add) + 1, 0, nullptr);
+	fs_ops.read("/switches/list", buf, sizeof(buf), 0, nullptr);
+	EXPECT_NE(std::string(buf).find("1.2.3 -> 0.0.0: 29.0201ABBD66779A, PIO.2 (latch 3) -> all lights off\n"),
+		std::string::npos) << buf;
+
+	src->data[STAT] = 0;
+	src->data[PIO_TIME] = 0xff;
+	src->data[PIO_LATCH] = 1 << 2;
+	EXPECT_TRUE(swHdl.dev_alarm(1, adr));
+	EXPECT_FALSE(dst->pin_is_on(0));
+	EXPECT_FALSE(dst->pin_is_on(1));
+	EXPECT_TRUE(dst->pin_is_on(2));
+	EXPECT_FALSE(swHdl.timer_running(light1));
+
+	// pressed again it stays off, nothing toggles
+	src->data[PIO_LATCH] = 1 << 2;
+	swHdl.dev_alarm(1, adr);
+	EXPECT_FALSE(dst->pin_is_on(0));
+	EXPECT_FALSE(dst->pin_is_on(1));
+
+	const char* del = "1.2.3 0.0.0";
+	EXPECT_EQ(fs_ops.write("/switches/del", del, strlen(del) + 1, 0, nullptr), (int)strlen(del) + 1);
+	for (int i = 0; i < 3; i++)
+		fs_ops.write(("/29.0202ABBD6677D4/pin." + std::to_string(i) + "/role").c_str(), "", 0, 0, nullptr);
+	dst->pin_switch(2, OFF);
+}

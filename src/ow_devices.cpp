@@ -534,6 +534,36 @@ std::vector<OwDev*> OwDevices::list_devices(int bus)
 	return cache.busses[bus].devices;
 }
 
+std::vector<PinInfo> OwDevices::pins(PinRole role)
+{
+	std::vector<PinInfo> out;
+
+	for (int bus = 0; bus < bus_count(); bus++) {
+		for (OwDev* dev : list_devices(bus)) {
+			if (auto* d = dynamic_cast<ds2408*>(dev))
+				d->pins_get(out, role);
+		}
+	}
+	return out;
+}
+
+int OwDevices::role_switch(PinRole role, bool on)
+{
+	int failed = 0;
+
+	for (int bus = 0; bus < bus_count(); bus++) {
+		for (OwDev* dev : list_devices(bus)) {
+			// coverity[sleep] - bus mutex must be held
+			if (auto* d = dynamic_cast<ds2408*>(dev))
+				failed += d->role_switch(role, on);
+		}
+	}
+	if (failed)
+		logger.warn(std::format("{} {} could not be switched {}", failed,
+			pin_role_str(role), on ? "on" : "off"));
+	return failed;
+}
+
 // search devs
 void OwDevices::search(bool mode)
 {

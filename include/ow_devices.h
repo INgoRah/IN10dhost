@@ -129,6 +129,9 @@ class OwDevices : public IDevices
 		int get_poll() { return cache.poll; };
 
 		std::vector<OwDev*> list_devices(int bus);
+		// IDevices: the pins with a role across all buses
+		std::vector<PinInfo> pins(PinRole role = PinRole::none) override;
+		int role_switch(PinRole role, bool on) override;
 
 		int log_dump(char* buf, size_t size);
 		/* Writes the 1-Wire trace (status/1wire.vcd) to

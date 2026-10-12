@@ -612,12 +612,14 @@ TEST_F(FsTest, Ds2408PinInstanceDirLists) {
 	ow.update_device(1, "29.0701F8FE6677F4");
 	ow.update_data();
 
-	// browsing into a pin instance returns exactly its two children,
+	// browsing into a pin instance returns exactly its own children,
 	// not the device's own top-level files mixed in
 	fs_ops.readdir("/29.0701F8FE6677F4/pin.0", &seen, record, 0, nullptr, (enum fuse_readdir_flags)0);
-	ASSERT_EQ(seen.size(), 2u);
+	ASSERT_EQ(seen.size(), 4u);
 	EXPECT_NE(std::find(seen.begin(), seen.end(), "name"), seen.end());
 	EXPECT_NE(std::find(seen.begin(), seen.end(), "func"), seen.end());
+	EXPECT_NE(std::find(seen.begin(), seen.end(), "role"), seen.end());
+	EXPECT_NE(std::find(seen.begin(), seen.end(), "room"), seen.end());
 }
 
 TEST_F(FsTest, Ds2408WriteDoesNotCrossContaminate) {
@@ -1518,7 +1520,7 @@ TEST_F(FsTest, Ds2408Watchdog) {
 	EXPECT_FALSE(dev->watchdog_pending());
 	EXPECT_EQ(watchdog(rom), "1");
 	EXPECT_EQ(dev->data[PIO_OUT], 0xF5);
-	EXPECT_EQ(dev->level_pct[1], 40);
+	EXPECT_EQ(dev->pins[1].level, 40);
 	json cfg = plugins.config_of("faulty");
 	EXPECT_EQ(cfg["watchdogs"], 1);
 	EXPECT_EQ(cfg["last_watchdog"]["rom"], rom);
@@ -1670,26 +1672,28 @@ TEST_F(FsTest, Ds2408PinNames) {
 
 	// stored with the device config and restored from it
 	json j = dev->to_json();
-	ASSERT_TRUE(j["pin_names"].is_array());
-	EXPECT_EQ(j["pin_names"].size(), 8u);
-	EXPECT_EQ(j["pin_names"][3], "Kitchen");
-	EXPECT_EQ(j["pin_names"][4], "");
+	ASSERT_TRUE(j["pins"].is_array());
+	EXPECT_EQ(j["pins"].size(), 8u);
+	EXPECT_EQ(j["pins"][3]["name"], "Kitchen");
+	EXPECT_EQ(j["pins"][4]["name"], "");
+	EXPECT_FALSE(j.contains("pin_names"));
 	ds2408 restored;
 	restored.from_json(j);
 	json r = restored.to_json();
-	EXPECT_EQ(r["pin_names"], j["pin_names"]);
+	EXPECT_EQ(r["pins"], j["pins"]);
 
-	// older configs without pin_names, or a shorter list, load fine
+	// configs without any pin data, or a shorter list, load fine
 	json old = j;
-	old.erase("pin_names");
+	old.erase("pins");
 	ds2408 legacy;
 	EXPECT_NO_THROW(legacy.from_json(old));
-	EXPECT_EQ(legacy.to_json()["pin_names"][3], "");
+	EXPECT_EQ(legacy.to_json()["pins"][3]["name"], "");
+	// older configs only had pin_names
 	old["pin_names"] = { "Door", "Hall" };
 	ds2408 partial;
 	EXPECT_NO_THROW(partial.from_json(old));
-	EXPECT_EQ(partial.to_json()["pin_names"][1], "Hall");
-	EXPECT_EQ(partial.to_json()["pin_names"][2], "");
+	EXPECT_EQ(partial.to_json()["pins"][1]["name"], "Hall");
+	EXPECT_EQ(partial.to_json()["pins"][2]["name"], "");
 
 	// an empty write resets the default name
 	res = fs_ops.write("/29.0701F8FE6677F4/pin.3/name", "\n", 1, 0, nullptr);
@@ -1697,6 +1701,229 @@ TEST_F(FsTest, Ds2408PinNames) {
 	fs_ops.read("/29.0701F8FE6677F4/pin.3/name", buf, sizeof(buf), 0, nullptr);
 	EXPECT_STREQ(buf, "PIO.3");
 	fs_ops.write("/29.0701F8FE6677F4/pin.5/name", "", 0, 0, nullptr);
+}
+
+TEST_F(FsTest, Ds2408PinRoleRoom) {
+	char buf[64];
+	int res;
+
+	ow.update_device(1, "29.0701F8FE6677F4");
+	ow.update_data();
+	ds2408* dev = (ds2408*)ow.find(0x290701F8FE6677F4);
+	ASSERT_NE(dev, nullptr);
+	for (int i = 0; i < 8; i++) {
+		std::string base = "/29.0701F8FE6677F4/pin." + std::to_string(i);
+		fs_ops.write((base + "/role").c_str(), "", 0, 0, nullptr);
+		fs_ops.write((base + "/room").c_str(), "", 0, 0, nullptr);
+	}
+
+	struct stat st;
+	res = fs_ops.getattr("/29.0701F8FE6677F4/pin.2/role", &st, nullptr);
+	EXPECT_EQ(res, 0);
+	EXPECT_TRUE(S_ISREG(st.st_mode));
+	res = fs_ops.getattr("/29.0701F8FE6677F4/pin.2/room", &st, nullptr);
+	EXPECT_EQ(res, 0);
+	EXPECT_TRUE(S_ISREG(st.st_mode));
+
+	// defaults
+	res = fs_ops.read("/29.0701F8FE6677F4/pin.2/role", buf, sizeof(buf), 0, nullptr);
+	EXPECT_EQ(res, 4);
+	EXPECT_STREQ(buf, "none");
+	res = fs_ops.read("/29.0701F8FE6677F4/pin.2/room", buf, sizeof(buf), 0, nullptr);
+	EXPECT_EQ(res, 0);
+	EXPECT_EQ(dev->role(2), PinRole::none);
+
+	// any case, trailing newline dropped
+	res = fs_ops.write("/29.0701F8FE6677F4/pin.2/role", "Light\n", 6, 0, nullptr);
+	EXPECT_EQ(res, 6);
+	res = fs_ops.read("/29.0701F8FE6677F4/pin.2/role", buf, sizeof(buf), 0, nullptr);
+	EXPECT_EQ(res, 5);
+	EXPECT_STREQ(buf, "light");
+	EXPECT_EQ(dev->role(2), PinRole::light);
+	EXPECT_EQ(dev->role(3), PinRole::none);
+	// unknown roles are refused and change nothing
+	res = fs_ops.write("/29.0701F8FE6677F4/pin.2/role", "lamp\n", 5, 0, nullptr);
+	EXPECT_EQ(res, -EINVAL);
+	EXPECT_EQ(dev->role(2), PinRole::light);
+	// every role reads back as written
+	for (int i = (int)PinRole::none; i <= (int)PinRole::motion; i++) {
+		const char* name = pin_role_str((PinRole)i);
+		res = fs_ops.write("/29.0701F8FE6677F4/pin.4/role", name, std::strlen(name), 0, nullptr);
+		EXPECT_EQ(res, (int)std::strlen(name));
+		fs_ops.read("/29.0701F8FE6677F4/pin.4/role", buf, sizeof(buf), 0, nullptr);
+		EXPECT_STREQ(buf, name);
+	}
+
+	res = fs_ops.write("/29.0701F8FE6677F4/pin.2/room", "Kitchen\n", 8, 0, nullptr);
+	EXPECT_EQ(res, 8);
+	res = fs_ops.read("/29.0701F8FE6677F4/pin.2/room", buf, sizeof(buf), 0, nullptr);
+	EXPECT_EQ(res, 7);
+	EXPECT_STREQ(buf, "Kitchen");
+	EXPECT_EQ(dev->room(2), "Kitchen");
+	EXPECT_EQ(dev->room(3), "");
+	std::string too_long(PIN_NAME_MAX + 1, 'y');
+	res = fs_ops.write("/29.0701F8FE6677F4/pin.2/room", too_long.c_str(), too_long.size(), 0, nullptr);
+	EXPECT_EQ(res, -EINVAL);
+	EXPECT_EQ(dev->room(2), "Kitchen");
+
+	// stored with the device config and restored from it
+	json j = dev->to_json();
+	EXPECT_EQ(j["pins"][2]["role"], "light");
+	EXPECT_EQ(j["pins"][2]["room"], "Kitchen");
+	EXPECT_EQ(j["pins"][3]["role"], "none");
+	ds2408 restored;
+	restored.from_json(j);
+	EXPECT_EQ(restored.role(2), PinRole::light);
+	EXPECT_EQ(restored.room(2), "Kitchen");
+	// a hand-edited config with an unknown role or missing fields loads
+	j["pins"][2]["role"] = "lamp";
+	j["pins"][3].erase("room");
+	ds2408 edited;
+	EXPECT_NO_THROW(edited.from_json(j));
+	EXPECT_EQ(edited.role(2), PinRole::none);
+	EXPECT_EQ(edited.room(2), "Kitchen");
+	EXPECT_EQ(edited.room(3), "");
+
+	// empty writes reset both
+	fs_ops.write("/29.0701F8FE6677F4/pin.2/role", "\n", 1, 0, nullptr);
+	fs_ops.write("/29.0701F8FE6677F4/pin.2/room", "\n", 1, 0, nullptr);
+	fs_ops.write("/29.0701F8FE6677F4/pin.4/role", "", 0, 0, nullptr);
+	EXPECT_EQ(dev->role(2), PinRole::none);
+	EXPECT_EQ(dev->room(2), "");
+}
+
+// /role lists the pins by role across devices, and switches them
+TEST_F(FsTest, RoleDirs) {
+	std::vector<std::string> seen;
+	auto record = [](void* buf, const char* name, const struct stat*,
+					 off_t, enum fuse_fill_dir_flags) {
+		static_cast<std::vector<std::string>*>(buf)->push_back(name);
+		return 0;
+	};
+	auto has = [&](const char* n) {
+		return std::find(seen.begin(), seen.end(), n) != seen.end();
+	};
+	const std::string rom = "29.0701F8FE6677F4";
+	const std::string base = "/" + rom;
+	char buf[256];
+	struct stat st;
+	int res;
+
+	ow.update_device(1, rom);
+	ow.update_data();
+	// switching goes over the (simulated) bus, which needs dev->ds
+	ow.begin();
+	ds2408* dev = (ds2408*)ow.find(0x290701F8FE6677F4);
+	ASSERT_NE(dev, nullptr);
+	for (int i = 0; i < 8; i++) {
+		std::string pin = base + "/pin." + std::to_string(i);
+		fs_ops.write((pin + "/role").c_str(), "", 0, 0, nullptr);
+		fs_ops.write((pin + "/room").c_str(), "", 0, 0, nullptr);
+		fs_ops.write((pin + "/name").c_str(), "", 0, 0, nullptr);
+	}
+	// 2, 3 lights, 4 a socket, 5 an input, all outputs off
+	dev->cfg[CFG_PIN_ID + 2] = CFG_OUT_LOW;
+	dev->cfg[CFG_PIN_ID + 3] = CFG_OUT_LOW;
+	dev->cfg[CFG_PIN_ID + 4] = CFG_OUT_LOW;
+	dev->cfg[CFG_PIN_ID + 5] = CFG_PASS;
+	dev->data[PIO_OUT] = 0xff;
+	fs_ops.write((base + "/pin.2/role").c_str(), "light", 5, 0, nullptr);
+	fs_ops.write((base + "/pin.2/room").c_str(), "Kitchen", 7, 0, nullptr);
+	fs_ops.write((base + "/pin.2/name").c_str(), "Ceiling", 7, 0, nullptr);
+	fs_ops.write((base + "/pin.3/role").c_str(), "light", 5, 0, nullptr);
+	fs_ops.write((base + "/pin.4/role").c_str(), "socket", 6, 0, nullptr);
+	fs_ops.write((base + "/pin.5/role").c_str(), "contact", 7, 0, nullptr);
+
+	fs_ops.readdir("/", &seen, record, 0, nullptr, (enum fuse_readdir_flags)0);
+	EXPECT_TRUE(has("role"));
+	seen.clear();
+	res = fs_ops.getattr("/role", &st, nullptr);
+	EXPECT_EQ(res, 0);
+	EXPECT_TRUE(S_ISDIR(st.st_mode));
+	fs_ops.readdir("/role", &seen, record, 0, nullptr, (enum fuse_readdir_flags)0);
+	EXPECT_TRUE(has("light"));
+	EXPECT_TRUE(has("motion"));
+	EXPECT_FALSE(has("none"));
+	seen.clear();
+	EXPECT_EQ(fs_ops.getattr("/role/lamp", &st, nullptr), -ENOENT);
+	EXPECT_EQ(fs_ops.getattr("/role/none", &st, nullptr), -ENOENT);
+	EXPECT_EQ(fs_ops.getattr("/role/LIGHT", &st, nullptr), -ENOENT);
+	res = fs_ops.getattr("/role/light/", &st, nullptr);
+	EXPECT_EQ(res, 0);
+	EXPECT_TRUE(S_ISDIR(st.st_mode));
+
+	fs_ops.readdir("/role/light", &seen, record, 0, nullptr, (enum fuse_readdir_flags)0);
+	EXPECT_TRUE(has("all"));
+	EXPECT_TRUE(has("list"));
+	EXPECT_TRUE(has((rom + ".2").c_str()));
+	EXPECT_TRUE(has((rom + ".3").c_str()));
+	EXPECT_FALSE(has((rom + ".4").c_str()));
+	seen.clear();
+	res = fs_ops.getattr(("/role/light/" + rom + ".2").c_str(), &st, nullptr);
+	EXPECT_EQ(res, 0);
+	EXPECT_TRUE(S_ISREG(st.st_mode));
+	EXPECT_EQ(fs_ops.getattr(("/role/light/" + rom + ".4").c_str(), &st, nullptr), -ENOENT);
+	EXPECT_EQ(fs_ops.open(("/role/light/" + rom + ".2").c_str(), nullptr), 0);
+
+	memset(buf, 0, sizeof(buf));
+	res = fs_ops.read("/role/light/all", buf, sizeof(buf), 0, nullptr);
+	EXPECT_EQ(res, 1);
+	EXPECT_STREQ(buf, "0");
+
+	// master switch: both lights, not the socket
+	res = fs_ops.write("/role/light/all", "1\n", 2, 0, nullptr);
+	EXPECT_EQ(res, 2);
+	EXPECT_TRUE(dev->pin_is_on(2));
+	EXPECT_TRUE(dev->pin_is_on(3));
+	EXPECT_FALSE(dev->pin_is_on(4));
+	memset(buf, 0, sizeof(buf));
+	fs_ops.read("/role/light/all", buf, sizeof(buf), 0, nullptr);
+	EXPECT_STREQ(buf, "2");
+
+	std::string line2 = rom + ".2\ton\tKitchen\tCeiling\n";
+	std::string line3 = rom + ".3\ton\t\tPIO.3\n";
+	memset(buf, 0, sizeof(buf));
+	res = fs_ops.read("/role/light/list", buf, sizeof(buf), 0, nullptr);
+	EXPECT_EQ(std::string(buf, res), line2 + line3);
+	res = fs_ops.getattr("/role/light/list", &st, nullptr);
+	EXPECT_EQ(st.st_size, (off_t)(line2 + line3).size());
+	// read in pieces, as a long list would be
+	memset(buf, 0, sizeof(buf));
+	res = fs_ops.read("/role/light/list", buf, sizeof(buf), line2.size(), nullptr);
+	EXPECT_EQ(std::string(buf, res), line3);
+	res = fs_ops.read("/role/light/list", buf, sizeof(buf), (line2 + line3).size(), nullptr);
+	EXPECT_EQ(res, 0);
+	EXPECT_EQ(fs_ops.write("/role/light/list", "1", 1, 0, nullptr), -EPERM);
+
+	res = fs_ops.write("/role/light/all", "0", 1, 0, nullptr);
+	EXPECT_EQ(res, 1);
+	EXPECT_FALSE(dev->pin_is_on(2));
+	EXPECT_FALSE(dev->pin_is_on(3));
+	EXPECT_EQ(fs_ops.write("/role/light/all", "2", 1, 0, nullptr), -EINVAL);
+	EXPECT_EQ(fs_ops.write("/role/light/all", "on", 2, 0, nullptr), -EINVAL);
+
+	// one pin
+	res = fs_ops.write(("/role/light/" + rom + ".3").c_str(), "1", 1, 0, nullptr);
+	EXPECT_EQ(res, 1);
+	EXPECT_TRUE(dev->pin_is_on(3));
+	EXPECT_FALSE(dev->pin_is_on(2));
+	memset(buf, 0, sizeof(buf));
+	fs_ops.read(("/role/light/" + rom + ".3").c_str(), buf, sizeof(buf), 0, nullptr);
+	EXPECT_STREQ(buf, "1");
+	// an input is listed but not switched
+	fs_ops.readdir("/role/contact", &seen, record, 0, nullptr, (enum fuse_readdir_flags)0);
+	EXPECT_TRUE(has((rom + ".5").c_str()));
+	seen.clear();
+	EXPECT_EQ(fs_ops.write(("/role/contact/" + rom + ".5").c_str(), "1", 1, 0, nullptr), -EPERM);
+	EXPECT_EQ(fs_ops.write("/role/contact/all", "1", 1, 0, nullptr), 1);
+	EXPECT_EQ(fs_ops.write("/role/light", "1", 1, 0, nullptr), -EISDIR);
+
+	for (int i = 2; i <= 5; i++) {
+		std::string pin = base + "/pin." + std::to_string(i);
+		fs_ops.write((pin + "/role").c_str(), "", 0, 0, nullptr);
+		fs_ops.write((pin + "/room").c_str(), "", 0, 0, nullptr);
+		fs_ops.write((pin + "/name").c_str(), "", 0, 0, nullptr);
+	}
 }
 
 // defined in src/ow_devices.cpp, what load() uses per device

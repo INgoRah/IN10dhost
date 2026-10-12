@@ -24,6 +24,11 @@
  *                            all four return true on success
  *   ow.temp(rom)             read a ds1820 temperature, null if not one
  *   ow.volt(rom, channel)    read a cached ds2450 voltage
+ *   ow.pins([role])          the pins with that role ("light", ...), or
+ *                            with any role: [{rom, pin, name, role,
+ *                            room, output, on}, ...]
+ *   ow.role_switch(role, on) switch every output with that role on or
+ *                            off, true when all of them switched
  *
  * The script is reloaded on its own when the file changes on disk: every
  * event first compares the file's modification time, and on a change
@@ -256,6 +261,66 @@ private:
 		return JS_NewFloat64(ctx, d->adc_get((uint8_t)ch));
 	}
 
+	/* Reads v as a role name, any case. Throws a JS RangeError, and
+	   returns false, for an unknown one. */
+	static bool arg_role(JSContext* ctx, JSValueConst v, PinRole& out)
+	{
+		const char* s = JS_ToCString(ctx, v);
+
+		if (s == nullptr)
+			return false;
+		auto r = pin_role_parse(s);
+		if (!r)
+			JS_ThrowRangeError(ctx, "unknown role '%s'", s);
+		JS_FreeCString(ctx, s);
+		if (!r)
+			return false;
+		out = *r;
+		return true;
+	}
+
+	static JSValue js_pins(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv)
+	{
+		JsEngine* self = (JsEngine*)JS_GetContextOpaque(ctx);
+		PinRole role = PinRole::none;
+
+		if (argc > 0 && !JS_IsUndefined(argv[0]) && !arg_role(ctx, argv[0], role))
+			return JS_EXCEPTION;
+		JSValue arr = JS_NewArray(ctx);
+		if (self == nullptr || self->devices == nullptr)
+			return arr;
+		uint32_t i = 0;
+		for (const auto& p : self->devices->pins(role)) {
+			JSValue o = JS_NewObject(ctx);
+			JS_SetPropertyStr(ctx, o, "rom", JS_NewString(ctx, p.rom.c_str()));
+			JS_SetPropertyStr(ctx, o, "pin", JS_NewInt32(ctx, p.pin));
+			JS_SetPropertyStr(ctx, o, "name", JS_NewString(ctx, p.name.c_str()));
+			JS_SetPropertyStr(ctx, o, "role", JS_NewString(ctx, pin_role_str(p.role)));
+			JS_SetPropertyStr(ctx, o, "room", JS_NewString(ctx, p.room.c_str()));
+			JS_SetPropertyStr(ctx, o, "output", JS_NewBool(ctx, p.output));
+			JS_SetPropertyStr(ctx, o, "on", JS_NewBool(ctx, p.on));
+			JS_SetPropertyUint32(ctx, arr, i++, o);
+		}
+
+		return arr;
+	}
+
+	static JSValue js_role_switch(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv)
+	{
+		JsEngine* self = (JsEngine*)JS_GetContextOpaque(ctx);
+		PinRole role;
+
+		if (argc < 2 || self == nullptr || self->devices == nullptr)
+			return JS_FALSE;
+		if (!arg_role(ctx, argv[0], role))
+			return JS_EXCEPTION;
+		int on = JS_ToBool(ctx, argv[1]);
+		if (on < 0)
+			return JS_EXCEPTION;
+
+		return JS_NewBool(ctx, self->devices->role_switch(role, on != 0) == 0);
+	}
+
 	/* Runs periodically while script code executes; a non zero return
 	   aborts it, which is what stops a runaway loop from hanging the
 	   whole daemon. */
@@ -331,6 +396,10 @@ private:
 			JS_NewCFunction(ctx, js_temp, "temp", 1));
 		JS_SetPropertyStr(ctx, owobj, "volt",
 			JS_NewCFunction(ctx, js_volt, "volt", 2));
+		JS_SetPropertyStr(ctx, owobj, "pins",
+			JS_NewCFunction(ctx, js_pins, "pins", 1));
+		JS_SetPropertyStr(ctx, owobj, "role_switch",
+			JS_NewCFunction(ctx, js_role_switch, "role_switch", 2));
 		JS_SetPropertyStr(ctx, global, "ow", owobj);
 		JS_FreeValue(ctx, global);
 	}

@@ -1,3 +1,4 @@
+#include <bit>
 #include <fstream>
 #include <iostream>
 #include <algorithm>
@@ -35,12 +36,33 @@ const FsEntry<ds2408> ds2408::table[] = {
 	{ "cfg", 3 * DS2408_CFG_SIZE, 0, false, nullptr, nullptr, &ds2408::r_cfg, &ds2408::w_cfg },
 	{ "pin.*/name", PIN_NAME_MAX, 8, false, nullptr, nullptr, &ds2408::r_pin_name, &ds2408::w_pin_name },
 	{ "pin.*/func", 20, 8, false, nullptr, nullptr, &ds2408::r_pin_func, &ds2408::w_pin_func },
+	{ "pin.*/role", 10, 8, false, nullptr, nullptr, &ds2408::r_pin_role, &ds2408::w_pin_role },
+	{ "pin.*/room", PIN_NAME_MAX, 8, false, nullptr, nullptr, &ds2408::r_pin_room, &ds2408::w_pin_room },
 	{ "threshold", 3, 0, false, nullptr, nullptr, &ds2408::r_threshold, &ds2408::w_threshold },
 	{ "brightness", 3, 0, false, nullptr, nullptr, &ds2408::r_brightness, &ds2408::w_brightness },
 	{ "level.*", 3, 8, false, &ds2408::vis_level, nullptr, &ds2408::r_level, &ds2408::w_level },
 	{ "watchdog", 5, 0, false, nullptr, nullptr, &ds2408::r_watchdog, nullptr },
 };
 const size_t ds2408::n_table = sizeof(ds2408::table) / sizeof(ds2408::table[0]);
+
+// A pin as saved with the device config; its level is not kept, see Pin
+void to_json(json& j, const Pin& p)
+{
+	j = json{
+		{ "name", p.name },
+		{ "role", pin_role_str(p.role) },
+		{ "room", p.room },
+	};
+}
+
+// missing fields and an unknown role (a hand edited config) fall back
+// to the defaults; level is left as it is
+void from_json(const json& j, Pin& p)
+{
+	p.name = j.value("name", "");
+	p.role = pin_role_parse(j.value("role", "")).value_or(PinRole::none);
+	p.room = j.value("room", "");
+}
 
 json ds2408::to_json() const {
 	auto lk = lock();
@@ -49,7 +71,7 @@ json ds2408::to_json() const {
 	j["cfg"] = cfg;
 	j["threshold"] = threshold;
 	j["brightness"] = brightness;
-	j["pin_names"] = pin_name;
+	j["pins"] = pins;
 
 	return j;
 };
@@ -66,11 +88,16 @@ void ds2408::from_json(const json& j) {
 	if (j.contains("brightness")) {
 		j.at("brightness").get_to(brightness);
 	}
-	if (j.contains("pin_names")) {
-		// tolerate a shorter list, the remaining pins keep their default
+	// tolerate a shorter list, the remaining pins keep their default
+	if (j.contains("pins")) {
+		const json& jp = j.at("pins");
+		for (size_t i = 0; i < jp.size() && i < pins.size(); i++)
+			jp.at(i).get_to(pins[i]);
+	} else if (j.contains("pin_names")) {
+		// older configs only stored the names
 		const json& names = j.at("pin_names");
-		for (size_t i = 0; i < names.size() && i < pin_name.size(); i++)
-			names.at(i).get_to(pin_name[i]);
+		for (size_t i = 0; i < names.size() && i < pins.size(); i++)
+			names.at(i).get_to(pins[i].name);
 	}
 }
 
@@ -214,7 +241,7 @@ int ds2408::r_pio(char* buf, size_t, bool, int idx)
 	if (idx >= IDX_ALL)
 		return fmt_bits(buf, idx, pio_mask());
 	if (cfg[CFG_PIN_ID + idx] == CFG_OUT_PWM)
-		std::sprintf(buf, "%d", level_pct[idx]);
+		std::sprintf(buf, "%d", pins[idx].level);
 	else
 		// inverted: 1 = OFF (output latch bit 0), 0 = ON (latch bit 1)
 		std::sprintf(buf, "%d", (data[PIO_OUT] & (0x1 << idx)) ? 0 : 1);
@@ -320,6 +347,16 @@ int ds2408::w_cfg(const char* buf, size_t size, int)
 	return size;
 }
 
+// drops the newline a shell redirect adds, or a C string's NUL
+static std::string pin_input(const char* buf, size_t size)
+{
+	std::string s(buf, size);
+
+	while (!s.empty() && (s.back() == '\n' || s.back() == '\r' || s.back() == '\0'))
+		s.pop_back();
+	return s;
+}
+
 int ds2408::r_pin_name(char* buf, size_t size, bool, int idx)
 {
 	auto lk = lock();
@@ -332,9 +369,9 @@ std::string ds2408::pin_label(int pio) const
 	auto lk = lock();
 	if (pio < 0 || pio > 7)
 		return std::string("?");
-	if (pin_name[pio].empty())
+	if (pins[pio].name.empty())
 		return std::format("PIO.{}", pio);
-	return pin_name[pio];
+	return pins[pio].name;
 }
 
 // Handled here rather than by the base class, whose fs_write() matches
@@ -343,14 +380,113 @@ std::string ds2408::pin_label(int pio) const
 int ds2408::w_pin_name(const char* buf, size_t size, int idx)
 {
 	auto lk = lock();
-	std::string s(buf, size);
+	std::string s = pin_input(buf, size);
 
-	// trim the newline a shell redirect adds, or a C string's NUL
-	while (!s.empty() && (s.back() == '\n' || s.back() == '\r' || s.back() == '\0'))
-		s.pop_back();
 	if (s.size() > PIN_NAME_MAX)
 		return -EINVAL;
-	pin_name[idx] = std::move(s);
+	pins[idx].name = std::move(s);
+	return size;
+}
+
+PinRole ds2408::role(int pio) const
+{
+	auto lk = lock();
+	if (pio < 0 || pio > 7)
+		return PinRole::none;
+	return pins[pio].role;
+}
+
+std::string ds2408::room(int pio) const
+{
+	auto lk = lock();
+	if (pio < 0 || pio > 7)
+		return std::string();
+	return pins[pio].room;
+}
+
+void ds2408::pins_get(std::vector<PinInfo>& out, PinRole r) const
+{
+	auto lk = lock();
+	for (int i = 0; i < 8; i++) {
+		if (pins[i].role == PinRole::none || (r != PinRole::none && pins[i].role != r))
+			continue;
+		PinInfo info;
+		static_cast<Pin&>(info) = pins[i];
+		info.name = pin_label(i);
+		info.rom = rom;
+		info.pin = i;
+		info.output = pin_is_output(i);
+		info.on = info.output ? pin_is_on(i) : (data[PIO_LS] & (1 << i)) != 0;
+		out.push_back(std::move(info));
+	}
+}
+
+// PWM pins one by one, the plain outputs together with a single pio_set()
+int ds2408::role_switch(PinRole r, bool on)
+{
+	auto lk = lock();
+	uint8_t set = 0, clr = 0;
+	int failed = 0;
+
+	if (r == PinRole::none)
+		return 0;
+	for (int i = 0; i < 8; i++) {
+		if (pins[i].role != r || !pin_is_output(i) || pin_is_on(i) == on)
+			continue;
+		if (cfg[CFG_PIN_ID + i] == CFG_OUT_PWM) {
+			if (pin_switch(i, on ? ON : OFF) != 0)
+				failed++;
+		} else if (on) {
+			// active low, see pin_switch()
+			clr |= 1 << i;
+		} else {
+			set |= 1 << i;
+		}
+	}
+	if (set | clr) {
+		uint8_t pio = (data[PIO_OUT] | set) & ~clr;
+		if (pio_set(pio) != 0xAA)
+			failed += std::popcount((uint8_t)(set | clr));
+	}
+	return failed;
+}
+
+int ds2408::r_pin_role(char* buf, size_t size, bool, int idx)
+{
+	auto lk = lock();
+	std::snprintf(buf, size, "%s", pin_role_str(pins[idx].role));
+	return std::strlen(buf);
+}
+
+// one of the names in interface/pin.h, case-insensitive; an empty write
+// resets it to "none"
+int ds2408::w_pin_role(const char* buf, size_t size, int idx)
+{
+	auto lk = lock();
+	auto r = pin_role_parse(pin_input(buf, size));
+
+	if (!r)
+		return -EINVAL;
+	pins[idx].role = *r;
+	return size;
+}
+
+int ds2408::r_pin_room(char* buf, size_t size, bool, int idx)
+{
+	auto lk = lock();
+	std::snprintf(buf, size, "%s", pins[idx].room.c_str());
+	return std::strlen(buf);
+}
+
+// free text, an empty write clears it
+int ds2408::w_pin_room(const char* buf, size_t size, int idx)
+{
+	auto lk = lock();
+	std::string s = pin_input(buf, size);
+
+	if (s.size() > PIN_NAME_MAX)
+		return -EINVAL;
+	pins[idx].room = std::move(s);
 	return size;
 }
 
@@ -461,12 +597,20 @@ bool ds2408::vis_pio(int idx) const
 	// .ALL and .BYTE are always there, as in owfs
 	if (idx >= IDX_ALL)
 		return true;
-	switch (cfg[CFG_PIN_ID + idx]) {
+	return pin_is_output(idx);
+}
+
+bool ds2408::pin_is_output(int pio) const
+{
+	auto lk = lock();
+	if (pio < 0 || pio > 7)
+		return false;
+	switch (cfg[CFG_PIN_ID + pio]) {
 		case 0xff:
 		case 0:
 			return false;
 		default:
-			return (cfg[CFG_PIN_ID + idx] & CFG_OUT_MASK) != 0;
+			return (cfg[CFG_PIN_ID + pio] & CFG_OUT_MASK) != 0;
 	}
 }
 
@@ -484,7 +628,7 @@ int ds2408::r_level(char* buf, size_t, bool, int idx)
 	// readable only where it is listed, see vis_level()
 	if (!vis_level(idx))
 		return -ENOENT;
-	std::sprintf(buf, "%d", level_pct[idx]);
+	std::sprintf(buf, "%d", pins[idx].level);
 	return std::strlen(buf);
 }
 
@@ -649,7 +793,7 @@ bool ds2408::pin_is_on(uint8_t pio) const
 	if (pio > 7)
 		return false;
 	if (cfg[CFG_PIN_ID + pio] == CFG_OUT_PWM)
-		return level_pct[pio] > 0;
+		return pins[pio].level > 0;
 	return (data[PIO_OUT] & (1 << pio)) == 0;
 }
 
@@ -660,7 +804,7 @@ uint8_t ds2408::pin_switch(uint8_t pio, enum _pio_mode state, uint8_t lvl)
 	// check whether this is a level or simple IO
 	if (cfg[CFG_PIN_ID + pio] == CFG_OUT_PWM) {
 		if (state == TOGGLE ) {
-			if (level_pct[pio] == 0)
+			if (pins[pio].level == 0)
 				lvl = 100;
 			else
 				lvl = 0;
@@ -750,13 +894,30 @@ uint8_t ds2408::pio_set(uint8_t pio)
 	if (r == 0xAA)
 		out_known = true;
 	if (r == 0xAA && data[PIO_OUT] != pio) {
+		uint8_t diff = data[PIO_OUT] ^ pio;
+		json changed = json::array();
+
 		data[PIO_OUT] = pio;
+		// the plain outputs that changed, with what they are, so a
+		// script can tell a light from a socket without its own table
+		for (int i = 0; i < 8; i++) {
+			if (!(diff & (1 << i)) || !pin_is_output(i) || cfg[CFG_PIN_ID + i] == CFG_OUT_PWM)
+				continue;
+			changed.push_back({
+				{"pin", i},
+				{"on", pin_is_on(i)},
+				{"name", pin_label(i)},
+				{"role", pin_role_str(pins[i].role)},
+				{"room", pins[i].room}
+			});
+		}
 		// sent once the device is unlocked, see OwDev::notify_change()
 		notify_change(json{
 			{"bus", bus},
 			{"type", type},
 			{"rom", rom.c_str()},
-			{"pio", pio}
+			{"pio", pio},
+			{"changed", changed}
 		});
 	}
 	return r;
@@ -866,7 +1027,7 @@ uint8_t ds2408::reg_read(bool latch_reset)
 	logger.verbose(rom + " " + std::format(" read_regs OUT={:#x} LS={:#x} LATCH={:#x} STAT={:#x}", data[PIO_OUT], data[PIO_LS], last_latch, data[STAT]));
 	if (data[STAT] & 0x40) {
 		/* status in 5 signals a dimming down */
-		level_pct[0] = 0;
+		pins[0].level = 0;
 	}
 	if (data[STAT] != 0xff) {
 		if (data[STAT] & STAT_WATCHDOG) {
@@ -959,7 +1120,7 @@ int ds2408::cfg_write(const uint8_t* data, int len)
 	level: 0..100 percent, larger values are taken as 100. The device
 	takes 0..254, so it is converted here, like the Arduino host did in
 	SwitchHandler::setLevel() before calling ds2408xPinSet().
-	The level a TMR_TYPE_ON sets is kept per pin in level_pct once the
+	The level a TMR_TYPE_ON sets is kept per pin in pins[].level once the
 	device confirmed it, for everyone calling this - level.*, PIO.* and
 	the switch handler through pin_switch() - to read back.
 	cmd:
@@ -985,7 +1146,7 @@ uint8_t ds2408::level_set(uint8_t pio, uint8_t level, uint8_t cmd, uint8_t val)
 		return 0xff;
 #endif
 	if (cmd == TMR_TYPE_ON)
-		level_pct[pio] = pct;
+		pins[pio].level = pct;
 	return 0xaa;
 #else
 	/* if setting any level, a level 0 means stop */
@@ -1025,7 +1186,7 @@ uint8_t ds2408::level_set(uint8_t pio, uint8_t level, uint8_t cmd, uint8_t val)
 	if (crc == static_cast<uint16_t>(~crc16)) {
 		logger.verbose(std::format("CRC ok {:#x}", crc));
 		if (cmd == TMR_TYPE_ON)
-			level_pct[pio] = pct;
+			pins[pio].level = pct;
 		return 0xAA;
 	}
 	else
@@ -1090,10 +1251,10 @@ int ds2408::watchdog_restore()
 		logger.warn(rom + " watchdog: outputs before the reset unknown, not restored");
 	}
 	for (uint8_t pio = 0; pio < 8; pio++) {
-		if (cfg[CFG_PIN_ID + pio] != CFG_OUT_PWM || level_pct[pio] == 0)
+		if (cfg[CFG_PIN_ID + pio] != CFG_OUT_PWM || pins[pio].level == 0)
 			continue;
-		logger.info(rom + std::format(" watchdog: restoring level.{} {}%", pio, level_pct[pio]));
-		if (level_set(pio, level_pct[pio]) != 0xAA)
+		logger.info(rom + std::format(" watchdog: restoring level.{} {}%", pio, pins[pio].level));
+		if (level_set(pio, pins[pio].level) != 0xAA)
 			err++;
 	}
 	// 0 is the device's default as well
