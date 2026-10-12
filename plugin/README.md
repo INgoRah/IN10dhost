@@ -150,6 +150,7 @@ call — copy anything that has to outlive it.
 | `ACT_PERIODIC_SECOND` | 4 | once a second | |
 | `ACT_ALARM_AFTER` | 7 | alarm, after default handling | `val` = bus, `data` = `{bus, rom}` |
 | `ACT_DEV_CHANGE` | 8 | a device changed state | `data` = `{bus, rom, pio}` |
+| `ACT_DEV_WATCHDOG` | 9 | a ds2408 was reset by its watchdog, its cached outputs, levels, threshold and brightness are already restored | `val` = bus, `data` = `{bus, type, rom, brightness, threshold}` |
 
 `ACT_CFG_LOAD` (0), `ACT_CFG_SAVE` (1) and `ACT_ALARM_BEFORE` (6) are
 declared in `plugin.h` but nothing dispatches them yet, so a handler

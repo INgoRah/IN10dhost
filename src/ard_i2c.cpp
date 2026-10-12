@@ -46,7 +46,7 @@ const FsEntry<Ard_i2c> Ard_i2c::table[] = {
 	{ "mode", 3, 0, false, nullptr, nullptr, &Ard_i2c::r_mode, &Ard_i2c::w_mode },
 	// power_total before power: rows match as substrings of the path,
 	// so "power" would also claim .../power_total
-	{ "power_total", 8, 0, false, nullptr, nullptr, &Ard_i2c::r_pow_total, nullptr },
+	{ "power_total", 8, 0, false, nullptr, nullptr, &Ard_i2c::r_pow_total, &Ard_i2c::w_pow_total },
 	{ "power", 4, 0, false, nullptr, nullptr, &Ard_i2c::r_power, nullptr },
 	{ "test", 2, 0, false, nullptr, nullptr, nullptr, &Ard_i2c::w_test },
 	{ "int_min", 6, 0, false, nullptr, nullptr, &Ard_i2c::r_int_min, nullptr },
@@ -272,7 +272,7 @@ int Ard_i2c::interrupt() {
 			logger.warn(std::format("Arduino status read failed ({})", ret));
 			return -1;
 		}
-		logger.verbose(std::format("AD Stat={:#x}", status));
+		logger.verbose(std::format("Arduino interrupt AD Stat={:#x}", status));
 		// bit 0..3: one bit per bus with an alarm
 		uint8_t buses = status & 0x0f;
 		for (int bus = 0; bus < MAX_BUS; bus++) {
@@ -289,6 +289,9 @@ int Ard_i2c::interrupt() {
 					max_dur = duration;
 				sum_dur += duration;
 				dur_count++;
+				if (duration > std::chrono::milliseconds(500)) {
+					logger.warn(std::format("Arduino interrupt handling took {} ms", duration.count()));
+				}
 			}
 			// any other alarming family on that bus
 			// coverity[sleep] - bus mutex must be held
@@ -510,6 +513,32 @@ int Ard_i2c::r_power(char* buf, size_t, bool, int)
 	alarm = false;
 
 	return std::strlen(buf);
+}
+
+// Sets the energy counter, in Wh like it counts (2 Wh per meter
+// impulse), e.g. to match the meter's reading
+int Ard_i2c::w_pow_total(const char* buf, size_t size, int)
+{
+	auto lk = lock();
+	std::string s(buf, size);
+	size_t end = 0;
+	long long v;
+
+	try {
+		v = std::stoll(s, &end);
+	} catch (const std::invalid_argument&) {
+		return -EINVAL;
+	} catch (const std::out_of_range&) {
+		return -EINVAL;
+	}
+	// only a trailing newline or NUL may follow the number
+	while (end < s.size() && (s[end] == '\n' || s[end] == '\r' || s[end] == '\0'))
+		end++;
+	if (end != s.size() || v < 0 || v > 99999999)
+		return -EINVAL;
+	power_total = (int)v;
+	logger.info(std::format("{} power_total set to {} Wh", rom, power_total));
+	return size;
 }
 
 int Ard_i2c::r_pow_total(char* buf, size_t, bool, int)

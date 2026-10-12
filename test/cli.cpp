@@ -42,6 +42,7 @@ protected:
 		cli.gpio_pin = GPIO_LINE_DEFAULT;
 		cli.soft_start = false;
 		cli.data_path.clear();
+		cli.log_dir = LOG_DIR_DEFAULT;
 		cli.help_requested = false;
 	}
 };
@@ -294,4 +295,33 @@ TEST_F(CliTest, AllThreeOptionsTogetherInAnyOrder)
 	EXPECT_EQ(cli.data_path, "/data/cfg.json");
 	EXPECT_EQ(a.remaining(),
 		std::vector<std::string>({"in10dfs", "-f", "-o", "allow_other", "/mnt/1wire"}));
+}
+
+// --- --log-dir ----------------------------------------------------------
+
+TEST_F(CliTest, LogDirDefaultsToOptLib)
+{
+	Argv a({"/mnt/1wire"});
+	cli.parse(a.argc, a.argv());
+	EXPECT_EQ(cli.log_dir, LOG_DIR_DEFAULT);
+}
+
+TEST_F(CliTest, LogDirBothFormsSetDir)
+{
+	Argv a({"--log-dir=/var/lib/in10d", "/mnt/1wire"});
+	cli.parse(a.argc, a.argv());
+	EXPECT_EQ(cli.log_dir, "/var/lib/in10d");
+	EXPECT_EQ(a.remaining(), std::vector<std::string>({"in10dfs", "/mnt/1wire"}));
+
+	Argv b({"--log-dir", "/home/in10d", "-f", "/mnt/1wire"});
+	cli.parse(b.argc, b.argv());
+	EXPECT_EQ(cli.log_dir, "/home/in10d");
+	EXPECT_EQ(b.remaining(), std::vector<std::string>({"in10dfs", "-f", "/mnt/1wire"}));
+}
+
+TEST_F(CliTest, LogDirMissingValueKeepsDefault)
+{
+	Argv a({"--log-dir"});
+	cli.parse(a.argc, a.argv());
+	EXPECT_EQ(cli.log_dir, LOG_DIR_DEFAULT);
 }

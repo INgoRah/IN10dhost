@@ -16,7 +16,9 @@
  *                                          ACT_DEV_CHANGE events and keep
  *                                          the last payload; config_get()
  *                                          reports them as "changes" and
- *                                          "last"
+ *                                          "last", ACT_DEV_WATCHDOG the
+ *                                          same as "watchdogs" and
+ *                                          "last_watchdog"
  *
  * Built only for TESTING builds and never installed, see CMakeLists.txt.
  */
@@ -30,6 +32,8 @@ private:
 	// "record" mode only
 	int changes = 0;
 	json last;
+	int watchdogs = 0;
+	json last_watchdog;
 
 	/* Throws for the named entry point: a std::exception when the mode
 	   is "<name>", a bare int for "<name>_odd" so the loader's
@@ -54,7 +58,8 @@ public:
 		fail("config_get");
 
 		if (mode == "record")
-			return json{ { "mode", mode }, { "changes", changes }, { "last", last } };
+			return json{ { "mode", mode }, { "changes", changes }, { "last", last },
+				{ "watchdogs", watchdogs }, { "last_watchdog", last_watchdog } };
 		return json{ { "mode", mode } };
 	}
 
@@ -72,6 +77,10 @@ public:
 			changes++;
 			// the payload is only valid during the call, keep a copy
 			last = ev.data ? *ev.data : json();
+		}
+		if (mode == "record" && ev.code == ACT_DEV_WATCHDOG) {
+			watchdogs++;
+			last_watchdog = ev.data ? *ev.data : json();
 		}
 
 		return 0;

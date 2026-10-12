@@ -190,6 +190,8 @@ class SwitchHandler : IFs {
 		void begin(DS2482 *ow);
 		void loop();
 		bool dev_alarm(uint8_t bus, uint8_t adr[8]);
+		// a ds2408 reported a watchdog reset, see dev_alarm()
+		void dev_watchdog(ds2408* dev);
 		bool switchHandle(uint8_t busNr, uint8_t adr1);
 		bool switchHandle(uint8_t busNr, uint8_t adr1, uint8_t latch);
 		bool switchLevel(union pio dst, uint8_t level);

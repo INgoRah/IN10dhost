@@ -13,6 +13,9 @@
 #include "ow_devices.h"
 #include "ds2408.h"
 #include "ds1820.h"
+#include "plugins.h"
+
+extern Plugins plugins;
 
 struct _sw_tbl sw_tbl[MAX_SWITCHES];
 
@@ -395,13 +398,41 @@ int SwitchHandler::timer_poll(HrClock::time_point now)
 	return (int)expired.size();
 }
 
+/* A ds2408 reported its watchdog status: keep the 1-Wire trace that led
+   to it, restore what it lost and tell the plugins, so a script can
+   hand it the current brightness. */
+void SwitchHandler::dev_watchdog(ds2408* dev)
+{
+	logger.warn(std::format("Watchdog on {}!", dev->rom));
+	ow->log_save(false);
+	if (!dev->watchdog_pending())
+		return;
+	dev->watchdog_restore();
+	json data;
+	{
+		auto lk = dev->lock();
+		data = json{
+			{"bus", dev->bus},
+			{"type", dev->type},
+			{"rom", dev->rom},
+			{"brightness", dev->get_brightness()},
+			{"threshold", dev->get_threshold()}
+		};
+	}
+	// outside the device lock, the plugin may well drive the device
+	plugins.action(ACT_DEV_WATCHDOG, dev->bus, &data);
+}
+
 bool SwitchHandler::dev_alarm(uint8_t bus, uint8_t adr[8])
 {
 	if (adr[0] == 0x29) {
 		uint8_t res, to = 8;
 		ds2408* dev = (ds2408*)ow->find(bus, adr[1], 0x29);
-		if (!dev)
+		if (!dev) {
+			logger.warn(std::format("Wrong Alarm ({:#x}) {}.{} {}", adr[0], bus, adr[1], adr[2]));
 			return false;
+		}
+		logger.debug(std::format("Alarm ({:#x}) {}.{} ({})", adr[0], bus, adr[1], dev->display_name()));
 		ds->log_event('1',adr[1]);
 		uint8_t stat, press;
 		{
@@ -424,9 +455,10 @@ bool SwitchHandler::dev_alarm(uint8_t bus, uint8_t adr[8])
 			if (stat & 0x40) {
 				/* status in 5 signals a dimming down */
 			}
-			if (stat & 0x88) {
-				logger.warn(std::format("Watchdog on {}!", dev->rom));
-				return false;
+			if (stat & STAT_WATCHDOG) {
+				// the latches of a reset device mean nothing
+				dev_watchdog(dev);
+				return true;
 			}
 			if (cur_latch == 0xff) {
 				logger.warn(std::format("{}: invalid latch data", dev->rom));
@@ -598,7 +630,6 @@ int SwitchHandler::w_del(const char* buf, size_t size, int)
 	for (size_t i = 0; i < size; i++) {
 		if (buf[i] == '\n' || buf[i] == '\0') {
 			struct _sw_tbl sw;
-			logger.verbose(std::format("adding? {}", std::string(buf)));
 			if (parse_buf(std::string_view(&buf[start], i - start), sw)) {
 				start = i + 1;
 				for (auto it = cache.switches.begin();

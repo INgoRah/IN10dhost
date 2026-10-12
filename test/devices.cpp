@@ -2,6 +2,8 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <fstream>
+#include <filesystem>
+#include <unistd.h>
 #include <vector>
 #include <fuse3/fuse.h>
 #include <gtest/gtest.h>
@@ -121,10 +123,10 @@ TEST_F(DevTest, add_devices)
 	EXPECT_EQ(devs.size(), 2);
 
 	// dump the recorded 1-Wire trace through the real FUSE read path
-	// (matches the size fs_getattr advertises for /log/1wire.vcd)
+	// (matches the size fs_getattr advertises for /status/1wire.vcd)
 	// buf size is AI generated
 	std::vector<char> vcd_buf(218 + 1024 * 30);
-	int vcd_res = fs_ops.read("/log/1wire.vcd", vcd_buf.data(), vcd_buf.size(), 0, nullptr);
+	int vcd_res = fs_ops.read("/status/1wire.vcd", vcd_buf.data(), vcd_buf.size(), 0, nullptr);
 	EXPECT_GT(vcd_res, 0);
 	std::ofstream out("1wire.vcd", std::ios::binary);
 	out.write(vcd_buf.data(), vcd_res);
@@ -286,6 +288,137 @@ TEST_F(DevTest, Ds2408NonSoftBeginReadsRegisters)
 	((ds2408*)dev)->data[STAT] = 0xAB;
 	ow.begin(false); // normal (non-soft) start: must read registers
 	EXPECT_EQ(((ds2408*)dev)->data[STAT], 0x00);
+}
+
+/* the saved traces in dir */
+static std::vector<std::filesystem::path> vcd_files(const std::filesystem::path& dir)
+{
+	std::vector<std::filesystem::path> out;
+	for (const auto& e : std::filesystem::directory_iterator(dir)) {
+		std::string n = e.path().filename().string();
+		if (n.starts_with("1wire-") && n.ends_with(".vcd"))
+			out.push_back(e.path());
+	}
+	std::sort(out.begin(), out.end());
+	return out;
+}
+
+TEST_F(DevTest, LogSave)
+{
+	namespace fs = std::filesystem;
+	fs::path dir = fs::temp_directory_path() / std::format("in10dfs-vcd-{}", getpid());
+	fs::remove_all(dir);
+	std::string old_dir = ow.get_log_dir();
+
+	// created when missing, named by the time, a VCD trace
+	ow.set_log_dir((dir / "sub").string());
+	ds.log_event('1', 0);
+	std::string f = ow.log_save();
+	ASSERT_FALSE(f.empty());
+	EXPECT_TRUE(fs::exists(f));
+	EXPECT_EQ(fs::path(f).parent_path(), dir / "sub");
+	std::ifstream in(f);
+	std::string first;
+	std::getline(in, first);
+	EXPECT_EQ(first, "$date");
+	EXPECT_EQ(fs::path(f).filename().string().size(), std::string("1wire-20261011-081203.vcd").size());
+
+	// not forced: not again within a minute
+	EXPECT_TRUE(ow.log_save(false).empty());
+	// fs trigger: forced
+	EXPECT_EQ(fs_ops.open("/settings/vcd_save", nullptr), 0);
+	EXPECT_EQ(fs_ops.write("/settings/vcd_save", "1\n", 2, 0, nullptr), 2);
+
+	// only the newest 20 are kept
+	for (int i = 0; i < 25; i++)
+		std::ofstream(dir / "sub" / std::format("1wire-20000101-0000{:02}.vcd", i)) << "x";
+	f = ow.log_save();
+	ASSERT_FALSE(f.empty());
+	auto files = vcd_files(dir / "sub");
+	EXPECT_EQ(files.size(), 20u);
+	EXPECT_EQ(files.back(), fs::path(f));
+	EXPECT_EQ(files.front().filename(), "1wire-20000101-000006.vcd");
+
+	// a log dir that cannot be made: $HOME instead
+	const char* home = std::getenv("HOME");
+	std::string old_home = home ? home : "";
+	fs::create_directories(dir / "home");
+	setenv("HOME", (dir / "home").c_str(), 1);
+	ow.set_log_dir("/proc/in10dfs-not-here");
+	f = ow.log_save();
+	EXPECT_EQ(fs::path(f).parent_path(), dir / "home");
+	// neither the log dir nor $HOME can be written: nothing saved, and
+	// settings/vcd_save reports it
+	setenv("HOME", "/proc", 1);
+	EXPECT_TRUE(ow.log_save().empty());
+	EXPECT_EQ(fs_ops.write("/settings/vcd_save", "1", 1, 0, nullptr), -EIO);
+	unsetenv("HOME");
+	EXPECT_TRUE(ow.log_save().empty());
+
+	// the file cannot be written: a directory in its place, for this
+	// second and the next ones in case the clock moves on meanwhile
+	ow.set_log_dir((dir / "busy").string());
+	time_t now = ::time(nullptr);
+	for (int i = 0; i < 3; i++) {
+		time_t t = now + i;
+		struct tm tm;
+		char name[64];
+		localtime_r(&t, &tm);
+		strftime(name, sizeof(name), "1wire-%Y%m%d-%H%M%S.vcd", &tm);
+		fs::create_directories(dir / "busy" / name);
+	}
+	EXPECT_TRUE(ow.log_save().empty());
+
+	if (home)
+		setenv("HOME", old_home.c_str(), 1);
+	ow.set_log_dir(old_dir);
+	fs::remove_all(dir);
+}
+
+TEST_F(DevTest, RomCanonical)
+{
+	// the dot, upper case, the CRC computed: given, missing or wrong
+	EXPECT_EQ(OwDev::canonical_rom("29.0200FDFF6677F8"), "29.0200FDFF6677F8");
+	EXPECT_EQ(OwDev::canonical_rom("290200FDFF6677F8"), "29.0200FDFF6677F8");
+	EXPECT_EQ(OwDev::canonical_rom("29.0200fdff6677f8"), "29.0200FDFF6677F8");
+	EXPECT_EQ(OwDev::canonical_rom("29.0200FDFF6677"), "29.0200FDFF6677F8");
+	EXPECT_EQ(OwDev::canonical_rom("29.1500FDFF6677F8"), "29.1500FDFF667726");
+	// too short: no exception, the missing bytes are zero
+	EXPECT_NO_THROW(OwDev::canonical_rom("29.02"));
+	EXPECT_EQ(OwDev::canonical_rom("29.02").substr(0, 15), "29.020000000000");
+	uint8_t a[8];
+	OwDev::canonical_rom("28.0501FAFE6677", a);
+	EXPECT_EQ(a[0], 0x28);
+	EXPECT_EQ(a[6], 0x77);
+	EXPECT_EQ(a[7], 0xA0);
+}
+
+TEST_F(DevTest, RomWrongCrc)
+{
+	char buf[16] = {};
+	size_t n = cache.devices.size();
+
+	// a wrong CRC is corrected, the device is known by the right one
+	ow.update_device(3, "29.1500FDFF6677F8");
+	ASSERT_EQ(cache.devices.size(), n + 1);
+	OwDev* dev = ow.find("29.1500FDFF667726");
+	ASSERT_NE(dev, nullptr);
+	EXPECT_EQ(dev->rom, "29.1500FDFF667726");
+	EXPECT_EQ(ow.find("29.1500FDFF6677F8"), nullptr);
+
+	// found again, with the wrong CRC as well as the right one, lower
+	// case and without: no second device
+	ow.update_device(3, "29.1500FDFF6677F8");
+	ow.update_device(3, "29.1500FDFF667726");
+	ow.update_device(3, "29.1500fdff667726");
+	ow.update_device(3, "29.1500FDFF6677");
+	EXPECT_EQ(cache.devices.size(), n + 1);
+
+	// the file system knows it by the right one only
+	ow.update_data();
+	ow.begin();
+	EXPECT_EQ(fs_ops.read("/29.1500FDFF667726/watchdog", buf, sizeof(buf), 0, nullptr), 1);
+	EXPECT_EQ(fs_ops.read("/29.1500FDFF6677F8/watchdog", buf, sizeof(buf), 0, nullptr), -ENOENT);
 }
 
 TEST_F(DevTest, ds2482)

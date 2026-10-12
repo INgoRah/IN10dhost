@@ -35,6 +35,7 @@ const FsEntry<ds2408> ds2408::table[] = {
 	{ "threshold", 3, 0, false, nullptr, nullptr, &ds2408::r_threshold, &ds2408::w_threshold },
 	{ "brightness", 3, 0, false, nullptr, nullptr, &ds2408::r_brightness, &ds2408::w_brightness },
 	{ "level.*", 3, 8, false, &ds2408::vis_level, nullptr, &ds2408::r_level, &ds2408::w_level },
+	{ "watchdog", 5, 0, false, nullptr, nullptr, &ds2408::r_watchdog, nullptr },
 };
 const size_t ds2408::n_table = sizeof(ds2408::table) / sizeof(ds2408::table[0]);
 
@@ -336,6 +337,14 @@ int ds2408::w_brightness(const char* buf, size_t size, int)
 	}
 }
 
+// watchdog resets seen since the start
+int ds2408::r_watchdog(char* buf, size_t, bool, int)
+{
+	auto lk = lock();
+	std::sprintf(buf, "%u", wdt_count);
+	return std::strlen(buf);
+}
+
 bool ds2408::vis_pio(int idx) const
 {
 	auto lk = lock();
@@ -598,7 +607,11 @@ uint8_t ds2408::pio_set(uint8_t pio)
 			// a hung dev
 			r = ds->read();
 #ifndef USE_I2C
+#ifdef TESTING
+			r = sim_fail ? 0xff : 0xAA;
+#else
 			r = 0xAA;
+#endif
 #endif
 			if (r == 0xAA) {
 				break;
@@ -615,6 +628,8 @@ uint8_t ds2408::pio_set(uint8_t pio)
 			latch_reset();
 		}
 	}
+	if (r == 0xAA)
+		out_known = true;
 	if (r == 0xAA && data[PIO_OUT] != pio) {
 		data[PIO_OUT] = pio;
 		// sent once the device is unlocked, see OwDev::notify_change()
@@ -667,6 +682,9 @@ uint8_t ds2408::reg_read(bool latch_reset)
 	uint8_t retry = REG_RETRY - 1;
 	bool ret;
 	uint8_t buf[3];  // Put everything in the buffer so we can compute CRC easily.
+	// what the device drove before this read, lost if it was reset
+	uint8_t prev_out = data[PIO_OUT];
+	bool prev_known = out_known;
 	// read data registers
 	buf[0] = 0xF0;	// Read PIO Registers
 	buf[1] = 0x88;	// LSB address
@@ -696,7 +714,11 @@ uint8_t ds2408::reg_read(bool latch_reset)
 #else
 		uint8_t dummy[10];
 		ds->read (dummy, 10);
+#ifdef TESTING
+		data[STAT] = sim_stat;
+#else
 		data[STAT] = 0x00;
+#endif
 #endif
 		/* check for valid status register */
 		if (data[STAT] != 0xff)
@@ -726,6 +748,20 @@ uint8_t ds2408::reg_read(bool latch_reset)
 	if (data[STAT] & 0x40) {
 		/* status in 5 signals a dimming down */
 		level_pct[0] = 0;
+	}
+	if (data[STAT] != 0xff) {
+		if (data[STAT] & STAT_WATCHDOG) {
+			// the first read after the reset has what to restore,
+			// later ones (before the restore) only the reset state
+			if (!wdt_pending) {
+				wdt_pending = true;
+				wdt_out = prev_out;
+				wdt_out_known = prev_known;
+			}
+			out_known = false;
+		} else if (!wdt_pending) {
+			out_known = true;
+		}
 	}
 
 	return tmp;
@@ -825,6 +861,10 @@ uint8_t ds2408::level_set(uint8_t pio, uint8_t level, uint8_t cmd, uint8_t val)
 
 #ifndef USE_I2C
 	(void)val;
+#ifdef TESTING
+	if (sim_fail)
+		return 0xff;
+#endif
 	if (cmd == TMR_TYPE_ON)
 		level_pct[pio] = pct;
 	return 0xaa;
@@ -892,5 +932,59 @@ int ds2408::threshold_set(uint8_t threshold)
 	this->threshold = threshold;
 	if (level_set(0, 0, TMR_TYPE_THRESHOLD, threshold) != 0xAA)
 		return -EAGAIN;
+	return 0;
+}
+
+int ds2408::get_brightness() const
+{
+	auto lk = lock();
+	return brightness;
+}
+
+int ds2408::get_threshold() const
+{
+	auto lk = lock();
+	return threshold;
+}
+
+bool ds2408::watchdog_pending() const
+{
+	auto lk = lock();
+	return wdt_pending;
+}
+
+int ds2408::watchdog_restore()
+{
+	auto lk = lock();
+	int err = 0;
+
+	if (!wdt_pending)
+		return 0;
+	wdt_pending = false;
+	wdt_count++;
+	if (wdt_out_known) {
+		logger.info(rom + std::format(" watchdog: restoring PIO {:#x}", wdt_out));
+		// coverity[sleep] - bus mutex must be held
+		if (pio_set(wdt_out) != 0xAA)
+			err++;
+	} else {
+		logger.warn(rom + " watchdog: outputs before the reset unknown, not restored");
+	}
+	for (uint8_t pio = 0; pio < 8; pio++) {
+		if (cfg[CFG_PIN_ID + pio] != CFG_OUT_PWM || level_pct[pio] == 0)
+			continue;
+		logger.info(rom + std::format(" watchdog: restoring level.{} {}%", pio, level_pct[pio]));
+		if (level_set(pio, level_pct[pio]) != 0xAA)
+			err++;
+	}
+	// 0 is the device's default as well
+	if (threshold != 0 && threshold_set((uint8_t)threshold) != 0)
+		err++;
+	if (brightness != 0 && brightness_set((uint8_t)brightness) != 0)
+		err++;
+	if (err) {
+		logger.warn(rom + std::format(" watchdog: restore incomplete, {} failed", err));
+		return -EAGAIN;
+	}
 	return 0;
 }

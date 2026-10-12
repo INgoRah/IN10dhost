@@ -126,7 +126,18 @@ add_executable(in10dfs
     src/ow_devices.cpp
     src/plugins.cpp
     src/switch_handler.cpp
+    src/version.cpp
 )
+
+# git hash for status/version, refreshed on every build
+set(GIT_VERSION_H ${CMAKE_BINARY_DIR}/generated/git_version.h)
+add_custom_target(git_version
+    COMMAND ${CMAKE_COMMAND} -DSRC=${CMAKE_SOURCE_DIR} -DOUT=${GIT_VERSION_H}
+        -P ${CMAKE_SOURCE_DIR}/cmake/git_version.cmake
+    BYPRODUCTS ${GIT_VERSION_H}
+    COMMENT "git version")
+add_dependencies(in10dfs git_version)
+target_include_directories(in10dfs PRIVATE ${CMAKE_BINARY_DIR}/generated)
 if(TESTING)
     target_compile_definitions(in10dfs PRIVATE TESTING=1)
     target_sources(in10dfs

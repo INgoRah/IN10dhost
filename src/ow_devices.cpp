@@ -1,4 +1,12 @@
+#include <cerrno>
+#include <cstdlib>
+#include <cstring>
+#include <ctime>
+#include <strings.h>
+#include <filesystem>
 #include <fstream>
+#include <fcntl.h>
+#include <unistd.h>
 #include <iostream>
 #include <string>
 #include <system_error> // for std::system_error in alarmHandler()
@@ -54,6 +62,7 @@ void to_json(json& j, const Config& c) {
 	j = json {
 		{"version", 1},
 		{"poll", c.poll},
+		{"save_interval", c.save_interval},
 		{"bus_count", c.bus_count},
 		{"busses", c.busses},
 		{"switches", c.switches}
@@ -102,6 +111,8 @@ void from_json(const json& j, Config& c) {
 	}
 	if (j.contains("poll"))
 		c.poll = j.at("poll").get<int>();
+	if (j.contains("save_interval"))
+		c.save_interval = j.at("save_interval").get<int>();
 }
 
 OwDevices::~OwDevices() {
@@ -157,8 +168,91 @@ int OwDevices::log_dump(char* buf, size_t size)
 	return ds->log_dump(buf, size);
 }
 
+/* traces kept by log_save(), older ones are removed */
+#define LOG_KEEP 20
+/* minimum time between two not forced log_save() calls */
+#define LOG_SAVE_MIN_SECS 60
+
+/* log_dir, created if needed, else $HOME; empty if neither works */
+static std::filesystem::path log_target(const std::string& log_dir)
+{
+	std::error_code ec;
+
+	if (!log_dir.empty()) {
+		std::filesystem::create_directories(log_dir, ec);
+		if (std::filesystem::is_directory(log_dir, ec) &&
+		    ::access(log_dir.c_str(), W_OK) == 0)
+			return log_dir;
+	}
+	const char* home = std::getenv("HOME");
+	if (home && *home && ::access(home, W_OK) == 0)
+		return home;
+	return {};
+}
+
+/* "20261011-081203" in local time */
+static std::string file_stamp()
+{
+	time_t now = ::time(nullptr);
+	struct tm tm;
+	char buf[32];
+
+	localtime_r(&now, &tm);
+	strftime(buf, sizeof(buf), "%Y%m%d-%H%M%S", &tm);
+	return buf;
+}
+
+std::string OwDevices::log_save(bool force)
+{
+	std::lock_guard<std::mutex> lock(log_mtx);
+	auto now = HrClock::now();
+
+	if (!force && last_log_save != HrClock::time_point{} &&
+	    now - last_log_save < std::chrono::seconds(LOG_SAVE_MIN_SECS)) {
+		logger.verbose("1-Wire trace saved recently, skipped");
+		return {};
+	}
+	std::filesystem::path dir = log_target(log_dir);
+	if (dir.empty()) {
+		logger.error(std::format("no writable directory for the 1-Wire trace ({})", log_dir));
+		return {};
+	}
+
+	std::vector<char> buf(DS2482::log_size());
+	// never empty, there is always the VCD header
+	int n = ds->log_dump(buf.data(), buf.size());
+	std::filesystem::path file = dir / ("1wire-" + file_stamp() + ".vcd");
+	std::ofstream out(file, std::ios::binary | std::ios::trunc);
+	out.write(buf.data(), n);
+	out.close();
+	if (!out) {
+		logger.error("cannot write 1-Wire trace " + file.string());
+		return {};
+	}
+	last_log_save = now;
+	logger.info("1-Wire trace saved to " + file.string());
+
+	// keep the newest LOG_KEEP, the names sort by time
+	std::vector<std::filesystem::path> old;
+	std::error_code ec;
+	for (const auto& e : std::filesystem::directory_iterator(dir, ec)) {
+		std::string name = e.path().filename().string();
+		if (name.starts_with("1wire-") && name.ends_with(".vcd"))
+			old.push_back(e.path());
+	}
+	if (old.size() > LOG_KEEP) {
+		std::sort(old.begin(), old.end());
+		for (size_t i = 0; i < old.size() - LOG_KEEP; i++)
+			std::filesystem::remove(old[i], ec);
+	}
+	return file.string();
+}
+
 void OwDevices::load(const std::string& path) {
 	json j;
+	data_path = path;
+	// the save timer counts from the start
+	last_save_tick = HrClock::now();
 	std::ifstream file(path);
 	if (!file) {
 		throw std::runtime_error("Cannot open config file: " + path);
@@ -188,8 +282,8 @@ void OwDevices::load(const std::string& path) {
 	plugins.action(ACT_INITIALIZED, 0); // loaded
 }
 
-void OwDevices::save(const std::string& path) {
-	std::ofstream file(path);
+int OwDevices::save(const std::string& path) {
+	std::lock_guard<std::mutex> lock(save_mtx);
 	cache.version = 1;
 	// this is just for information and not used in the system
 	for (auto& b : cache.busses)
@@ -203,7 +297,80 @@ void OwDevices::save(const std::string& path) {
 	catch (const std::exception& e) {
 		logger.error("Cannot save plugins");
 	}
-	file << j.dump(4); // pretty-print with 4-space indentation
+	std::string text = j.dump(4); // pretty-print with 4-space indentation
+	text += "\n";
+
+	// the safe pattern: never write the config file in place
+	std::string tmp = path + ".tmp";
+	int fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+	if (fd < 0) {
+		int err = errno;
+		logger.error(std::format("cannot save config {}: {}", tmp, strerror(err)));
+		return -err;
+	}
+	const char* p = text.data();
+	size_t left = text.size();
+	int err = 0;
+	while (left > 0) {
+		ssize_t n = ::write(fd, p, left);
+		if (n < 0) {
+			if (errno == EINTR)
+				continue;
+			err = errno;
+			break;
+		}
+		p += n;
+		left -= n;
+	}
+	// on the disk before it replaces the old file
+	if (!err && ::fsync(fd) != 0)
+		err = errno;
+	if (::close(fd) != 0 && !err)
+		err = errno;
+	if (!err && ::rename(tmp.c_str(), path.c_str()) != 0)
+		err = errno;
+	if (err) {
+		logger.error(std::format("cannot save config {}: {}", path, strerror(err)));
+		::unlink(tmp.c_str());
+		return -err;
+	}
+	// and the rename itself
+	std::string dir = std::filesystem::path(path).parent_path().string();
+	int dfd = ::open(dir.empty() ? "." : dir.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+	if (dfd >= 0) {
+		::fsync(dfd);
+		::close(dfd);
+	}
+	saved_at = std::chrono::system_clock::now();
+	logger.verbose("config saved to " + path);
+	return 0;
+}
+
+int OwDevices::save()
+{
+	if (data_path.empty()) {
+		logger.warn("no config file to save to");
+		return -ENOENT;
+	}
+	return save(data_path);
+}
+
+int OwDevices::save_poll(HrClock::time_point now)
+{
+	int secs = cache.save_interval;
+
+	if (secs <= 0)
+		return 0;
+	if (now - last_save_tick < std::chrono::seconds(secs))
+		return 0;
+	last_save_tick = now;
+	return save() == 0 ? 1 : 0;
+}
+
+std::chrono::system_clock::time_point OwDevices::last_saved()
+{
+	std::lock_guard<std::mutex> lock(save_mtx);
+	return saved_at;
 }
 
 void OwDevices::add_device(OwDev* dev)
@@ -317,6 +484,12 @@ void OwDevices::update_data()
 // called after scan to creat a device if needed and
 // add it to the caches
 void OwDevices::update_device(int bus, string rom) {
+	// the ROM the device will carry: the duplicate check must use it,
+	// a wrong CRC would otherwise never match the device made before
+	string canon = OwDev::canonical_rom(rom);
+	if (rom.size() == canon.size() && strcasecmp(rom.c_str(), canon.c_str()) != 0)
+		logger.warn(std::format("device {}: CRC wrong, taken as {}", rom, canon));
+	rom = std::move(canon);
 	if (find(rom) != nullptr) {
 		logger.verbose(std::format("device {} already found", rom));
 		// dev->set_state(DS_RUNNING);
@@ -468,6 +641,7 @@ int OwDevices::dev_poll()
 		ds->log_event('3',cnt);
 		// off timers of timed switches, 1 second resolution
 		swHdl.timer_poll();
+		save_poll(now);
 	}
 	for (auto& dev : cache.devices) {
 		int check = dev->poll_check();
@@ -554,7 +728,6 @@ bool OwDevices::alarmHandler(uint8_t busNr, uint8_t target)
 	}
 	while (srch && cnt > 0) {
 		j++;
-		logger.debug(std::format("Alarm ({}) {}.{} {}", adr[0], busNr, adr[1], adr[2]));
 		try {
 			swHdl.dev_alarm(busNr, adr);
 		}

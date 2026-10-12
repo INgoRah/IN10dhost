@@ -1,5 +1,8 @@
 #ifndef _DS2408_H
 #define _DS2408_H
+#ifdef TESTING
+#include <gtest/gtest_prod.h>
+#endif
 #include <array>
 #include <string>
 #include "ow_dev.h"
@@ -60,6 +63,25 @@ class ds2408 : public OwDev, public IDS2408 {
 		uint8_t last_latch = 0;
 		// level per pin in percent as last applied by level_set()
 		std::array<uint8_t, 8> level_pct{};
+		// data[PIO_OUT] holds what the device really drives, not the
+		// zeroes (= all on) it starts with
+		bool out_known = false;
+		// reg_read() saw the watchdog status, the outputs the device
+		// had before it, for watchdog_restore()
+		bool wdt_pending = false;
+		uint8_t wdt_out = 0;
+		bool wdt_out_known = false;
+		// watchdog resets seen since the start
+		unsigned wdt_count = 0;
+		int r_watchdog(char* buf, size_t size, bool uncached, int idx);
+#ifdef TESTING
+		// GTest testing support: the status register the simulated
+		// bus reports, e.g. STAT_WATCHDOG
+		uint8_t sim_stat = 0;
+		// and whether its PIO and level writes fail
+		bool sim_fail = false;
+		FRIEND_TEST(FsTest, Ds2408Watchdog);
+#endif
 	public:
 		/* [0] PIO Logic State  = sensed
 		 * [1] Output latch = PIO
@@ -108,5 +130,13 @@ class ds2408 : public OwDev, public IDS2408 {
 		std::string pin_label(int pio) const;
 		int brightness_set(uint8_t brightness);
 		int threshold_set(uint8_t threshold);
+		int get_brightness() const;
+		int get_threshold() const;
+		// a register read saw the watchdog status, not yet restored
+		bool watchdog_pending() const;
+		/* After a watchdog reset: writes the cached state back - the
+		   outputs as before the reset, the PWM levels, threshold and
+		   brightness. Returns 0, or -EAGAIN if a part failed. */
+		int watchdog_restore();
 };
 #endif

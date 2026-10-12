@@ -24,6 +24,7 @@
 #include <filesystem>
 
 #include "main.h"
+#include "version.h"
 #include "fs.h"
 #include "ds2482.h"
 #include "ow_devices.h"
@@ -278,6 +279,10 @@ string setup()
 	// before load() populates them, not after (it would wipe out
 	// everything load() just loaded)
 	ow.init();
+	// also when loading fails (no file yet): settings/save and the save
+	// timer write there
+	ow.set_data_path(f);
+	ow.set_log_dir(cli.log_dir);
 	try {
 		ow.load(f.c_str());
 	}
@@ -308,7 +313,7 @@ int main(int argc, char* argv[])
 	string f;
 
 	//std::signal(SIGSEGV, segfault_handler);
-	printf("Starting IN10dhost daemon %s...\n", __TIME__);
+	printf("Starting IN10dhost daemon %s...\n", version_string());
 	cli.parse(argc, argv);
 	if (cli.help_requested) {
 		// -h/--help was deliberately left in argv by cli.parse(), so
@@ -338,8 +343,12 @@ int main(int argc, char* argv[])
 	}catch (const std::exception& e) {
 		printf("worker stopping failed with an exception: %s\n", e.what());
 	}
+	// the trace of the last minutes, for a look after the restart
+	ow.log_save();
 	try {
-		ow.save(f.c_str());
+		// failures are logged by save() itself
+		if (ow.save(f) != 0)
+			printf("Failed to save config %s\n", f.c_str());
 	} catch (const std::exception& e) {
 		printf("Failed to save config: %s\n", e.what());
 	}

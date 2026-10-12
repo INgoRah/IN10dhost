@@ -101,6 +101,8 @@ public:
 	uint8_t last_err = 0;
 	bool init();
 	int log_dump(char* buf, size_t size);
+	// buffer size that always holds a full log_dump()
+	static size_t log_size();
 	bool configureDev(uint8_t config);
 	void resetDev();
 

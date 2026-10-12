@@ -60,6 +60,61 @@ Full handling of arduino interrupts
 
 Full switching
 
+## saving the config
+
+The config (`data.json`, see `-d`) is saved at shutdown, on demand and,
+if set, periodically:
+
+```sh
+echo 1 > /mnt/1wire/settings/save              # save now
+echo 3600 > /mnt/1wire/settings/save_interval  # every hour, 0 = off (default), up to 86400
+```
+
+A save never overwrites the file in place: it writes `data.json.tmp`,
+syncs it to disk and renames it over `data.json`. A crash or power loss
+leaves either the old or the new file, never a broken one.
+`status/health` shows the time of the last save.
+
+## status
+
+`/status` shows how the daemon is doing:
+
+- `version`: the release from `include/version.h`, with the git commit
+  it was built from (`-dirty` for local changes) unless it is a Debian
+  package build: `0.4.0 (6aea5439)`
+- `health`: uptime in seconds, the number of warnings and errors since
+  the start (also those the log level does not show) and the last one
+  of each with its time
+- `1wire.vcd`: the recent 1-Wire bus traffic as a VCD trace
+
+```
+uptime 86400
+warnings 3
+errors 0
+last_warning 2026-10-09 08:12:03 20.0200F8FE66771E: DS2450 read result CRC mismatch
+last_error -
+last_save 2026-10-09 08:00:00
+```
+
+`1wire.vcd` only holds the last few thousand bus events and is gone
+with a restart, so it is also saved as `1wire-<YYYYMMDD-HHMMSS>.vcd`
+into `/opt/lib/in10dfs` (`--log-dir` for another one, `$HOME` if it
+cannot be written): at shutdown, when a ds2408 reports a watchdog reset
+(at most once a minute) and on demand. The newest 20 are kept.
+
+```sh
+echo 1 > /mnt/1wire/settings/vcd_save          # save the trace now
+```
+
+## ds2408 watchdog
+
+A ds2408 reset by its watchdog loses its outputs, PWM levels, threshold
+and brightness. The alarm handling notices it from the status register,
+writes the cached state back (the outputs as they were before the
+reset), counts it in `<rom>/watchdog` and hands plugins an
+`ACT_DEV_WATCHDOG` event, e.g. for a script to apply a current
+brightness (see `plugin/example.js`).
+
 ## switches
 
 A switch connects a button input (latch) to an output (PIO). Add one by
