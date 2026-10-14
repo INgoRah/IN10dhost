@@ -1,7 +1,6 @@
 #ifndef _MAIN_H
 #define _MAIN_H
 
-#include "version.h"
 #include <chrono>
 #include <thread>
 #include "logger.h"

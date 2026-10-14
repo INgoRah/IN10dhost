@@ -368,12 +368,14 @@ void SwitchHandler::timer_start(union pio dst, uint16_t secs)
 {
 	std::lock_guard<std::mutex> lk(timers_mtx);
 	timers[dst.data] = HrClock::now() + std::chrono::seconds(secs);
-	logger.verbose(std::format("timer {}.{}.{} off in {}s",
+	logger.debug(std::format("timer {}.{}.{} off in {}s",
 		(int)dst.da.bus, (int)dst.da.adr, (int)dst.da.pio, secs));
 }
 
 bool SwitchHandler::timer_stop(union pio dst)
 {
+	logger.debug(std::format("timer {}.{}.{} off",
+		(int)dst.da.bus, (int)dst.da.adr, (int)dst.da.pio));
 	std::lock_guard<std::mutex> lk(timers_mtx);
 	return timers.erase(dst.data) > 0;
 }
