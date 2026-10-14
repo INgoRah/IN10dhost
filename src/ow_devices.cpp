@@ -343,7 +343,7 @@ int OwDevices::save(const std::string& path) {
 		::close(dfd);
 	}
 	saved_at = std::chrono::system_clock::now();
-	logger.verbose("config saved to " + path);
+	logger.debug("config saved to " + path);
 	return 0;
 }
 

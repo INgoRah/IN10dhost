@@ -1,3 +1,11 @@
+in10dfs (0.5.1) trixie; urgency=medium
+
+  * Watchdog handling improvements
+  * CRC checks
+  * Script for log analysis
+
+ -- INgo Rah <INgo.Rah@gmx.net>  Wed, 14 Oct 2026 08:30:00 +0000
+
 in10dfs (0.5.0) trixie; urgency=medium
 
   * Plugins and js scripts with fs access

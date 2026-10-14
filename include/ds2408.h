@@ -82,13 +82,20 @@ class ds2408 : public OwDev, public IDS2408 {
 		// watchdog resets seen since the start
 		unsigned wdt_count = 0;
 		int r_watchdog(char* buf, size_t size, bool uncached, int idx);
+		// register reads dropped for a CRC mismatch since the start
+		unsigned crc_errors = 0;
+		int r_crc_errors(char* buf, size_t size, bool uncached, int idx);
 #ifdef TESTING
 		// GTest testing support: the status register the simulated
 		// bus reports, e.g. STAT_WATCHDOG
 		uint8_t sim_stat = 0;
 		// and whether its PIO and level writes fail
 		bool sim_fail = false;
+		// raw answers (8 registers, CRC16) for the next register reads,
+		// taken before the simulated good read above
+		std::vector<std::array<uint8_t, 10>> sim_reads;
 		FRIEND_TEST(FsTest, Ds2408Watchdog);
+		FRIEND_TEST(FsTest, Ds2408RegReadCrc);
 #endif
 	public:
 		/* [0] PIO Logic State  = sensed
