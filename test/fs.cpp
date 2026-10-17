@@ -1528,6 +1528,7 @@ TEST_F(FsTest, Ds2408Watchdog) {
 	EXPECT_EQ(cfg["last_watchdog"]["rom"], rom);
 	EXPECT_EQ(cfg["last_watchdog"]["type"], "ds2408");
 	EXPECT_EQ(cfg["last_watchdog"]["bus"], 2);
+	EXPECT_EQ(cfg["last_watchdog"]["status"], STAT_WATCHDOG);
 	EXPECT_EQ(cfg["last_watchdog"]["brightness"], 50);
 	EXPECT_EQ(cfg["last_watchdog"]["threshold"], 30);
 
@@ -1579,6 +1580,126 @@ TEST_F(FsTest, Ds2408Watchdog) {
 
 	logger.set_level(lvl);
 	plugins.remove("faulty");
+	ow.set_log_dir(old_dir);
+	fs::remove_all(dir);
+}
+
+/* The warning a reset leaves in the log: what kind it was, how long
+   since the previous one, and when the other ROM of a dual-ROM chip
+   (here a ds2450 with the same serial) was last selected. */
+TEST_F(FsTest, Ds2408WatchdogLog) {
+	namespace fs = std::filesystem;
+	fs::path dir = fs::temp_directory_path() / std::format("in10dfs-wdtlog-{}", getpid());
+	std::string old_dir = ow.get_log_dir();
+	ow.set_log_dir(dir.string());
+
+	std::string rom = OwDev::canonical_rom("29.1900FDFF6677");
+	std::string twin_rom = OwDev::canonical_rom("20.1900FDFF6677");
+	std::string other_rom = OwDev::canonical_rom("29.1A00FDFF6677");
+	ow.update_device(0, rom);
+	ow.update_device(0, twin_rom);
+	ow.update_device(0, other_rom);
+	ow.update_data();
+	ow.begin();
+	swHdl.begin(&ds);
+	ds2408* dev = (ds2408*)ow.find(rom);
+	OwDev* twin = ow.find(twin_rom);
+	ds2408* other = (ds2408*)ow.find(other_rom);
+	ASSERT_NE(dev, nullptr);
+	ASSERT_NE(twin, nullptr);
+	ASSERT_NE(other, nullptr);
+	LogLevel lvl = logger.get_level();
+	logger.set_level(LogLevel::NONE);
+
+	// same serial, other family: one chip
+	EXPECT_EQ(ow.twins(dev), std::vector<OwDev*>{ twin });
+	EXPECT_EQ(ow.twins(twin), std::vector<OwDev*>{ dev });
+	EXPECT_TRUE(ow.twins(other).empty());
+	EXPECT_EQ(ds.last_select(twin->addr), std::chrono::steady_clock::time_point{});
+
+	// a watchdog, the first one, the twin never selected
+	dev->data[STAT] = STAT_WATCHDOG;
+	swHdl.dev_watchdog(dev);
+	EXPECT_EQ(logger.warnings().last, std::format(
+		"Watchdog on {}! (status 0x88, first since start, {} last selected never)",
+		rom, twin_rom));
+
+	// a power-on reset, after the twin was used
+	ds.select(twin->addr);
+	EXPECT_NE(ds.last_select(twin->addr), std::chrono::steady_clock::time_point{});
+	dev->data[STAT] = 0x80;
+	swHdl.dev_watchdog(dev);
+	std::string last = logger.warnings().last;
+	EXPECT_TRUE(last.starts_with(std::format("Reset on {}! (status 0x80, previous ", rom))) << last;
+	EXPECT_NE(last.find(std::format("s ago, {} last selected ", twin_rom)), std::string::npos) << last;
+	EXPECT_TRUE(last.ends_with(" s ago)")) << last;
+
+	// no twin, nothing about one
+	other->data[STAT] = STAT_WATCHDOG;
+	swHdl.dev_watchdog(other);
+	EXPECT_EQ(logger.warnings().last, std::format(
+		"Watchdog on {}! (status 0x88, first since start)", other_rom));
+
+	logger.set_level(lvl);
+	ow.set_log_dir(old_dir);
+	fs::remove_all(dir);
+}
+
+/* Old firmware raises no alarm after a watchdog reset: one seen by any
+   register read - an uncached read, the ds2408 status poll - is handled
+   by the device polling as the alarm handling would. */
+TEST_F(FsTest, Ds2408WatchdogNoAlarm) {
+	namespace fs = std::filesystem;
+	char buf[16] = {};
+	fs::path dir = fs::temp_directory_path() / std::format("in10dfs-wdtpoll-{}", getpid());
+	std::string old_dir = ow.get_log_dir();
+	ow.set_log_dir(dir.string());
+
+	std::string rom = OwDev::canonical_rom("29.1B00FDFF6677");
+	auto watchdog = [&]() {
+		std::memset(buf, 0, sizeof(buf));
+		fs_ops.read(("/" + rom + "/watchdog").c_str(), buf, sizeof(buf), 0, nullptr);
+		return std::string(buf);
+	};
+	ow.update_device(1, rom);
+	ow.update_data();
+	ow.begin();
+	swHdl.begin(&ds);
+	ds2408* dev = (ds2408*)ow.find(rom);
+	ASSERT_NE(dev, nullptr);
+	LogLevel lvl = logger.get_level();
+	logger.set_level(LogLevel::NONE);
+	EXPECT_EQ(dev->pio_set(0xFE), 0xAA);
+
+	// nothing pending: the device polling leaves it alone
+	ow.dev_poll();
+	EXPECT_EQ(watchdog(), "0");
+
+	// an uncached read sees it: reported and restored with the next
+	// device polling, not only with an alarm
+	dev->sim_stat = STAT_WATCHDOG;
+	std::memset(buf, 0, sizeof(buf));
+	fs_ops.read(("/uncached/" + rom + "/BYTE").c_str(), buf, sizeof(buf), 0, nullptr);
+	EXPECT_TRUE(dev->watchdog_pending());
+	ow.dev_poll();
+	EXPECT_FALSE(dev->watchdog_pending());
+	EXPECT_EQ(watchdog(), "1");
+	EXPECT_EQ(dev->data[PIO_OUT], 0xFE);
+	EXPECT_TRUE(logger.warnings().last.starts_with("Watchdog on " + rom + "!"))
+		<< logger.warnings().last;
+
+	// the status poll of a ds2408 finds it by itself
+	dev->sim_stat = 0;
+	dev->reg_read(false);
+	dev->sim_stat = STAT_WATCHDOG;
+	EXPECT_EQ(fs_ops.write(("/" + rom + "/poll").c_str(), "1", 1, 0, nullptr), 1);
+	ow.dev_poll();
+	EXPECT_EQ(watchdog(), "2");
+	EXPECT_FALSE(dev->watchdog_pending());
+
+	dev->sim_stat = 0;
+	fs_ops.write(("/" + rom + "/poll").c_str(), "0", 1, 0, nullptr);
+	logger.set_level(lvl);
 	ow.set_log_dir(old_dir);
 	fs::remove_all(dir);
 }

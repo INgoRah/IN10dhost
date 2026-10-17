@@ -427,7 +427,37 @@ int SwitchHandler::timer_poll(HrClock::time_point now)
    hand it the current brightness. */
 void SwitchHandler::dev_watchdog(ds2408* dev)
 {
-	logger.warn(std::format("Watchdog on {}!", dev->rom));
+	using namespace std::chrono;
+	auto now = steady_clock::now();
+	auto ago = [&](steady_clock::time_point t) {
+		return std::format("{:.1f} s ago",
+			duration<double>(now - t).count());
+	};
+	uint8_t stat;
+	steady_clock::time_point prev;
+	{
+		auto lk = dev->lock();
+		stat = dev->data[STAT];
+		prev = dev->wdt_seen;
+		dev->wdt_seen = now;
+	}
+	/* the firmware sets 0x88 after a watchdog reset, 0x80 after any
+	   other (power-on, brown-out, reset pin), both lose the outputs */
+	string msg = std::format("{} on {}! (status {:#04x}",
+		(stat & STAT_WATCHDOG) == STAT_WATCHDOG ? "Watchdog" : "Reset",
+		dev->rom, stat);
+	msg += prev == steady_clock::time_point{} ? ", first since start" :
+		", previous " + ago(prev);
+	// the other ROM of a dual-ROM chip is the same device, what was
+	// last done to it may well be what hung it
+	for (OwDev* twin : ow->twins(dev)) {
+		if (!ds)
+			break;
+		auto t = ds->last_select(twin->addr);
+		msg += std::format(", {} last selected {}", twin->rom,
+			t == steady_clock::time_point{} ? "never" : ago(t));
+	}
+	logger.warn(msg + ")");
 	ow->log_save(false);
 	if (!dev->watchdog_pending())
 		return;
@@ -439,6 +469,7 @@ void SwitchHandler::dev_watchdog(ds2408* dev)
 			{"bus", dev->bus},
 			{"type", dev->type},
 			{"rom", dev->rom},
+			{"status", stat},
 			{"brightness", dev->get_brightness()},
 			{"threshold", dev->get_threshold()}
 		};

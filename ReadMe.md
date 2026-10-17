@@ -113,7 +113,16 @@ and brightness. The alarm handling notices it from the status register,
 writes the cached state back (the outputs as they were before the
 reset), counts it in `<rom>/watchdog` and hands plugins an
 `ACT_DEV_WATCHDOG` event, e.g. for a script to apply a current
-brightness (see `plugin/example.js`).
+brightness (see `plugin/example.js`). The same happens when any other
+register read sees the reset, e.g. an uncached read of `<rom>/BYTE`.
+
+An owSlave firmware older than 2024-11 raises no alarm after a
+watchdog reset. For such a device let in10dfs check its status
+regularly, the latches are left alone:
+
+```sh
+echo 60 > /mnt/1wire/29.0800F7FF66772C/poll    # every 60 s
+```
 
 ## switches
 

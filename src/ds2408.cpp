@@ -747,6 +747,16 @@ void ds2408::begin(bool soft)
 	// level_set
 }
 
+/* Only ever called once poll_check() has just returned 1: reads the
+   registers, the latches stay for the alarm handling. For firmware that
+   raises no alarm after a reset, OwDevices::dev_poll() reports one
+   found here. */
+int ds2408::poll()
+{
+	auto lk = lock();
+	return reg_read(false) == 0xAA ? 1 : 0;
+}
+
 uint8_t ds2408::latch_reset()
 {
 	auto lk = lock();
