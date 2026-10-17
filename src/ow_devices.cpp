@@ -152,7 +152,8 @@ void OwDevices::begin(bool soft)
 	// already-loaded device (init() has already run on all of them)
 	for (auto& dev : cache.devices)
 		dev->begin(ds, soft);
-	plugins.action(DS_RUNNING, 0); // loaded
+	// devices are up and usable, see ACT_READY in plugin.h
+	plugins.action(ACT_READY, 0);
 }
 
 void OwDevices::init_busses()

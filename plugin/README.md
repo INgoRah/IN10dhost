@@ -65,6 +65,21 @@ function onAction(code, val, data)
 }
 ```
 
+Several scripts can run side by side, listed in the config:
+
+```json
+"jsengine": { "scripts": [ "/opt/lib/in10dfs/brightness.js",
+                           "/opt/lib/in10dfs/vacation.js" ] }
+```
+
+`"script": "<file>"` still works for a single one. Every script runs in
+a context of its own, so they do not see each other's globals: each can
+have its own `onAction`, `onRead` and `onWrite` and variables of the
+same name. Every event goes to all of them in the order of the list,
+and what they return is added up. A script that fails to load or
+throws leaves the others running, and a file one of them added cannot
+be added by another.
+
 Available to scripts:
 
 | call | does |
@@ -79,9 +94,26 @@ Available to scripts:
 | `ow.volt(rom, channel)` | read a cached ds2450 voltage |
 | `ow.pins([role])` | the pins with that role (`"light"`, ...), or with any role, as `[{rom, pin, name, role, room, output, on}, ...]` |
 | `ow.role_switch(role, on)` | switch every output with that role on (`true`/`ow.ON`) or off, true when all of them switched |
+| `ow.file_add(path, size)` | add a file to the file system, e.g. `"status/my_stuff"`, true when it could be added (see [Files](#files)) |
+| `ow.file_remove(path)` | remove one of the script's files again |
 
 An unknown role throws a `RangeError`. For an input `on` is its sensed
 level, for an output whether it is on.
+
+Reading one of the script's files calls `onRead(path)`; what it returns
+is the content, a number reads as its digits, `null` or `undefined`
+makes the file unreadable. Writing calls `onWrite(path, data)` with the
+written text, returning `false` refuses it. Without `onWrite` the files
+are read only. A reload of the script drops its files, the new version
+adds its own, typically from its top level:
+
+```js
+let target = "21";
+ow.file_add("heating/target", 8);
+
+function onRead(path)        { return target; }
+function onWrite(path, data) { target = data.trim(); }
+```
 
 A ds2408's `ACT_DEV_CHANGE` payload carries, besides the raw `pio`
 byte, a `changed` list with the outputs that changed: `{pin, on, name,
@@ -105,14 +137,14 @@ outside 0..255 throws a `RangeError`.
 form the event payloads carry. It is a string rather than a number
 because a 64 bit rom code does not survive a JavaScript double intact.
 
-Saving the script is enough to change it, no `touch` or reload needed.
+Saving a script is enough to change it, no `touch` or reload needed.
 Every event first checks the file's modification time, and on a change
 its contents, and loads it again when they differ. The once-a-second
 `ACT_PERIODIC_SECOND` event means an edit is live within about a
-second. Like any load this starts the script from a clean global
+second. Like any load this starts that script from a clean global
 object, so values kept in global variables start over. A script with a
 syntax error is logged and stays inactive until it is fixed and saved
-again.
+again. The other scripts keep running untouched.
 
 Two limits worth knowing. A callback is interrupted after 200 ms, so a
 runaway loop cannot hang the daemon. And events that arrive *while* a
@@ -146,6 +178,7 @@ The interface is:
 | `config_get()` / `config_set(j)` | config save/load, and on reload |
 | `info()` | print a version banner |
 | `exit()` | before unloading |
+| `fs_read(path, buf, size)` / `fs_write(path, buf, size)` | a read or write of one of its files, see below |
 
 `action()` receives an `ActionEvent`:
 
@@ -160,6 +193,34 @@ struct ActionEvent {
 `data` is owned by the daemon and only valid for the duration of the
 call — copy anything that has to outlive it.
 
+### Files
+
+A plugin can add files of its own to the file system, usually in
+`init()`, through `files` (set before `init()` runs):
+
+```cpp
+files->file_add(this, "status/my_stuff", 32);   // /status/my_stuff
+files->file_add(this, "heating/target", 8);     // /heating/target
+files->file_remove(this, "heating/target");
+```
+
+The path is relative to the root, `/` separates directories. The
+directories are made up from the paths; only reads and writes of the
+files reach the plugin, in `fs_read()` and `fs_write()` with the path
+as it was added. The size is what the file is listed with and the most
+one read returns (the first read returns all of it); adding the same
+path again changes it. Without its own `fs_write()` a file is read
+only.
+
+The root, `settings/` and `status/` can hold plugin files next to the
+daemon's own, but none of the daemon's files can be taken, nor
+`settings/plugins/`. `switches/`, `role/`, `alarm/`, `bus.<n>/` and the
+devices belong to the daemon alone. A path taken already, by the daemon
+or another plugin, as a file or as a directory, makes `file_add()`
+return false. When a plugin is unloaded or reloaded its files go with
+it. See [example.cpp](example.cpp), which adds `status/example` and
+`example/echo`.
+
 ### Events
 
 | code | value | when | `val` / `data` |
@@ -170,6 +231,13 @@ call — copy anything that has to outlive it.
 | `ACT_ALARM_AFTER` | 7 | alarm, after default handling | `val` = bus, `data` = `{bus, rom}` |
 | `ACT_DEV_CHANGE` | 8 | a device changed state | `data` = `{bus, rom, pio}` |
 | `ACT_DEV_WATCHDOG` | 9 | a ds2408 was reset by its watchdog, its cached outputs, levels, threshold and brightness are already restored | `val` = bus, `data` = `{bus, type, rom, brightness, threshold}` |
+
+A plugin loaded after the start (`touch settings/plugins/<name>`, a
+reload) gets `ACT_INITIALIZED` and `ACT_READY` as far as they were sent
+already, on its own, right after its config is applied. The same goes
+for a script the engine reloads because it was edited. So setting up in
+`onAction` for those events (adding files, ...) works however late a
+plugin or script starts.
 
 `ACT_CFG_LOAD` (0), `ACT_CFG_SAVE` (1) and `ACT_ALARM_BEFORE` (6) are
 declared in `plugin.h` but nothing dispatches them yet, so a handler

@@ -53,6 +53,8 @@ protected:
 		fs_init(&fs_ops);
 		ow.init();
 		ow.begin();
+		// no plugins left over from other tests, see PluginsTest
+		plugins.cleanup();
 	}
 };
 
@@ -2455,4 +2457,137 @@ TEST_F(FsTest, SaveConfig) {
 
 	ow.set_data_path(old_path);
 	ow.set_save_interval(old_interval);
+}
+
+// a plugin that is never loaded from a library, only to own files
+class FilesPlugin : public Plugin {
+public:
+	void init(ILogger*, IDevices*) override {}
+	void exit() override {}
+	void info() override {}
+	int action(const ActionEvent&) override { return 0; }
+	json config_get() const override { return json::object(); }
+	void config_set(const json&) override {}
+	int fs_read(const string& path, char* buf, size_t size) override
+	{
+		return std::snprintf(buf, size, "%s", path.c_str());
+	}
+};
+
+// Plugins add files of their own: in directories of the daemon's, never
+// over its files, gone with the plugin
+TEST_F(FsTest, PluginFiles)
+{
+	std::vector<std::string> seen;
+	auto record = [](void* buf, const char* name, const struct stat*,
+					 off_t, enum fuse_fill_dir_flags) {
+		static_cast<std::vector<std::string>*>(buf)->push_back(name);
+		return 0;
+	};
+	auto has = [&](const char* n) {
+		return std::find(seen.begin(), seen.end(), n) != seen.end();
+	};
+	char buf[128] = {};
+	struct stat st;
+	int res;
+
+	// the example plugin adds status/example and example/echo
+	plugins.load(json{ { "example", json::object() } });
+	res = fs_ops.getattr("/status/example", &st, nullptr);
+	EXPECT_EQ(res, 0);
+	EXPECT_TRUE(S_ISREG(st.st_mode));
+	EXPECT_EQ(st.st_size, 32);
+	res = fs_ops.getattr("/example", &st, nullptr);
+	EXPECT_EQ(res, 0);
+	EXPECT_TRUE(S_ISDIR(st.st_mode));
+	fs_ops.readdir("/", &seen, record, 0, nullptr, (enum fuse_readdir_flags)0);
+	EXPECT_TRUE(has("example"));
+	EXPECT_TRUE(has("status"));
+	// once each, the root lists "status" itself as well
+	EXPECT_EQ(std::count(seen.begin(), seen.end(), "status"), 1);
+	seen.clear();
+	fs_ops.readdir("/status", &seen, record, 0, nullptr, (enum fuse_readdir_flags)0);
+	EXPECT_TRUE(has("example"));
+	EXPECT_TRUE(has("health"));
+	seen.clear();
+	fs_ops.readdir("/example", &seen, record, 0, nullptr, (enum fuse_readdir_flags)0);
+	EXPECT_TRUE(has("echo"));
+	EXPECT_TRUE(has("."));
+	seen.clear();
+
+	EXPECT_EQ(fs_ops.open("/status/example", nullptr), 0);
+	res = fs_ops.read("/status/example", buf, sizeof(buf), 0, nullptr);
+	EXPECT_EQ(std::string(buf, res > 0 ? res : 0), "example plugin running\n");
+	// all of it comes with the first read
+	EXPECT_EQ(fs_ops.read("/status/example", buf, sizeof(buf), res, nullptr), 0);
+	EXPECT_EQ(fs_ops.write("/status/example", "x", 1, 0, nullptr), -EACCES);
+	res = fs_ops.write("/example/echo", "hello", 5, 0, nullptr);
+	EXPECT_EQ(res, 5);
+	memset(buf, 0, sizeof(buf));
+	res = fs_ops.read("/example/echo", buf, sizeof(buf), 0, nullptr);
+	EXPECT_STREQ(buf, "hello");
+	// the daemon's own files next to them are untouched
+	EXPECT_GT(fs_ops.read("/status/health", buf, sizeof(buf), 0, nullptr), 0);
+
+	FilesPlugin own;
+	own.name = "own";
+	// the daemon's: its files, the directories it fills itself
+	const char* taken[] = {
+		"status", "settings", "status/health", "status/health/x",
+		"settings/plugins/x", "switches/x", "role/x", "alarm/x",
+		"bus.1/x", "29.0701F8FE6677F4/x",
+		// another plugin's file, or a file where a directory is
+		"status/example", "status/example/x", "example",
+		// not a path
+		"", "/abs", "a//b", "a/../b", "a/",
+	};
+	for (const char* t : taken)
+		EXPECT_FALSE(plugins.file_add(&own, t, 8)) << t;
+	EXPECT_FALSE(plugins.file_add(&own, "status/own", 0));
+
+	EXPECT_TRUE(plugins.file_add(&own, "status/own", 8));
+	EXPECT_TRUE(plugins.file_add(&own, "settings/own", 8));
+	EXPECT_TRUE(plugins.file_add(&own, "own/a/b", 8));
+	// again: only the size changes
+	EXPECT_TRUE(plugins.file_add(&own, "status/own", 20));
+	fs_ops.getattr("/status/own", &st, nullptr);
+	EXPECT_EQ(st.st_size, 20);
+	res = fs_ops.getattr("/own/a", &st, nullptr);
+	EXPECT_EQ(res, 0);
+	EXPECT_TRUE(S_ISDIR(st.st_mode));
+	memset(buf, 0, sizeof(buf));
+	fs_ops.read("/own/a/b", buf, sizeof(buf), 0, nullptr);
+	EXPECT_STREQ(buf, "own/a/b");
+	fs_ops.readdir("/settings", &seen, record, 0, nullptr, (enum fuse_readdir_flags)0);
+	EXPECT_TRUE(has("own"));
+	EXPECT_TRUE(has("plugins"));
+	seen.clear();
+	// Plugin::fs_write() refuses by default
+	EXPECT_EQ(fs_ops.write("/status/own", "x", 1, 0, nullptr), -EACCES);
+	// only the owner removes a file
+	FilesPlugin other;
+	other.name = "other";
+	EXPECT_FALSE(plugins.file_remove(&other, "status/own"));
+	EXPECT_TRUE(plugins.file_remove(&own, "status/own"));
+	EXPECT_EQ(fs_ops.getattr("/status/own", &st, nullptr), -ENOENT);
+	EXPECT_TRUE(plugins.file_remove(&own, "settings/own"));
+	EXPECT_TRUE(plugins.file_remove(&own, "own/a/b"));
+	EXPECT_EQ(fs_ops.getattr("/own", &st, nullptr), -ENOENT);
+
+	// a plugin throwing from a read fails that read alone
+	plugins.remove("faulty");
+	plugins.load(json{ { "faulty", { { "mode", "fs_read" } } } });
+	LogLevel lvl = logger.get_level();
+	logger.set_level(LogLevel::NONE);
+	EXPECT_EQ(fs_ops.read("/status/faulty", buf, sizeof(buf), 0, nullptr), -EIO);
+	logger.set_level(lvl);
+	plugins.remove("faulty");
+	EXPECT_EQ(fs_ops.getattr("/status/faulty", &st, nullptr), -ENOENT);
+
+	// unloaded: its files are gone
+	plugins.remove("example");
+	EXPECT_EQ(fs_ops.getattr("/status/example", &st, nullptr), -ENOENT);
+	EXPECT_EQ(fs_ops.getattr("/example/echo", &st, nullptr), -ENOENT);
+	EXPECT_EQ(fs_ops.read("/example/echo", buf, sizeof(buf), 0, nullptr), -ENOENT);
+	plugins.load(json{ { "example", json::object() } });
 }
