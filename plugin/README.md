@@ -230,7 +230,7 @@ it. See [example.cpp](example.cpp), which adds `status/example` and
 | `ACT_PERIODIC_SECOND` | 4 | once a second | |
 | `ACT_ALARM_AFTER` | 7 | alarm, after default handling | `val` = bus, `data` = `{bus, rom}` |
 | `ACT_DEV_CHANGE` | 8 | a device changed state | `data` = `{bus, rom, pio}` |
-| `ACT_DEV_WATCHDOG` | 9 | a ds2408 was reset by its watchdog, its cached outputs, levels, threshold and brightness are already restored | `val` = bus, `data` = `{bus, type, rom, brightness, threshold}` |
+| `ACT_DEV_WATCHDOG` | 9 | a ds2408 was reset by its watchdog, its cached outputs, levels, threshold and brightness are already restored | `val` = bus, `data` = `{bus, type, rom, status, brightness, threshold}`, `status` 0x88 for a watchdog, 0x80 for power-on or brown-out |
 
 A plugin loaded after the start (`touch settings/plugins/<name>`, a
 reload) gets `ACT_INITIALIZED` and `ACT_READY` as far as they were sent

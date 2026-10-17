@@ -71,7 +71,7 @@ typedef struct {
 	uint8_t state;
 	uint8_t data;
 } log_data;
-#define LOG_ENTRIES 2048
+#define LOG_ENTRIES 4196
 RingBuffer<log_data, LOG_ENTRIES> data_log;
 
 /* VCD header (with a 32 char date) and per entry at most
@@ -656,6 +656,19 @@ void DS2482::select(const uint8_t rom[8])
 			return;
 		}
 	}
+	uint64_t key;
+	std::memcpy(&key, rom, sizeof(key));
+	std::lock_guard<std::mutex> lock(sel_mtx);
+	selected[key] = std::chrono::steady_clock::now();
+}
+
+std::chrono::steady_clock::time_point DS2482::last_select(const uint8_t rom[8])
+{
+	uint64_t key;
+	std::memcpy(&key, rom, sizeof(key));
+	std::lock_guard<std::mutex> lock(sel_mtx);
+	auto it = selected.find(key);
+	return it == selected.end() ? std::chrono::steady_clock::time_point{} : it->second;
 }
 
 void DS2482::target_search(uint8_t family_code)
