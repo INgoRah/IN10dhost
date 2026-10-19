@@ -237,17 +237,6 @@ uint16_t SwitchHandler::srcData(uint8_t busNr, uint8_t adr1)
 			src.sa.press = 0;
 	}
 	logger.verbose(std::format("src {}.{}.{}.{}", (int)src.sa.bus, (int)src.sa.adr, (int)src.sa.latch, (int)src.sa.press));
-#if 0
-	printf("%d.%d.", src.sa.bus, src.sa.adr);
-	if (src.sa.press)
-		printf("%d ", 10 * src.sa.press + src.sa.latch);
-	else
-		printf("%d ", src.sa.latch);
-	if (data[6] != 0xff) {
-		printf(" time=%d", data[6] * 32);
-	}
-	printf("\n");
-#endif
 
 	return src.data;
 }

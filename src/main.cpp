@@ -174,7 +174,6 @@ void background_worker()
 		ret = poll(fds, nfds, tm);
 #ifdef USE_GPIO
 		if (nfds == 2 && ret > 0 && (fds[1].revents & POLLIN)) {
-			logger.verbose("GPIO edge, servicing Arduino");
 			// consume the pending edges before servicing, so an edge
 			// raised meanwhile is kept for the next poll()
 			gpiod_line_request_read_edge_events(line, event_buffer, 16);

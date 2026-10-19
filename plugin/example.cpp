@@ -1,3 +1,4 @@
+#include <cstring>
 #include <format> // used for std::format
 #include <iostream>
 #include "plugin.h"
@@ -7,6 +8,8 @@ class Example : public Plugin {
 private:
 	ILogger* logger;
 	IDevices *devices;
+	// what was last written to example/echo
+	std::string echo;
 public:
 	Example() : logger(nullptr), devices(nullptr) {}
 
@@ -18,10 +21,16 @@ public:
 		this->devices = devices;
 		//LogLevel lvl = logger->get_level();
 		logger->debug("Example plugin initialized");
+		// files of its own: /status/example next to the daemon's status
+		// files, and /example/echo in a directory of its own
+		files->file_add(this, "status/example", 32);
+		files->file_add(this, "example/echo", 64);
 	}
 
 	void exit() {
 		logger->debug("Example plugin exit");
+		// not needed, the host drops them anyway; how a file goes away
+		files->file_remove(this, "status/example");
 		this->logger = nullptr;
 		this->devices = nullptr;
 	 }
@@ -40,6 +49,27 @@ public:
 		int port = j.value("port", 8081);
 		*/
 		// or if using a struct: this->mySettingsStruct = j.get<MySettingsStruct>();
+	}
+
+	int fs_read(const string& path, char* buf, size_t size) override
+	{
+		std::string s = path == "status/example" ? std::string("example plugin running\n") : echo;
+
+		if (s.size() > size)
+			return -EINVAL;
+		std::memcpy(buf, s.data(), s.size());
+		return (int)s.size();
+	}
+
+	// status/example is read only, see Plugin::fs_write()
+	int fs_write(const string& path, const char* buf, size_t size) override
+	{
+		if (path != "example/echo")
+			return Plugin::fs_write(path, buf, size);
+		if (size > 64)
+			return -EFBIG;
+		echo.assign(buf, size);
+		return (int)size;
 	}
 
 	int action(const ActionEvent& ev) override

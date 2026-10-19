@@ -5,6 +5,7 @@
 #include <fuse3/fuse.h>
 #include <string>
 #include <cctype>
+#include <set>
 #include "main.h"
 #include "fs.h"
 #include "fs_table.h"
@@ -63,6 +64,47 @@ static string plugin_name(const char* path)
 }
 
 static void fs_dir_devs(fuse_fill_dir_t filler, void *buf, bool alarm = false);
+
+/* path relative to the root as the plugin files have it: no leading or
+   trailing '/' */
+static string rel_path(string path)
+{
+	while (!path.empty() && path.front() == '/')
+		path.erase(0, 1);
+	while (!path.empty() && path.back() == '/')
+		path.pop_back();
+	return path;
+}
+
+/* The daemon's own entries a plugin file must not take, see
+   IPluginFiles: the root, settings/ and status/ are shared, except for
+   the files in them and the plugin directory; everything else of the
+   daemon's is its own tree. */
+bool fs_builtin_taken(const string& path)
+{
+	size_t slash = path.find('/');
+	string first = path.substr(0, slash);
+
+	if (first == "settings" || first == "status") {
+		// the directory itself
+		if (slash == string::npos)
+			return true;
+		string second = path.substr(slash + 1, path.find('/', slash + 1) - slash - 1);
+		if (first == "settings" && second == "plugins")
+			return true;
+		// also a file of the daemon's on the way, "status/health/x"
+		return fsLeaf.attr(path) != fs_table::NOT_FOUND;
+	}
+	for (const auto& s : root_dir)
+		if (first == s.name)
+			return true;
+	if (first.rfind("bus.", 0) == 0)
+		return true;
+	// a device: "29.0701F8FE6677F4"
+	if (first.size() == 17 && first[2] == '.')
+		return true;
+	return false;
+}
 
 /* "/alarm" lists the alarming devices; below it everything is the same
    as in the root, so "/alarm/<rom>/latch.0" is "/<rom>/latch.0".
@@ -219,6 +261,22 @@ static int fs_getattr(const char* path_in, struct stat* st, struct fuse_file_inf
 		st->st_nlink = 2;
 		return 0;
 	}
+	// plugin files never clash with the daemon's (see fs_builtin_taken),
+	// so they can be looked up by their exact path first
+	{
+		int attr = plugins.file_attr(rel_path(spath));
+		if (attr > 0) {
+			st->st_mode = S_IFREG | 0666;
+			st->st_nlink = 1;
+			st->st_size = attr;
+			return 0;
+		}
+		if (attr == 0) {
+			st->st_mode = S_IFDIR | 0755;
+			st->st_nlink = 2;
+			return 0;
+		}
+	}
 	for (const auto& s : root_dir) {
 		if (check_path(spath, s, st))
 			return 0;
@@ -317,7 +375,7 @@ static void fs_dir_devs(fuse_fill_dir_t filler, void *buf, bool alarm)
 	}
 }
 
-static int fs_readdir(const char* path_in, void* buf, fuse_fill_dir_t filler,
+static int readdir_builtin(const char* path_in, void* buf, fuse_fill_dir_t filler,
 					  off_t, struct fuse_file_info*, enum fuse_readdir_flags)
 {
 	bool ret;
@@ -432,6 +490,45 @@ static int fs_readdir(const char* path_in, void* buf, fuse_fill_dir_t filler,
 	//return -ENOENT;
 }
 
+/* Passes the names on to FUSE once each, so the plugin directories can
+   add theirs to a directory of the daemon's */
+struct DirFill {
+	void* buf;
+	fuse_fill_dir_t filler;
+	std::set<string> seen;
+};
+
+static int dir_fill(void* buf, const char* name, const struct stat* st, off_t off,
+					enum fuse_fill_dir_flags flags)
+{
+	auto* d = static_cast<DirFill*>(buf);
+
+	if (!d->seen.insert(name).second)
+		return 0;
+	return d->filler(d->buf, name, st, off, flags);
+}
+
+/* the daemon's entries, then those of the plugin files in that place */
+static int fs_readdir(const char* path_in, void* buf, fuse_fill_dir_t filler,
+					  off_t off, struct fuse_file_info* fi, enum fuse_readdir_flags flags)
+{
+	DirFill d{ buf, filler, {} };
+	int res = readdir_builtin(path_in, &d, dir_fill, off, fi, flags);
+	std::vector<string> names = plugins.file_dir(rel_path(alarm_alias(path_in)));
+
+	if (names.empty())
+		return res;
+	if (res < 0) {
+		// a directory only the plugins make up
+		dir_fill(&d, ".", nullptr, 0, static_cast<fuse_fill_dir_flags>(0));
+		dir_fill(&d, "..", nullptr, 0, static_cast<fuse_fill_dir_flags>(0));
+		res = 0;
+	}
+	for (const auto& n : names)
+		dir_fill(&d, n.c_str(), nullptr, 0, static_cast<fuse_fill_dir_flags>(0));
+	return res;
+}
+
 static int fs_open(const char* path_in, struct fuse_file_info*)
 {
 	string alias = alarm_alias(path_in);
@@ -439,6 +536,8 @@ static int fs_open(const char* path_in, struct fuse_file_info*)
 	string spath(path);
 	spath.erase(0, 1);
 
+	if (plugins.file_attr(spath) > 0)
+		return 0;
 	if (fsLeaf.open(spath) == 0)
 		return 0;
 	{
@@ -475,6 +574,9 @@ static int fs_read(const char* path_in, char* buf, size_t size, off_t offset,
 	const char* path = alias.c_str();
 	string spath(path);
 	spath.erase(0, 1);
+	// all of a plugin file comes with the first read
+	if (plugins.file_attr(spath) > 0)
+		return offset > 0 ? 0 : plugins.file_read(spath, buf, size);
 	{
 		int res = fs_role::read(spath, buf, size, offset);
 		if (res != fs_table::NOT_FOUND)
@@ -526,6 +628,8 @@ static int fs_write(const char* path_in, const char* buf, size_t size,
 	const char* path = alias.c_str();
 	string spath(path);
 	spath.erase(0, 1);
+	if (plugins.file_attr(spath) > 0)
+		return plugins.file_write(spath, buf, size);
 	{
 		int res = fsLeaf.write(spath, buf, size);
 		if (res != fs_table::NOT_FOUND)
@@ -550,7 +654,6 @@ static int fs_write(const char* path_in, const char* buf, size_t size,
 			return plugins.remove(std::move(pname)) == 0 ? (int)size : -ENOENT;
 		if (cmd == "reload") {
 			plugins.reload();
-			plugins.action(ACT_READY, 0);
 			return size;
 		}
 		logger.warn("plugins: unknown command '" + cmd + "', expected rm or reload");
@@ -624,7 +727,6 @@ static int fs_utimens(const char* path, const struct timespec[2], struct fuse_fi
 
 	if (!pname.empty()) {
 		plugins.reload(pname);
-		plugins.action(ACT_READY, 0);
 	}
 
 	return 0;

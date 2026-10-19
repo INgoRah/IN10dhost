@@ -29,7 +29,16 @@ std::filesystem::path exec_path()
 	return std::filesystem::path(".");
 }
 
-TEST(plugins, LoadPlugin)
+// Every test starts and ends without any plugin loaded: what action()
+// returns is the sum over all loaded plugins, so a plugin left over by
+// an earlier test would change the result of the next one.
+class PluginsTest : public ::testing::Test {
+protected:
+	void SetUp() override { plugins.cleanup(); }
+	void TearDown() override { plugins.cleanup(); }
+};
+
+TEST_F(PluginsTest, LoadPlugin)
 {
 	bool ok = false;
 	std::string f = std::filesystem::current_path();
@@ -57,14 +66,13 @@ TEST(plugins, LoadPlugin)
 
 }
 
-// Loading the example is a no-op once it is already loaded, so calling
-// this keeps each test below independent of suite execution order.
+// Loading the example is a no-op once it is already loaded
 static void ensure_example_loaded()
 {
 	plugins.load(json{ { "example", json::object() } });
 }
 
-TEST(plugins, PluginActions)
+TEST_F(PluginsTest, PluginActions)
 {
 	ensure_example_loaded();
 
@@ -78,7 +86,7 @@ TEST(plugins, PluginActions)
 	EXPECT_EQ(plugins.action(ACT_PERIODIC_SECOND), 0);
 }
 
-TEST(plugins, LoadSkipsAlreadyLoadedPlugin)
+TEST_F(PluginsTest, LoadSkipsAlreadyLoadedPlugin)
 {
 	ensure_example_loaded();
 	int once = plugins.action(ACT_READY);
@@ -90,7 +98,7 @@ TEST(plugins, LoadSkipsAlreadyLoadedPlugin)
 	EXPECT_EQ(plugins.action(ACT_READY), once);
 }
 
-TEST(plugins, ActionPayloadIsPassedThrough)
+TEST_F(PluginsTest, ActionPayloadIsPassedThrough)
 {
 	ensure_example_loaded();
 
@@ -107,7 +115,7 @@ TEST(plugins, ActionPayloadIsPassedThrough)
 	EXPECT_EQ(plugins.action(ACT_DEV_CHANGE, 0), 1);
 }
 
-TEST(plugins, PluginExceptionDoesNotEscape)
+TEST_F(PluginsTest, PluginExceptionDoesNotEscape)
 {
 	ensure_example_loaded();
 
@@ -143,9 +151,8 @@ static bool jsengine_available()
 
 // Loads the jsengine plugin with a script written on the fly.
 //
-// Plugins::load() skips a plugin that is already loaded and there is no
-// API to swap its script afterwards, so every test has to share one
-// script that branches on the action code rather than loading its own.
+// The tests share one script that branches on the action code, written
+// anew for each test by load_js().
 static std::string js_path()
 {
 	return (std::filesystem::current_path() / "test_engine.js").string();
@@ -153,6 +160,30 @@ static std::string js_path()
 
 static const char js_src[] = R"JS(
 		var last = null;
+		/* files: one read only, one to write to, one telling whether
+		   a taken path could be added */
+		var value = "start";
+		ow.file_add("status/js", 16);
+		ow.file_add("js/value", 16);
+		ow.file_add("js/taken", 8);
+		ow.file_add("js/throws", 8);
+		var taken = ow.file_add("status/health", 4);
+		function onRead(path) {
+			if (path == "status/js")
+				return "js running";
+			if (path == "js/taken")
+				return taken;
+			if (path == "js/throws")
+				throw new Error("no");
+			return value;
+		}
+		function onWrite(path, data) {
+			if (path != "js/value")
+				return false;
+			if (data == "remove")
+				ow.file_remove("js/value");
+			value = data;
+		}
 		function onAction(code, val, data) {
 			switch (code) {
 			case 3:                     /* ACT_READY */
@@ -191,30 +222,26 @@ static const char js_src[] = R"JS(
 		}
 	)JS";
 
-static void load_js_once()
-{
-	static bool loaded = false;
-
-	if (loaded)
-		return;
-	loaded = true;
-	std::ofstream(js_path()) << js_src;
-	plugins.load(json{ { "jsengine", { { "script", js_path() } } } });
-}
-
 /* Replaces the script on disk. The modification time is pushed forward
    explicitly so the change is seen even when the file system's time
    stamps are coarser than the time between two writes. */
-static void write_js(const std::string& src)
+static void write_js(const std::string& src, const std::string& path = js_path())
 {
 	static auto stamp = std::filesystem::file_time_type::clock::now();
 
-	std::ofstream(js_path()) << src;
+	std::ofstream(path) << src;
 	stamp += std::chrono::seconds(1);
-	std::filesystem::last_write_time(js_path(), stamp);
+	std::filesystem::last_write_time(path, stamp);
 }
 
-TEST(plugins, JsEngineRunsScript)
+/* Loads the engine with a fresh copy of the shared script */
+static void load_js()
+{
+	write_js(js_src);
+	plugins.load(json{ { "jsengine", { { "script", js_path() } } } });
+}
+
+TEST_F(PluginsTest, JsEngineRunsScript)
 {
 	if (!jsengine_available())
 		GTEST_SKIP() << "built without quickjs";
@@ -223,7 +250,7 @@ TEST(plugins, JsEngineRunsScript)
 	// along with every other plugin, so compare against a baseline
 	// instead of an absolute value
 	int base = plugins.action(ACT_READY);
-	load_js_once();
+	load_js();
 	EXPECT_EQ(plugins.action(ACT_READY), base + 7);
 
 	// the payload really arrives as a JS object: the script reads
@@ -233,12 +260,12 @@ TEST(plugins, JsEngineRunsScript)
 	EXPECT_EQ(plugins.action(ACT_DEV_CHANGE, 0, &data), dev_base + 5);
 }
 
-TEST(plugins, JsEngineFromOtherThread)
+TEST_F(PluginsTest, JsEngineFromOtherThread)
 {
 	if (!jsengine_available())
 		GTEST_SKIP() << "built without quickjs";
 
-	load_js_once();
+	load_js();
 
 	// The engine is created on the thread that loads the config, but
 	// the daemon dispatches from the background poll worker and from
@@ -269,12 +296,12 @@ TEST(plugins, JsEngineFromOtherThread)
 	EXPECT_EQ(plugins.action(ACT_DEV_CHANGE, 0, &data), with_data);
 }
 
-TEST(plugins, JsEngineSurvivesBadScript)
+TEST_F(PluginsTest, JsEngineSurvivesBadScript)
 {
 	if (!jsengine_available())
 		GTEST_SKIP() << "built without quickjs";
 
-	load_js_once();
+	load_js();
 	LogLevel lvl = logger.get_level();
 	logger.set_level(LogLevel::NONE); // the script errors are expected
 
@@ -297,12 +324,12 @@ TEST(plugins, JsEngineSurvivesBadScript)
 	logger.set_level(lvl);
 }
 
-TEST(plugins, JsEngineReloadsChangedScript)
+TEST_F(PluginsTest, JsEngineReloadsChangedScript)
 {
 	if (!jsengine_available())
 		GTEST_SKIP() << "built without quickjs";
 
-	load_js_once();
+	load_js();
 	int base = plugins.action(ACT_READY);
 
 	// edited on disk: the next event already runs the new version,
@@ -329,7 +356,7 @@ TEST(plugins, JsEngineReloadsChangedScript)
 	EXPECT_EQ(plugins.action(ACT_READY), base);
 }
 
-TEST(plugins, JsEngineDs2408Calls)
+TEST_F(PluginsTest, JsEngineDs2408Calls)
 {
 	if (!jsengine_available())
 		GTEST_SKIP() << "built without quickjs";
@@ -343,7 +370,7 @@ TEST(plugins, JsEngineDs2408Calls)
 	ASSERT_NE(dev, nullptr);
 	dev->cfg[CFG_PIN_ID + 2] = CFG_OUT_LOW;
 	dev->data[PIO_OUT] = 0xff;
-	load_js_once();
+	load_js();
 
 	int base = plugins.action(ACT_PERIODIC_SECOND, 0, nullptr);
 	json data = {
@@ -391,7 +418,7 @@ TEST(plugins, JsEngineDs2408Calls)
 
 // The roles reach scripts twice: in the change event of a ds2408, and
 // through ow.pins() / ow.role_switch()
-TEST(plugins, JsEnginePinRoles)
+TEST_F(PluginsTest, JsEnginePinRoles)
 {
 	if (!jsengine_available())
 		GTEST_SKIP() << "built without quickjs";
@@ -415,7 +442,7 @@ TEST(plugins, JsEnginePinRoles)
 	pins[2]["room"] = "Kitchen";
 	pins[3]["role"] = "socket";
 	dev->from_json(j);
-	load_js_once();
+	load_js();
 	LogLevel lvl = logger.get_level();
 	logger.set_level(LogLevel::NONE);
 
@@ -448,11 +475,184 @@ TEST(plugins, JsEnginePinRoles)
 	dev->from_json(j);
 }
 
+// A script adds files; reading and writing them runs onRead/onWrite
+TEST_F(PluginsTest, JsEngineFiles)
+{
+	if (!jsengine_available())
+		GTEST_SKIP() << "built without quickjs";
+
+	char buf[64] = {};
+	int res;
+
+	load_js();
+
+	EXPECT_EQ(plugins.file_attr("status/js"), 16);
+	EXPECT_EQ(plugins.file_attr("js"), 0);
+	res = plugins.file_read("status/js", buf, sizeof(buf));
+	EXPECT_EQ(std::string(buf, res > 0 ? res : 0), "js running");
+	res = plugins.file_read("js/value", buf, sizeof(buf));
+	EXPECT_EQ(std::string(buf, res > 0 ? res : 0), "start");
+	// the daemon's files are not for scripts to take
+	res = plugins.file_read("js/taken", buf, sizeof(buf));
+	EXPECT_EQ(std::string(buf, res > 0 ? res : 0), "false");
+	// only as much as fits
+	res = plugins.file_read("status/js", buf, 2);
+	EXPECT_EQ(res, 2);
+
+	EXPECT_EQ(plugins.file_write("js/value", "hi", 2), 2);
+	res = plugins.file_read("js/value", buf, sizeof(buf));
+	EXPECT_EQ(std::string(buf, res > 0 ? res : 0), "hi");
+	// onWrite returning false refuses
+	EXPECT_EQ(plugins.file_write("status/js", "x", 1), -EINVAL);
+
+	LogLevel lvl = logger.get_level();
+	logger.set_level(LogLevel::NONE);
+	EXPECT_EQ(plugins.file_read("js/throws", buf, sizeof(buf)), -EIO);
+	logger.set_level(lvl);
+
+	// the script removes a file of its own
+	EXPECT_EQ(plugins.file_write("js/value", "remove", 6), 6);
+	EXPECT_EQ(plugins.file_attr("js/value"), -ENOENT);
+
+	// edited: the old version's files go, the new one's come
+	write_js("ow.file_add(\"js/other\", 4); function onRead(p) { return 1; }");
+	plugins.action(ACT_READY);
+	EXPECT_EQ(plugins.file_attr("status/js"), -ENOENT);
+	EXPECT_EQ(plugins.file_attr("js/other"), 4);
+	res = plugins.file_read("js/other", buf, sizeof(buf));
+	EXPECT_EQ(std::string(buf, res > 0 ? res : 0), "1");
+	// no onWrite: read only
+	EXPECT_EQ(plugins.file_write("js/other", "x", 1), -EACCES);
+
+	write_js(js_src);
+	plugins.action(ACT_READY);
+	EXPECT_EQ(plugins.file_attr("js/other"), -ENOENT);
+	EXPECT_EQ(plugins.file_attr("js/value"), 16);
+}
+
+// Several scripts, each in a context of its own
+TEST_F(PluginsTest, JsEngineSeveralScripts)
+{
+	if (!jsengine_available())
+		GTEST_SKIP() << "built without quickjs";
+
+	std::string a = (std::filesystem::current_path() / "test_engine_a.js").string();
+	std::string b = (std::filesystem::current_path() / "test_engine_b.js").string();
+	// the same global names in both: with one shared context the second
+	// would overwrite the first
+	const char* src_a = R"JS(
+		var x = 1;
+		var calls = 0;
+		ow.file_add("js/a", 8);
+		function onRead(path) { return "a"; }
+		function onAction(code) {
+			if (code == 4)
+				return ++calls;
+			return code == 3 ? x : 0;
+		}
+	)JS";
+	const char* src_b = R"JS(
+		var x = 10;
+		var dup = ow.file_add("js/a", 8);
+		ow.file_add("js/b", 8);
+		function onRead(path) { return "b" + dup; }
+		function onAction(code) { return code == 3 ? x : 0; }
+	)JS";
+	char buf[32];
+	int res;
+
+	write_js(src_a, a);
+	write_js(src_b, b);
+	plugins.load(json{ { "jsengine", { { "scripts", { a, b } } } } });
+	EXPECT_EQ(plugins.config_of("jsengine")["scripts"], json({ a, b }));
+
+	// every script gets the event, the results add up
+	EXPECT_EQ(plugins.action(ACT_READY), 11);
+	// the files are the script's own, the other cannot take them
+	res = plugins.file_read("js/a", buf, sizeof(buf));
+	EXPECT_EQ(std::string(buf, res > 0 ? res : 0), "a");
+	res = plugins.file_read("js/b", buf, sizeof(buf));
+	EXPECT_EQ(std::string(buf, res > 0 ? res : 0), "bfalse");
+
+	// a's state survives a reload of the unchanged config
+	EXPECT_EQ(plugins.action(ACT_PERIODIC_SECOND), 1);
+	EXPECT_EQ(plugins.action(ACT_PERIODIC_SECOND), 2);
+	plugins.reload("jsengine");
+	EXPECT_EQ(plugins.action(ACT_PERIODIC_SECOND), 3);
+
+	// a broken b leaves a running, b's files go
+	LogLevel lvl = logger.get_level();
+	logger.set_level(LogLevel::NONE);
+	write_js("function onAction( {", b);
+	EXPECT_EQ(plugins.action(ACT_READY), 1);
+	logger.set_level(lvl);
+	EXPECT_EQ(plugins.file_attr("js/b"), -ENOENT);
+	EXPECT_EQ(plugins.file_attr("js/a"), 8);
+	// only b was reloaded, a kept counting
+	EXPECT_EQ(plugins.action(ACT_PERIODIC_SECOND), 4);
+
+	write_js(src_b, b);
+	EXPECT_EQ(plugins.action(ACT_READY), 11);
+	EXPECT_EQ(plugins.file_attr("js/b"), 8);
+
+	plugins.remove("jsengine");
+	EXPECT_EQ(plugins.file_attr("js/a"), -ENOENT);
+	std::filesystem::remove(a);
+	std::filesystem::remove(b);
+}
+
+// A script setting itself up on ACT_INITIALIZED/ACT_READY, loaded or
+// edited after those went by, gets them again - to it alone
+TEST_F(PluginsTest, JsEngineLateScriptCatchesUp)
+{
+	if (!jsengine_available())
+		GTEST_SKIP() << "built without quickjs";
+
+	std::string a = (std::filesystem::current_path() / "test_engine_late.js").string();
+	// reports the lifecycle events it got as digits, "23"
+	const char* src = R"JS(
+		var got = "";
+		function onAction(code) {
+			if (code == 2 || code == 3)
+				got += code;
+			if (code == 3)
+				ow.file_add("js/ready", 8);
+			return code == 4 ? Number(got) : 0;
+		}
+	)JS";
+	write_js(src, a);
+
+	// started first, as at boot: the events arrive once, as usual
+	plugins.load(json{ { "jsengine", { { "script", a } } } });
+	ow.begin();                     // sends ACT_READY
+	EXPECT_EQ(plugins.action(ACT_PERIODIC_SECOND), 3);
+	EXPECT_EQ(plugins.file_attr("js/ready"), 8);
+
+	// edited: reloaded, it gets ACT_READY again and adds its file again
+	write_js(std::string(src) + "\n// edited\n", a);
+	EXPECT_EQ(plugins.action(ACT_PERIODIC_SECOND), 3);
+	EXPECT_EQ(plugins.file_attr("js/ready"), 8);
+
+	// loaded late, after the daemon got going: catches up on both, once
+	// each, in the order they first came (here READY, from ow.begin()
+	// above, before INITIALIZED)
+	plugins.remove("jsengine");
+	EXPECT_EQ(plugins.file_attr("js/ready"), -ENOENT);
+	plugins.action(ACT_INITIALIZED);
+	plugins.load(json{ { "jsengine", { { "script", a } } } });
+	EXPECT_EQ(plugins.action(ACT_PERIODIC_SECOND), 32);
+	plugins.remove("jsengine");
+	EXPECT_EQ(plugins.add("jsengine"), 0);   // without a config: no script
+	plugins.remove("jsengine");
+
+	std::filesystem::remove(a);
+}
+
 // One thread changes a device through the file system (its change event
 // goes to jsengine), another runs a script that switches the same device.
 // Sending the event while still holding the device lock would deadlock:
 // each thread would hold the lock the other one waits for.
-TEST(plugins, JsEngineNoDeadlockWithDeviceLock)
+TEST_F(PluginsTest, JsEngineNoDeadlockWithDeviceLock)
 {
 	if (!jsengine_available())
 		GTEST_SKIP() << "built without quickjs";
@@ -465,7 +665,7 @@ TEST(plugins, JsEngineNoDeadlockWithDeviceLock)
 	ASSERT_NE(dev, nullptr);
 	for (int i = 0; i < 8; i++)
 		dev->cfg[CFG_PIN_ID + i] = CFG_OUT_LOW;
-	load_js_once();
+	load_js();
 
 	LogLevel lvl = logger.get_level();
 	logger.set_level(LogLevel::NONE);
@@ -499,7 +699,7 @@ TEST(plugins, JsEngineNoDeadlockWithDeviceLock)
 
 // Unloading a plugin from a FUSE thread while the poll worker is
 // calling into it must wait for that call, see Plugins::action()
-TEST(plugins, ActionAndReloadFromOtherThreads)
+TEST_F(PluginsTest, ActionAndReloadFromOtherThreads)
 {
 	ensure_example_loaded();
 
@@ -519,7 +719,7 @@ TEST(plugins, ActionAndReloadFromOtherThreads)
 	EXPECT_GE(plugins.action(ACT_READY), 1);
 }
 
-TEST(plugins, ConfigRoundTrip)
+TEST_F(PluginsTest, ConfigRoundTrip)
 {
 	ensure_example_loaded();
 
@@ -529,7 +729,7 @@ TEST(plugins, ConfigRoundTrip)
 	EXPECT_EQ(saved["example"].value("enabled", false), true);
 }
 
-TEST(plugins, PluginSave)
+TEST_F(PluginsTest, PluginSave)
 {
 	std::string f = std::filesystem::current_path();
 
@@ -547,7 +747,7 @@ static void load_faulty(const string& mode)
 	plugins.load(json{ { "faulty", { { "mode", mode } } } });
 }
 
-TEST(plugins, FaultyPluginActionThrows)
+TEST_F(PluginsTest, FaultyPluginActionThrows)
 {
 	LogLevel lvl = logger.get_level();
 	logger.set_level(LogLevel::NONE); // the failures are the point
@@ -570,7 +770,7 @@ TEST(plugins, FaultyPluginActionThrows)
 	plugins.remove("faulty");
 }
 
-TEST(plugins, FaultyPluginExitThrows)
+TEST_F(PluginsTest, FaultyPluginExitThrows)
 {
 	LogLevel lvl = logger.get_level();
 	logger.set_level(LogLevel::NONE);
@@ -585,7 +785,7 @@ TEST(plugins, FaultyPluginExitThrows)
 	logger.set_level(lvl);
 }
 
-TEST(plugins, FaultyPluginConfigGetThrows)
+TEST_F(PluginsTest, FaultyPluginConfigGetThrows)
 {
 	LogLevel lvl = logger.get_level();
 	logger.set_level(LogLevel::NONE);
@@ -602,7 +802,7 @@ TEST(plugins, FaultyPluginConfigGetThrows)
 	plugins.remove("faulty");
 }
 
-TEST(plugins, FaultyPluginConfigSetThrows)
+TEST_F(PluginsTest, FaultyPluginConfigSetThrows)
 {
 	LogLevel lvl = logger.get_level();
 	logger.set_level(LogLevel::NONE);
@@ -619,7 +819,7 @@ TEST(plugins, FaultyPluginConfigSetThrows)
 	plugins.remove("faulty");
 }
 
-TEST(plugins, FaultyPluginThrowsNonException)
+TEST_F(PluginsTest, FaultyPluginThrowsNonException)
 {
 	LogLevel lvl = logger.get_level();
 	logger.set_level(LogLevel::NONE);
@@ -646,7 +846,7 @@ TEST(plugins, FaultyPluginThrowsNonException)
 	logger.set_level(lvl);
 }
 
-TEST(plugins, ReloadOnlyTouchesTheNamedPlugin)
+TEST_F(PluginsTest, ReloadOnlyTouchesTheNamedPlugin)
 {
 	ensure_example_loaded();
 	load_faulty("");
@@ -660,7 +860,7 @@ TEST(plugins, ReloadOnlyTouchesTheNamedPlugin)
 	plugins.remove("faulty");
 }
 
-TEST(plugins, LoadPluginMissingSymbols)
+TEST_F(PluginsTest, LoadPluginMissingSymbols)
 {
 	// A valid shared object with no create_plugin/destroy_plugin in it:
 	// dlopen() succeeds and dlsym() is what fails, which is a different
@@ -682,7 +882,7 @@ TEST(plugins, LoadPluginMissingSymbols)
 	std::filesystem::remove(so);
 }
 
-TEST(plugins, ReloadFailureDropsPlugin)
+TEST_F(PluginsTest, ReloadFailureDropsPlugin)
 {
 	ensure_example_loaded();
 	std::filesystem::path lib = exec_path() / "libexample.so";
@@ -708,7 +908,7 @@ TEST(plugins, ReloadFailureDropsPlugin)
 	EXPECT_TRUE(plugins.save().contains("example"));
 }
 
-TEST(plugins, LoadPluginCopyFailure)
+TEST_F(PluginsTest, LoadPluginCopyFailure)
 {
 	// plugin_init() locates the plugin via fs::exists(), which is also
 	// true for a directory; fs::copy_file() then throws because its
@@ -733,7 +933,7 @@ TEST(plugins, LoadPluginCopyFailure)
 	std::filesystem::remove(broken, ec);
 }
 
-TEST(plugins, AddAndRemove)
+TEST_F(PluginsTest, AddAndRemove)
 {
 	ensure_example_loaded();
 	size_t before = plugins.count();
@@ -758,7 +958,7 @@ TEST(plugins, AddAndRemove)
 	EXPECT_EQ(plugins.action(ACT_READY), with);
 }
 
-TEST(plugins, AddMissingPluginFails)
+TEST_F(PluginsTest, AddMissingPluginFails)
 {
 	LogLevel lvl = logger.get_level();
 	logger.set_level(LogLevel::NONE);
@@ -766,7 +966,7 @@ TEST(plugins, AddMissingPluginFails)
 	logger.set_level(lvl);
 }
 
-TEST(plugins, ReloadIgnoresUnchangedLibrary)
+TEST_F(PluginsTest, ReloadIgnoresUnchangedLibrary)
 {
 	ensure_example_loaded();
 	int before = plugins.action(ACT_READY);
@@ -781,7 +981,7 @@ TEST(plugins, ReloadIgnoresUnchangedLibrary)
 	EXPECT_EQ(plugins.action(ACT_READY), before);
 }
 
-TEST(plugins, ReloadReplacesChangedLibrary)
+TEST_F(PluginsTest, ReloadReplacesChangedLibrary)
 {
 	ensure_example_loaded();
 	std::filesystem::path lib = exec_path() / "libexample.so";
@@ -808,12 +1008,12 @@ TEST(plugins, ReloadReplacesChangedLibrary)
 	plugins.reload();  // pick the original back up
 }
 
-TEST(plugins, ReloadPicksUpEditedScript)
+TEST_F(PluginsTest, ReloadPicksUpEditedScript)
 {
 	if (!jsengine_available())
 		GTEST_SKIP() << "built without quickjs";
 
-	load_js_once();
+	load_js();
 	std::string path = (std::filesystem::current_path() / "test_engine.js").string();
 	int before = plugins.action(ACT_READY);
 

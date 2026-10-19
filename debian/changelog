@@ -1,3 +1,16 @@
+in10dfs (0.5.0) trixie; urgency=medium
+
+  * Plugins and js scripts with fs access
+  * multiple js scripts supported
+  * roles and role based access
+  * master switch target for all lights 0.0.0
+  * DS2408 and DS2450 agregate support (*.ALL)
+  * alarms and latch reset based on cache for upper layers.
+    Real status is reset by switch handling.
+  * Rename latched to latch like owfs
+
+ -- INgo Rah <INgo.Rah@gmx.net>  Thu, 08 Oct 2026 08:30:00 +0000
+
 in10dfs (0.4.0) trixie; urgency=medium
 
   * Timers implemented

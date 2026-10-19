@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cerrno>
 #include <filesystem>
 #include <fstream>
 #include "nlohmann/json.hpp"
@@ -62,11 +63,37 @@ struct ActionEvent {
 	const json* data;
 };
 
+class Plugin;
+
+/* Files a plugin adds to the file system. A path is relative to the
+   root, with '/' between directories: "status/my_stuff" shows up as
+   /status/my_stuff, next to the built-in status files. The directories
+   on the way are made up from the paths, only reads and writes of the
+   files themselves reach the plugin (Plugin::fs_read()/fs_write()).
+
+   The root, settings/ and status/ can be shared with the daemon, its
+   own files there cannot be taken; switches/, role/, alarm/, bus.<n>/
+   and the devices are the daemon's alone. The files of a plugin go
+   away with it when it is unloaded or reloaded. */
+class IPluginFiles {
+public:
+	virtual ~IPluginFiles() {}
+	/* Adds a file of owner. size is what it is listed with and the most
+	   a read returns, at least 1; adding a path of owner again only
+	   updates its size. False when the path is taken (by the daemon or
+	   another plugin, as a file or as a directory) or not a valid one. */
+	virtual bool file_add(Plugin* owner, const string& path, int size) = 0;
+	/* Removes a file of owner again, false if it has none at path */
+	virtual bool file_remove(Plugin* owner, const string& path) = 0;
+};
+
 class Plugin {
 public:
 	string name;
 	std::filesystem::path lib_path;
 	void* handle;
+	/* set by the host before init(), for adding files */
+	IPluginFiles* files = nullptr;
 
 	virtual ~Plugin() {}
 	virtual void init(ILogger* logger, IDevices *devices) = 0;
@@ -100,6 +127,21 @@ public:
 	// config data set and get...
 	virtual json config_get() const = 0;
 	virtual void config_set(const json& j) = 0;
+
+	/* A read or write of one of the files added through files, path as
+	   it was added. Return the bytes read (at most size) or taken, or a
+	   negative errno. Only the start of a file is read: one call
+	   returns all of it. */
+	virtual int fs_read(const string& path, char* buf, size_t size)
+	{
+		(void)path; (void)buf; (void)size;
+		return -ENOENT;
+	}
+	virtual int fs_write(const string& path, const char* buf, size_t size)
+	{
+		(void)path; (void)buf; (void)size;
+		return -EACCES;
+	}
 };
 
 // Define the signature of the factory function

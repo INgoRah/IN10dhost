@@ -5,6 +5,8 @@
 #include <filesystem>
 #include <unistd.h>
 #include <limits.h>
+#include <algorithm>
+#include <set>
 
 // plugin loader
 #include <dlfcn.h> // Unix dynamic loading
@@ -183,6 +185,7 @@ Plugin* Plugins::plugin_init(const string& name)
 		instance->name = name;
 		instance->handle = handle;
 		instance->lib_path = tmp_path;
+		instance->files = this;
 
 		instance->init(&logger, static_cast<IDevices*>(&ow));
 	}
@@ -214,6 +217,8 @@ void Plugins::unload(Plugin* plugin_ptr)
 	catch (...) {
 		logger.error(std::format("plugin {} exit failed", plugin_ptr->name));
 	}
+	// whatever exit() left, nothing may reach the instance any more
+	files_drop(plugin_ptr);
 	if (plugin_ptr->handle) {
 		void* handle = plugin_ptr->handle;
 		destroy_t destroy_plugin = (destroy_t) dlsym(handle, "destroy_plugin");
@@ -239,6 +244,7 @@ int Plugins::cleanup()
 		unload(plugin_ptr);
 	plugins.clear();
 	hashes.clear();
+	seen.clear();
 
 	return 0;
 }
@@ -253,8 +259,12 @@ int Plugins::add(const string& name)
 	for (auto plugin_ptr : plugins)
 		if (plugin_ptr->name == name)
 			return 1;
+	Plugin* p = plugin_init(name);
+	if (p == nullptr)
+		return -1;
+	catch_up(p);
 
-	return plugin_init(name) ? 0 : -1;
+	return 0;
 }
 
 /* Unloads a single plugin by name. Returns 0 when it was unloaded, -1
@@ -313,6 +323,7 @@ int Plugins::reload(const string& only)
 			continue;
 		}
 		apply_config(p, cfg);
+		catch_up(p);
 		cnt++;
 	}
 
@@ -336,8 +347,10 @@ int Plugins::load(json j)
 			continue;
 		logger.debug(std::format("loading #{} plugin {}",i++, pluginName));
 		auto p = plugin_init(pluginName);
-		if (p)
+		if (p) {
 			apply_config(p, pluginConfig);
+			catch_up(p);
+		}
 	}
 	logger.debug(std::format("loaded {} plugins", plugins.size()));
 	return 0;
@@ -366,27 +379,207 @@ int Plugins::action(int code, int val, const json* data)
 	ActionEvent ev{ code, val, data };
 
 	ret = 0;
-	for (auto plugin_ptr : plugins) {
-		// depending on the action, we might want to skip some plugins or
-		// handle errors differently
-		//
-		// A plugin must never be able to take the daemon down. Nothing
-		// up the call chain (alarm handling, the poll loop, FUSE
-		// read/write) catches anything, so an exception escaping here
-		// would reach no handler at all and terminate the process -
-		// e.g. a json type_error from a mistyped value() default. Log
-		// it and carry on with the remaining plugins.
-		try {
-			ret += plugin_ptr->action(ev);
+	for (auto plugin_ptr : plugins)
+		ret += call_action(plugin_ptr, ev);
+	// after sending it, a plugin loading meanwhile must not get it twice
+	if ((code == ACT_INITIALIZED || code == ACT_READY) &&
+			std::find(seen.begin(), seen.end(), code) == seen.end())
+		seen.push_back(code);
+	return ret;
+}
+
+int Plugins::call_action(Plugin* plugin_ptr, const ActionEvent& ev)
+{
+	// A plugin must never be able to take the daemon down. Nothing up
+	// the call chain (alarm handling, the poll loop, FUSE read/write)
+	// catches anything, so an exception escaping here would reach no
+	// handler at all and terminate the process - e.g. a json type_error
+	// from a mistyped value() default. Log it and carry on with the
+	// remaining plugins.
+	try {
+		return plugin_ptr->action(ev);
+	}
+	catch (const std::exception& e) {
+		logger.error(std::format("plugin {} action {} failed: {}",
+			plugin_ptr->name, ev.code, e.what()));
+	}
+	catch (...) {
+		logger.error(std::format("plugin {} action {} failed with an unknown exception",
+			plugin_ptr->name, ev.code));
+	}
+	return 0;
+}
+
+void Plugins::catch_up(Plugin* plugin_ptr)
+{
+	std::lock_guard<std::recursive_mutex> lock(mtx);
+
+	for (int code : seen)
+		call_action(plugin_ptr, ActionEvent{ code, 0, nullptr });
+}
+
+/* "a/b/c": no empty parts (so no leading, trailing or double '/') and
+   none that is "." or ".." */
+static bool valid_path(const string& path)
+{
+	size_t start = 0;
+
+	if (path.empty())
+		return false;
+	while (true) {
+		size_t end = path.find('/', start);
+		string part = path.substr(start, end == string::npos ? string::npos : end - start);
+		if (part.empty() || part == "." || part == "..")
+			return false;
+		if (end == string::npos)
+			return true;
+		start = end + 1;
+	}
+}
+
+/* whether path lies below dir, "a/b" below "a" */
+static bool is_below(const string& path, const string& dir)
+{
+	return path.size() > dir.size() && path.compare(0, dir.size(), dir) == 0
+		&& path[dir.size()] == '/';
+}
+
+bool Plugins::file_add(Plugin* owner, const string& path, int size)
+{
+	const string who = owner ? owner->name : string("?");
+
+	if (owner == nullptr || size < 1 || !valid_path(path)) {
+		logger.warn(std::format("plugin {}: invalid file '{}' ({})", who, path, size));
+		return false;
+	}
+	// not under files_mtx: it looks at the daemon's own entries
+	if (fs_builtin_taken(path)) {
+		logger.warn(std::format("plugin {}: file '{}' is taken by the daemon", who, path));
+		return false;
+	}
+	std::lock_guard<std::mutex> lock(files_mtx);
+	auto it = files.find(path);
+	if (it != files.end()) {
+		if (it->second.owner != owner) {
+			logger.warn(std::format("plugin {}: file '{}' is taken by plugin {}",
+				who, path, it->second.owner->name));
+			return false;
 		}
-		catch (const std::exception& e) {
-			logger.error(std::format("plugin {} action {} failed: {}",
-				plugin_ptr->name, code, e.what()));
-		}
-		catch (...) {
-			logger.error(std::format("plugin {} action {} failed with an unknown exception",
-				plugin_ptr->name, code));
+		it->second.size = size;
+		return true;
+	}
+	// a file where another one needs a directory, or the other way round
+	for (const auto& [p, f] : files) {
+		if (is_below(p, path) || is_below(path, p)) {
+			logger.warn(std::format("plugin {}: file '{}' clashes with '{}' of plugin {}",
+				who, path, p, f.owner->name));
+			return false;
 		}
 	}
-	return ret;
+	files[path] = PluginFile{ owner, size };
+	logger.verbose(std::format("plugin {}: added file {}", who, path));
+	return true;
+}
+
+bool Plugins::file_remove(Plugin* owner, const string& path)
+{
+	std::lock_guard<std::mutex> lock(files_mtx);
+	auto it = files.find(path);
+
+	if (it == files.end() || it->second.owner != owner)
+		return false;
+	files.erase(it);
+	return true;
+}
+
+void Plugins::files_drop(Plugin* owner)
+{
+	std::lock_guard<std::mutex> lock(files_mtx);
+
+	std::erase_if(files, [owner](const auto& f) { return f.second.owner == owner; });
+}
+
+int Plugins::file_attr(const string& path)
+{
+	std::lock_guard<std::mutex> lock(files_mtx);
+	auto it = files.find(path);
+
+	if (it != files.end())
+		return it->second.size;
+	for (const auto& f : files)
+		if (is_below(f.first, path))
+			return 0;
+	return -ENOENT;
+}
+
+std::vector<string> Plugins::file_dir(const string& dir)
+{
+	std::lock_guard<std::mutex> lock(files_mtx);
+	std::set<string> names;
+
+	for (const auto& f : files) {
+		string rest;
+		if (dir.empty())
+			rest = f.first;
+		else if (is_below(f.first, dir))
+			rest = f.first.substr(dir.size() + 1);
+		else
+			continue;
+		names.insert(rest.substr(0, rest.find('/')));
+	}
+	return std::vector<string>(names.begin(), names.end());
+}
+
+/* Both under mtx, like action(): the plugin must not be unloaded while
+   it runs, and it is guarded the same against throwing. */
+int Plugins::file_read(const string& path, char* buf, size_t size)
+{
+	std::lock_guard<std::recursive_mutex> lock(mtx);
+	Plugin* owner = nullptr;
+
+	{
+		std::lock_guard<std::mutex> lk(files_mtx);
+		auto it = files.find(path);
+		if (it != files.end())
+			owner = it->second.owner;
+	}
+	if (owner == nullptr)
+		return -ENOENT;
+	try {
+		int r = owner->fs_read(path, buf, size);
+		// whatever the plugin claims, no more than the buffer holds
+		return r > (int)size ? (int)size : r;
+	}
+	catch (const std::exception& e) {
+		logger.error(std::format("plugin {} read of {} failed: {}", owner->name, path, e.what()));
+	}
+	catch (...) {
+		logger.error(std::format("plugin {} read of {} failed", owner->name, path));
+	}
+	return -EIO;
+}
+
+int Plugins::file_write(const string& path, const char* buf, size_t size)
+{
+	std::lock_guard<std::recursive_mutex> lock(mtx);
+	Plugin* owner = nullptr;
+
+	{
+		std::lock_guard<std::mutex> lk(files_mtx);
+		auto it = files.find(path);
+		if (it != files.end())
+			owner = it->second.owner;
+	}
+	if (owner == nullptr)
+		return -ENOENT;
+	try {
+		return owner->fs_write(path, buf, size);
+	}
+	catch (const std::exception& e) {
+		logger.error(std::format("plugin {} write of {} failed: {}", owner->name, path, e.what()));
+	}
+	catch (...) {
+		logger.error(std::format("plugin {} write of {} failed", owner->name, path));
+	}
+	return -EIO;
 }
