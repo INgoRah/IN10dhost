@@ -17,12 +17,16 @@ const FsEntry<FsLeaf> FsLeaf::table[] = {
 	{ "settings/poll", 3, 0, false, nullptr, nullptr, &FsLeaf::r_poll, &FsLeaf::w_poll },
 	// before "settings/save": rows match as substrings of the path
 	{ "settings/save_interval", 5, 0, false, nullptr, nullptr, &FsLeaf::r_save_interval, &FsLeaf::w_save_interval },
+	// seconds between the searches for stale devices, 0: none
+	{ "settings/presence", 5, 0, false, nullptr, nullptr, &FsLeaf::r_presence, &FsLeaf::w_presence },
 	// write anything: saves the config now
 	{ "settings/save", 1, 0, false, nullptr, nullptr, nullptr, &FsLeaf::w_save },
 	// write anything: saves status/1wire.vcd to the log dir now
 	{ "settings/vcd_save", 1, 0, false, nullptr, nullptr, nullptr, &FsLeaf::w_1wire_save },
 	{ "status/version", 0, 0, false, nullptr, &FsLeaf::version_size, &FsLeaf::r_version, nullptr },
 	{ "status/health", 0, 0, false, nullptr, &FsLeaf::health_size, &FsLeaf::r_health, nullptr },
+	// the devices taken off on purpose, "<rom>" adds, "-<rom>" removes
+	{ "status/unplugged", 0, 0, false, nullptr, &FsLeaf::unplugged_size, &FsLeaf::r_unplugged, &FsLeaf::w_unplugged },
 	// TODO query the real size: ow.log_size()
 	{ "status/1wire.vcd", 218 + (1024 * 30), 0, false, nullptr, nullptr, &FsLeaf::r_1wire, nullptr },
 };
@@ -85,8 +89,8 @@ int FsLeaf::r_save_interval(char* buf, size_t size, bool, int)
 	return std::strlen(buf);
 }
 
-// seconds, 0 switches the timer off, at most a day
-int FsLeaf::w_save_interval(const char* buf, size_t size, int)
+/* seconds, 0 up to max: what a seconds setting takes, -EINVAL else */
+static long parse_secs(const char* buf, size_t size, long max)
 {
 	std::string s(buf, size);
 	size_t end = 0;
@@ -101,8 +105,78 @@ int FsLeaf::w_save_interval(const char* buf, size_t size, int)
 	}
 	while (end < s.size() && (s[end] == '\n' || s[end] == '\r' || s[end] == '\0'))
 		end++;
-	if (end != s.size() || v < 0 || v > 24 * 3600)
+	if (end != s.size() || v < 0 || v > max)
 		return -EINVAL;
+	return v;
+}
+
+int FsLeaf::r_presence(char* buf, size_t size, bool, int)
+{
+	std::snprintf(buf, size, "%d", ow.get_presence());
+	return std::strlen(buf);
+}
+
+// seconds, 0 switches the searches off, at most a day
+int FsLeaf::w_presence(const char* buf, size_t size, int)
+{
+	long v = parse_secs(buf, size, 24 * 3600);
+
+	if (v < 0)
+		return (int)v;
+	ow.set_presence((int)v);
+	return size;
+}
+
+/* one ROM per line */
+std::string FsLeaf::unplugged_text() const
+{
+	std::string s;
+
+	for (int bus = 0; bus < ow.bus_count(); bus++)
+		for (const OwDev* dev : ow.list_devices(bus))
+			if (dev->unplugged())
+				s += dev->rom + "\n";
+	return s;
+}
+
+int FsLeaf::r_unplugged(char* buf, size_t size, bool, int)
+{
+	std::snprintf(buf, size, "%s", unplugged_text().c_str());
+	return std::strlen(buf);
+}
+
+int FsLeaf::unplugged_size(int) const
+{
+	return (int)unplugged_text().size();
+}
+
+/* "<rom>" marks that device unplugged, "-<rom>" stale again, so the
+   searches look for it. Any form OwDev::canonical_rom() takes. */
+int FsLeaf::w_unplugged(const char* buf, size_t size, int)
+{
+	std::string s(buf, size);
+
+	while (!s.empty() && (s.back() == '\n' || s.back() == '\r' || s.back() == '\0'))
+		s.pop_back();
+	bool off = !s.empty() && s[0] == '-';
+	if (off)
+		s.erase(0, 1);
+	if (s.size() < 14)
+		return -EINVAL;
+	OwDev* dev = ow.find(OwDev::canonical_rom(std::move(s)));
+	if (!dev)
+		return -ENOENT;
+	dev->set_unplugged(!off);
+	return size;
+}
+
+// seconds, 0 switches the timer off, at most a day
+int FsLeaf::w_save_interval(const char* buf, size_t size, int)
+{
+	long v = parse_secs(buf, size, 24 * 3600);
+
+	if (v < 0)
+		return (int)v;
 	ow.set_save_interval((int)v);
 	return size;
 }

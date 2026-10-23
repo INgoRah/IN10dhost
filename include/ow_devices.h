@@ -36,6 +36,9 @@ struct Config {
 	/* seconds between saves of the config, 0: only on demand
 	   (settings/save) and at shutdown */
 	int save_interval = 0;
+	/* seconds between two searches of the busses with a stale device,
+	   0: none, see OwDevices::presence_check() */
+	int presence = 300;
     std::vector<std::unique_ptr<OwDev>> devices;
 	std::vector<Bus> busses;
 	// TODO move to switch handler
@@ -72,6 +75,13 @@ class OwDevices : public IDevices
 		// one trace save at a time, and when the last one was written
 		std::mutex log_mtx;
 		HrClock::time_point last_log_save{};
+		// the last presence_check() by dev_poll(), see Config::presence
+		HrClock::time_point last_presence{};
+		/* Search of one bus, full or (cond) a conditional one, the ROMs
+		   found go to found. False when the bus could not be searched
+		   (no such bus, an error on the way): then nothing can be said
+		   about who is missing. */
+		bool scan_bus(int bus, std::vector<uint64_t>& found, bool cond = false);
 
 	public:
 		OwDevices(DS2482 *ds) { this->ds = ds; }
@@ -94,10 +104,28 @@ class OwDevices : public IDevices
 		int save_poll(HrClock::time_point now = HrClock::now());
 		void set_save_interval(int secs) { cache.save_interval = secs; }
 		int get_save_interval() const { return cache.save_interval; }
+		void set_presence(int secs) { cache.presence = secs; }
+		int get_presence() const { return cache.presence; }
 		// when the config was last saved, epoch while it was not yet
 		std::chrono::system_clock::time_point last_saved();
 
-		void search(bool mode);
+		/* mode true: a full search of all busses, adds the new devices
+		   and marks the missing ones stale, see presence(). Returns the
+		   known devices found.
+		   mode false: a conditional search, for /uncached/alarm.
+		   Returns the known devices in alarm now - as the bus has it,
+		   not the alarm flags of the alarm handling (/alarm). Nothing
+		   is handled nor are latches read. */
+		std::vector<OwDev*> search(bool mode);
+		/* The devices of bus found by a search are running, the others
+		   stale - except the ones a 1-Wire search cannot see (the I2C
+		   Arduino). */
+		void presence(int bus, const std::vector<uint64_t>& found);
+		/* Searches the busses with a stale device (all with all=true)
+		   and marks who is there, see presence(). An unplugged device
+		   is no reason for a search. Adds no new devices, that is
+		   search()'s job. */
+		void presence_check(bool all = false);
 
 		void update_device(int bus, string rom);
 		void add_device(OwDev* dev);

@@ -18,6 +18,8 @@ enum dev_states {
 	DS_INIT = 1,
 	DS_RUNNING = 2,
 	DS_STALE = 3,
+	// taken off the bus on purpose, see OwDev::set_unplugged()
+	DS_UNPLUGGED = 4,
 	DS_INVALID = 0xff
 };
 
@@ -50,6 +52,10 @@ class OwDev : IFs, public IDev {
 		// load() path) must also start out well-defined, or init()'s
 		// and begin()'s once-only guards below would read garbage.
 		int state = DS_CREATED;
+		// bus accesses in a row the device did not answer, see access_result()
+		int fails = 0;
+		// to DS_RUNNING, DS_STALE or DS_UNPLUGGED, logged and sent on
+		void set_state(int to);
 		string info;
 		HrClock::time_point last_poll;
 		// polling interval in seconds, 0 means no polling, default is 0
@@ -121,6 +127,21 @@ class OwDev : IFs, public IDev {
 		// needs to do something and then perform the action(s)
 		virtual int poll();
 		virtual int poll_next();
+		/* Gone from the bus (unplugged, broken): not found by a search,
+		   or STALE_FAILS accesses in a row without an answer. Kept with
+		   its config and saved as such, but left out of the directories
+		   and its files read as missing (-ENOENT), as owfs does. Back
+		   to running once it answers again. */
+		bool stale() const { auto lk = lock(); return state == DS_STALE || state == DS_UNPLUGGED; }
+		// an unplugged one stays so when it is still missing
+		void set_stale(bool on);
+		/* Unplugged on purpose: stale, but neither polled nor searched
+		   for, see OwDevices::presence_check(). Only a search that finds
+		   it anyway takes it back. Off makes it stale again. */
+		bool unplugged() const { auto lk = lock(); return state == DS_UNPLUGGED; }
+		void set_unplugged(bool on);
+		// the outcome of a bus access to this device, see stale()
+		void access_result(bool ok);
 		// IDev functions
 		// the name given to the device, or its rom while it has none
 		std::string display_name() const { auto lk = lock(); return name.empty() ? rom : name; };

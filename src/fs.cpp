@@ -107,12 +107,20 @@ bool fs_builtin_taken(const string& path)
 }
 
 /* "/alarm" lists the alarming devices; below it everything is the same
-   as in the root, so "/alarm/<rom>/latch.0" is "/<rom>/latch.0".
+   as in the root, so "/alarm/<rom>/latch.0" is "/<rom>/latch.0". The
+   same for "/uncached/alarm" and "/uncached".
    Every entry point maps the path through this first. */
 static string alarm_alias(const char* path)
 {
 	static const char prefix[] = "/alarm/";
+	static const char uncached[] = "/uncached/alarm/";
 
+	if (strncmp(path, uncached, sizeof(uncached) - 1) == 0) {
+		if (path[sizeof(uncached) - 1] == '\0')
+			return string("/uncached/alarm");
+		// "/uncached" and the slash in front of what follows
+		return string("/uncached") + (path + sizeof(uncached) - 2);
+	}
 	if (strncmp(path, prefix, sizeof(prefix) - 1) == 0) {
 		if (path[sizeof(prefix) - 1] == '\0')
 			return string("/alarm");
@@ -202,10 +210,19 @@ static bool extract_subpath(string& path, const char* subpart)
 	return false;
 }
 
+/* A device by its ROM, nullptr for a stale one: gone from the bus, its
+   files are missing as in owfs, see OwDev::stale() */
+static OwDev* present(const string& rom)
+{
+	OwDev* dev = ow.find(rom);
+
+	return dev && !dev->stale() ? dev : nullptr;
+}
+
 static int fs_attr_rom(int bus, string spath, struct stat* st)
 {
 	(void)bus;
-	const OwDev* dev = ow.find(spath);
+	const OwDev* dev = present(spath);
 	if (dev) {
 		int attr = dev->fs_attr(spath);
 		//printf("fs_getattr bus.%d.dev %s %d\n", bus, spath.c_str(), attr);
@@ -256,7 +273,7 @@ static int fs_getattr(const char* path_in, struct stat* st, struct fuse_file_inf
 	memset(st, 0, sizeof(struct stat));
 
 	// Directories
-	if (strcmp(path, "/") == 0) {
+	if (strcmp(path, "/") == 0 || strcmp(path, "/uncached/alarm") == 0) {
 		st->st_mode = S_IFDIR | 0755;
 		st->st_nlink = 2;
 		return 0;
@@ -367,7 +384,7 @@ static void fs_dir_devs(fuse_fill_dir_t filler, void *buf, bool alarm)
 	{
 		std::vector<OwDev *> devs = ow.list_devices(bus);
 		for (const auto &dev : devs) {
-			if (alarm && !dev->alarm)
+			if ((alarm && !dev->alarm) || dev->stale())
 				continue;
 			filler(buf, dev->rom.c_str(), nullptr, 0,
 				   static_cast<fuse_fill_dir_flags>(0));
@@ -393,12 +410,20 @@ static int readdir_builtin(const char* path_in, void* buf, fuse_fill_dir_t fille
 			return res;
 		}
 	}
+	// the devices in alarm as the bus has it now, see search()
+	if (strcmp(path, "/uncached/alarm") == 0) {
+		for (const OwDev* dev : ow.search(false))
+			filler(buf, dev->rom.c_str(), nullptr, 0,
+				   static_cast<fuse_fill_dir_flags>(0));
+		return 0;
+	}
 	ret = extract_subpath(spath, "uncached");
 	if (ret) {
 		if (spath.length() == 0) {
 			logger.info("scanning ...");
 			ow.search(true);
 			fs_dir_devs(filler, buf, false);
+			filler(buf, "alarm", nullptr, 0, static_cast<fuse_fill_dir_flags>(0));
 		}
 	}
 	// only the directory itself, a device below it is an alias (see
@@ -461,7 +486,7 @@ static int readdir_builtin(const char* path_in, void* buf, fuse_fill_dir_t fille
 	if (ret) {
 		std::vector<OwDev*> devs = ow.list_devices(bus);
 		for (const auto& dev : devs) {
-			if (spath.length() > 0) {
+			if (spath.length() > 0 || dev->stale()) {
 			} else {
 				// bus level
 				// add device dir
@@ -475,7 +500,7 @@ static int readdir_builtin(const char* path_in, void* buf, fuse_fill_dir_t fille
 		string rom;
 		if (!extractRom(spath, rom))
 			return -ENOENT;
-		OwDev* dev = ow.find(rom);
+		OwDev* dev = present(rom);
 		if (!dev)
 			return -ENOENT;
 		std::vector<string> ls = dev->fs_dir(spath);
@@ -556,7 +581,7 @@ static int fs_open(const char* path_in, struct fuse_file_info*)
 	string rom;
 	bool ret = extractRom(spath, rom);
 	if (ret) {
-		const OwDev* dev = ow.find(rom);
+		const OwDev* dev = present(rom);
 		if (dev) {
 			// check if open works dev->fs_open(spath)
 			return dev->fs_open(spath);
@@ -611,7 +636,7 @@ static int fs_read(const char* path_in, char* buf, size_t size, off_t offset,
 	extractBusNumber(spath, bus);
 	bool ret = extractRom(spath, rom);
 	if (ret && spath.length() > 0) {
-		OwDev* dev = ow.find(rom);
+		OwDev* dev = present(rom);
 		if (dev)
 			return dev->fs_read(spath, buf, size, uncached);
 	}
@@ -664,7 +689,7 @@ static int fs_write(const char* path_in, const char* buf, size_t size,
 	string rom;
 	int ret = extractRom(spath, rom);
 	if (ret) {
-		OwDev* dev = ow.find(rom);
+		OwDev* dev = present(rom);
 		if (dev) {
 			ret = dev->fs_write(spath, buf, size);
 			return ret;

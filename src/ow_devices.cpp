@@ -63,6 +63,7 @@ void to_json(json& j, const Config& c) {
 		{"version", 1},
 		{"poll", c.poll},
 		{"save_interval", c.save_interval},
+		{"presence", c.presence},
 		{"bus_count", c.bus_count},
 		{"busses", c.busses},
 		{"switches", c.switches}
@@ -113,6 +114,8 @@ void from_json(const json& j, Config& c) {
 		c.poll = j.at("poll").get<int>();
 	if (j.contains("save_interval"))
 		c.save_interval = j.at("save_interval").get<int>();
+	if (j.contains("presence"))
+		c.presence = j.at("presence").get<int>();
 }
 
 OwDevices::~OwDevices() {
@@ -152,6 +155,8 @@ void OwDevices::begin(bool soft)
 	// already-loaded device (init() has already run on all of them)
 	for (auto& dev : cache.devices)
 		dev->begin(ds, soft);
+	// who of the loaded devices is there, and who is not any more
+	presence_check(true);
 	// devices are up and usable, see ACT_READY in plugin.h
 	plugins.action(ACT_READY, 0);
 }
@@ -480,7 +485,12 @@ void OwDevices::update_data()
 				it = cache.devices.erase(it); // Erase returns the NEXT valid iterator
 				continue;
 			}
-			cache.busses[dev->bus].devices.push_back(it->get());
+			// a hand edited config: kept and found by its ROM, but on
+			// no bus list (operator[] would not throw, but overrun)
+			if (dev->bus < 0 || dev->bus >= MAX_BUS)
+				logger.warn(std::format("dev {} on bus {}: no such bus", dev->rom, dev->bus));
+			else
+				cache.busses[dev->bus].devices.push_back(it->get());
 			add_device(it->get());
 			++it; // Only increment if we didn't erase
 		} catch (const std::exception& e) {
@@ -553,6 +563,9 @@ std::vector<PinInfo> OwDevices::pins(PinRole role)
 
 	for (int bus = 0; bus < bus_count(); bus++) {
 		for (OwDev* dev : list_devices(bus)) {
+			// its pins are not there to read or switch
+			if (dev->stale())
+				continue;
 			if (auto* d = dynamic_cast<ds2408*>(dev))
 				d->pins_get(out, role);
 		}
@@ -577,57 +590,105 @@ int OwDevices::role_switch(PinRole role, bool on)
 	return failed;
 }
 
-// search devs
-void OwDevices::search(bool mode)
-{
-	char buf[18];
-	int pos;
-	uint8_t bus;
-	bool ret;
 #ifdef USE_I2C
-	uint8_t adr[8];
-	uint8_t res = 0;
+/* rom_code of a ROM as the search returns it, the packing OwDev uses */
+static uint64_t rom_code_of(const uint8_t* adr)
+{
+	uint64_t code = 0;
+
+	for (int i = 0; i < 7; i++)
+		code = (code << 8) | adr[i];
+	return (code << 8) | adr[7];
+}
 #endif
 
-	for (bus = 0; bus < 4; bus++) {
-		// coverity[sleep] - bus mutex must be held for the whole scan of
-		// this bus (potentially many devices deep)
-		std::lock_guard<std::mutex> lock(ds->mtx);
-		ret = ds->selectChannel(bus);
-		if (!ret) {
-			logger.error(std::format("bus {} not present", bus));
-			continue;
-		}
-		ds->reset_search();
+bool OwDevices::scan_bus(int bus, std::vector<uint64_t>& found, bool cond)
+{
+	if (bus < 0 || bus >= MAX_BUS)
+		return false;
+	// coverity[sleep] - bus mutex must be held for the whole scan of
+	// this bus (potentially many devices deep)
+	std::lock_guard<std::mutex> lock(ds->mtx);
+	if (!ds->selectChannel((uint8_t)bus)) {
+		logger.error(std::format("bus {} not present", bus));
+		return false;
+	}
+	ds->reset_search();
 #ifdef USE_I2C
-		// coverity[sleep] - bus mutex must be held
-		while (ds->search(adr, mode)) {
-				res++;
-				if (mode) {
-					sprintf(buf, "%02X.", adr[0]);
-					pos = 3;
-					for (int j = 1; j < 8; j++) {
-						sprintf(&buf[pos], "%02X", adr[j]);
-						pos += 2;
-					}
-					assert (pos < (int)sizeof(buf));
-					update_device(bus, buf);
-				}
-		}
+	uint8_t adr[8];
+
+	// coverity[sleep] - bus mutex must be held
+	while (ds->search(adr, !cond))
+		found.push_back(rom_code_of(adr));
+	return ds->last_err == 0;
+#else
+	// no bus to search
+	(void)found;
+	(void)cond;
+	return false;
 #endif
+}
+
+void OwDevices::presence(int bus, const std::vector<uint64_t>& found)
+{
+	for (OwDev* dev : list_devices(bus)) {
+		if (dev->addr[0] == ARDUINO)
+			continue;
+		dev->set_stale(std::find(found.begin(), found.end(), dev->rom_code) == found.end());
 	}
-	if (!mode)
-		return;
+}
+
+void OwDevices::presence_check(bool all)
+{
+	for (int bus = 0; bus < bus_count(); bus++) {
+		const auto devs = list_devices(bus);
+		if (!all && std::none_of(devs.begin(), devs.end(),
+				[](const OwDev* d) { return d->stale() && !d->unplugged(); }))
+			continue;
+		std::vector<uint64_t> found;
+		// outside the bus lock: the device lock comes first, see OwDev
+		if (scan_bus(bus, found))
+			presence(bus, found);
+	}
+}
+
+// search devs
+std::vector<OwDev*> OwDevices::search(bool mode)
+{
+	std::vector<uint64_t> found[MAX_BUS];
+	bool ok[MAX_BUS] = {};
+	std::vector<OwDev*> res;
+	// the known ones among found, outside the bus lock (see OwDev)
+	auto known = [&]() {
+		for (const auto& codes : found)
+			for (uint64_t code : codes)
+				if (OwDev* dev = find(code))
+					res.push_back(dev);
+	};
+
+	if (!mode) {
+		for (int bus = 0; bus < MAX_BUS; bus++)
+			scan_bus(bus, found[bus], true);
+		known();
+		// answering, so it is there
+		for (OwDev* dev : res)
+			dev->set_stale(false);
+		return res;
+	}
+	for (int bus = 0; bus < MAX_BUS; bus++) {
+		ok[bus] = scan_bus(bus, found[bus]);
+		// "29.0200FDFF6677F8": family, the 6 serial bytes, the CRC
+		for (uint64_t code : found[bus])
+			update_device(bus, std::format("{:02X}.{:012X}{:02X}", code >> 56,
+				(code >> 8) & 0xffffffffffffULL, code & 0xff));
+	}
 #ifndef USE_I2C
-	(void)mode;
 	uint8_t  adrt[8] = { 0x28, 0x5, 0x1, 0xFA, 0xFE, 0x66, 0x77, 0xC6};
-	sprintf(buf, "%02X.", adrt[0]);
-	pos = 2;
-	for (int j = 1; j < 7; j++) {
-		sprintf(&buf[pos], "%02X", adrt[j]);
-		pos += 2;
-	}
-	update_device(1, buf);
+	// without the CRC, update_device() takes care of it
+	string sim = std::format("{:02X}.", adrt[0]);
+	for (int j = 1; j < 7; j++)
+		sim += std::format("{:02X}", adrt[j]);
+	update_device(1, sim);
 	update_device(0, "29.0200FDFF6677F8");
 	update_device(0, "29.0500FAFF6677FB");
 	update_device(1, "29.0701F8FE6677F4");
@@ -636,11 +697,16 @@ void OwDevices::search(bool mode)
 	// dummy device for arduino
 	update_device(0, "AD.0900F8FF6677E2");
 	update_data();
+	// the new ones are in the bus lists now, the others missing
+	for (int bus = 0; bus < MAX_BUS; bus++)
+		if (ok[bus])
+			presence(bus, found[bus]);
 	// Every device discovered before has already been begin()'d
 	// Now also make sure, that new discovered devices are begin'd
 	begin();
+	known();
 
-	return;
+	return res;
 }
 
 int OwDevices::poll_time()
@@ -657,6 +723,8 @@ int OwDevices::poll_time()
 
 	// check all devices for polling
 	for (auto& dev : cache.devices) {
+		if (dev->unplugged())
+			continue;
 		int next = dev->poll_next();
 		if (next == 0) {
 			logger.verbose(std::format("polling {:#x} ", dev->addr[0]));
@@ -685,8 +753,18 @@ int OwDevices::dev_poll()
 		// off timers of timed switches, 1 second resolution
 		swHdl.timer_poll();
 		save_poll(now);
+		// a stale device is not accessed any more, so only a search
+		// finds it again
+		if (cache.presence > 0 &&
+		    now - last_presence >= std::chrono::seconds(cache.presence)) {
+			last_presence = now;
+			presence_check();
+		}
 	}
 	for (auto& dev : cache.devices) {
+		// not there on purpose: no bus time for it
+		if (dev->unplugged())
+			continue;
 		int check = dev->poll_check();
 		if (check == 1) {
 			ds->log_event('4',0);
