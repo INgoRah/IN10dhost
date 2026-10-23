@@ -145,7 +145,8 @@ int16_t ds2450::adc_read(uint8_t ch, uint8_t flag)
 		return -1;
 	ds->select(addr);
 	if (flag == 0) {
-		uint8_t cmd[3] = { 0x3c, (uint8_t)(ch + 1), 0x55 };
+		// input select mask as the DS2450 defines it: bit 0 = A .. bit 3 = D
+		uint8_t cmd[3] = { 0x3c, (uint8_t)(1 << ch), 0x55 };
 		ds->write(cmd[0]);
 		ds->write(cmd[1]);
 		// clear all
@@ -206,7 +207,10 @@ int ds2450::poll()
 {
 	auto lk = lock();
 	float prev = volt_a;
-	if (volt_update(0) != 0)
+	int r = volt_update(0);
+
+	access_result(r == 0);
+	if (r != 0)
 		return EAGAIN;
 	if (volt_a != prev) {
 		// sent once the device is unlocked, see OwDev::notify_change()
