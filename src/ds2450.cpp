@@ -145,7 +145,8 @@ int16_t ds2450::adc_read(uint8_t ch, uint8_t flag)
 		return -1;
 	ds->select(addr);
 	if (flag == 0) {
-		uint8_t cmd[3] = { 0x3c, (uint8_t)(ch + 1), 0x55 };
+		// input select mask as the DS2450 defines it: bit 0 = A .. bit 3 = D
+		uint8_t cmd[3] = { 0x3c, (uint8_t)(1 << ch), 0x55 };
 		ds->write(cmd[0]);
 		ds->write(cmd[1]);
 		// clear all
@@ -157,6 +158,8 @@ int16_t ds2450::adc_read(uint8_t ch, uint8_t flag)
 		// this command isn't verified against real hardware here
 		if (!ds->check_crc16(cmd, sizeof(cmd), inv_crc, 0))
 			logger.warn(rom + ": DS2450 convert command CRC mismatch");
+		// back to idle, see below
+		ds->reset();
 		return 0;
 	}
 	uint8_t cmd[3] = { 0xAA, 0x0, 0x0 };
@@ -179,6 +182,10 @@ int16_t ds2450::adc_read(uint8_t ch, uint8_t flag)
 	inv_crc[1] = ds->read();
 	if (!ds->check_crc16(crc_buf, sizeof(crc_buf), inv_crc, 0))
 		logger.warn(rom + ": DS2450 read result CRC mismatch");
+	/* A DS2450 waits for more read slots until the next reset. The
+	   owSlave emulation (dual-ROM with a ds2408) hangs into its
+	   watchdog if that reset takes too long (~9 s), so end here. */
+	ds->reset();
 
 	return dat[ch];
 }
@@ -200,7 +207,10 @@ int ds2450::poll()
 {
 	auto lk = lock();
 	float prev = volt_a;
-	if (volt_update(0) != 0)
+	int r = volt_update(0);
+
+	access_result(r == 0);
+	if (r != 0)
 		return EAGAIN;
 	if (volt_a != prev) {
 		// sent once the device is unlocked, see OwDev::notify_change()

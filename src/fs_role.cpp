@@ -194,7 +194,7 @@ int write(const std::string& path, const char* buf, size_t size)
 	if (!parse_on(buf, size, on))
 		return -EINVAL;
 	auto* dev = dynamic_cast<ds2408*>(ow.find(p->rom));
-	if (!dev)
+	if (!dev || dev->stale())
 		return -ENOENT;
 	// coverity[sleep] - bus mutex must be held
 	if (dev->pin_switch(p->pin, on ? ON : OFF) != 0)

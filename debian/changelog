@@ -1,3 +1,13 @@
+in10dfs (0.5.1) trixie; urgency=medium
+
+  * Watchdog handling improvements
+  * CRC checks
+  * PIO verify after write
+  * Script for log analysis
+  * DS2450 channel bitmap instead of channel number
+
+ -- INgo Rah <INgo.Rah@gmx.net>  Fri, 23 Oct 2026 08:30:00 +0000
+
 in10dfs (0.5.0) trixie; urgency=medium
 
   * Plugins and js scripts with fs access

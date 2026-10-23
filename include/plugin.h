@@ -118,7 +118,8 @@ public:
 			2 - Handled and no more action allowed, stop processing alarms
 		8 - a device changed, ev.data: bus, type, rom and the new state
 		9 - a ds2408 was reset by its watchdog, ev.val = bus number,
-		    ev.data: bus, type, rom, brightness, threshold. Its cached
+		    ev.data: bus, type, rom, status (0x88 watchdog, 0x80
+		    power-on or brown-out), brightness, threshold. Its cached
 		    outputs, levels, threshold and brightness are already
 		    restored; the place to hand it a current brightness.
 	*/

@@ -19,6 +19,8 @@
 /** Retries for register read */
 #define REG_RETRY 20
 #define PIOSET_RETRY 20
+/* a restarting owSlave answers again after its start-up (2 x 50 ms) */
+#define PIO_VERIFY_DELAY_MS 200
 
 extern Plugins plugins;
 
@@ -42,6 +44,7 @@ const FsEntry<ds2408> ds2408::table[] = {
 	{ "brightness", 3, 0, false, nullptr, nullptr, &ds2408::r_brightness, &ds2408::w_brightness },
 	{ "level.*", 3, 8, false, &ds2408::vis_level, nullptr, &ds2408::r_level, &ds2408::w_level },
 	{ "watchdog", 5, 0, false, nullptr, nullptr, &ds2408::r_watchdog, nullptr },
+	{ "crc_errors", 5, 0, false, nullptr, nullptr, &ds2408::r_crc_errors, nullptr },
 };
 const size_t ds2408::n_table = sizeof(ds2408::table) / sizeof(ds2408::table[0]);
 
@@ -235,9 +238,13 @@ void ds2408::pio_mask_set(uint8_t on)
 	pio_set(tmp);
 }
 
-int ds2408::r_pio(char* buf, size_t, bool, int idx)
+// uncached: the registers are read first, as for BYTE; a PWM level is
+// only known here, the device does not report it
+int ds2408::r_pio(char* buf, size_t, bool uncached, int idx)
 {
 	auto lk = lock();
+	if (uncached)
+		reg_read(false);
 	if (idx >= IDX_ALL)
 		return fmt_bits(buf, idx, pio_mask());
 	if (cfg[CFG_PIN_ID + idx] == CFG_OUT_PWM)
@@ -262,7 +269,7 @@ int ds2408::w_pio(const char* buf, size_t size, int idx)
 	}
 	try {
 		uint8_t tmp = (uint8_t)(std::stoi(buf) & 0xff);
-		logger.verbose(std::format("set PIO.{} = {}", idx, tmp));
+		logger.debug(std::format("{}.{}: set PIO.{} = {}", name, pins[idx].name, idx, tmp));
 		// inverted for plain IO: writing 1 clears the output latch bit,
 		// writing 0 sets it (see pin_switch); PWM takes the level as is
 		pin_switch(idx, (tmp == 0 ? OFF : ON), tmp);
@@ -274,17 +281,23 @@ int ds2408::w_pio(const char* buf, size_t size, int idx)
 	}
 }
 
-int ds2408::r_sensed(char* buf, size_t, bool, int idx)
+int ds2408::r_sensed(char* buf, size_t, bool uncached, int idx)
 {
 	auto lk = lock();
+	if (uncached)
+		reg_read(false);
 	/* sensed from register 0x88 */
 	return fmt_bits(buf, idx, data[PIO_LS]);
 }
 
-int ds2408::r_latched(char* buf, size_t, bool, int idx)
+int ds2408::r_latched(char* buf, size_t, bool uncached, int idx)
 {
 	auto lk = lock();
-	/* activity latch as collected by the alarm handling, alarm_read() */
+	/* activity latch as collected by the alarm handling, alarm_read();
+	   uncached also the ones on the device the alarm handling has not
+	   read yet - they stay there for it */
+	if (uncached && reg_read(false) == 0xaa)
+		return fmt_bits(buf, idx, latched | last_latch);
 	return fmt_bits(buf, idx, latched);
 }
 
@@ -591,6 +604,14 @@ int ds2408::r_watchdog(char* buf, size_t, bool, int)
 	return std::strlen(buf);
 }
 
+// register reads dropped for a CRC mismatch since the start
+int ds2408::r_crc_errors(char* buf, size_t, bool, int)
+{
+	auto lk = lock();
+	std::sprintf(buf, "%u", crc_errors);
+	return std::strlen(buf);
+}
+
 bool ds2408::vis_pio(int idx) const
 {
 	auto lk = lock();
@@ -738,6 +759,16 @@ void ds2408::begin(bool soft)
 	// level_set
 }
 
+/* Only ever called once poll_check() has just returned 1: reads the
+   registers, the latches stay for the alarm handling. For firmware that
+   raises no alarm after a reset, OwDevices::dev_poll() reports one
+   found here. */
+int ds2408::poll()
+{
+	auto lk = lock();
+	return reg_read(false) == 0xAA ? 1 : 0;
+}
+
 uint8_t ds2408::latch_reset()
 {
 	auto lk = lock();
@@ -872,6 +903,9 @@ uint8_t ds2408::pio_set(uint8_t pio)
 #ifndef USE_I2C
 #ifdef TESTING
 			r = sim_fail ? 0xff : 0xAA;
+			// restarting from the switching, see pio_verify()
+			if (r == 0xAA && sim_reset_on_pio)
+				sim_stat = 0x80;
 #else
 			r = 0xAA;
 #endif
@@ -884,43 +918,133 @@ uint8_t ds2408::pio_set(uint8_t pio)
 			// coverity[sleep] - bus mutex must be held
 			usleep(1000);
 		} while (--retry > 0);
-		// if err && retry > 0: err = 0
-		if (r == 0xAA) {
-			// success
-			logger.verbose(rom + std::format(" latch reset: after PIO write {:#x}", pio));
-			latch_reset();
-		}
+		// the latches are reset by the read back below
 	}
+	access_result(r == 0xAA);
+	// the outputs this write changes; not knowing them before, any
+	uint8_t own = out_known ? data[PIO_OUT] ^ pio : 0xff;
 	if (r == 0xAA)
 		out_known = true;
 	if (r == 0xAA && data[PIO_OUT] != pio) {
 		uint8_t diff = data[PIO_OUT] ^ pio;
-		json changed = json::array();
 
 		data[PIO_OUT] = pio;
-		// the plain outputs that changed, with what they are, so a
-		// script can tell a light from a socket without its own table
-		for (int i = 0; i < 8; i++) {
-			if (!(diff & (1 << i)) || !pin_is_output(i) || cfg[CFG_PIN_ID + i] == CFG_OUT_PWM)
-				continue;
-			changed.push_back({
-				{"pin", i},
-				{"on", pin_is_on(i)},
-				{"name", pin_label(i)},
-				{"role", pin_role_str(pins[i].role)},
-				{"room", pins[i].room}
-			});
-		}
-		// sent once the device is unlocked, see OwDev::notify_change()
-		notify_change(json{
-			{"bus", bus},
-			{"type", type},
-			{"rom", rom.c_str()},
-			{"pio", pio},
-			{"changed", changed}
+		notify_outputs(diff);
+	}
+	if (r == 0xAA)
+		pio_verify(pio, own);
+	return r;
+}
+
+void ds2408::notify_outputs(uint8_t diff)
+{
+	auto lk = lock();
+	json changed = json::array();
+
+	// the plain outputs that changed, with what they are, so a
+	// script can tell a light from a socket without its own table
+	for (int i = 0; i < 8; i++) {
+		if (!(diff & (1 << i)) || !pin_is_output(i) || cfg[CFG_PIN_ID + i] == CFG_OUT_PWM)
+			continue;
+		changed.push_back({
+			{"pin", i},
+			{"on", pin_is_on(i)},
+			{"name", pin_label(i)},
+			{"role", pin_role_str(pins[i].role)},
+			{"room", pins[i].room}
 		});
 	}
-	return r;
+	// sent once the device is unlocked, see OwDev::notify_change()
+	notify_change(json{
+		{"bus", bus},
+		{"type", type},
+		{"rom", rom.c_str()},
+		{"pio", data[PIO_OUT]},
+		{"changed", changed}
+	});
+}
+
+/* After a PIO write: read back instead of a plain latch reset. A device
+   restarting from the switching (e.g. a load pulling its supply) loses
+   its outputs, only a read shows it - by its reset flag (newer firmware
+   keeps it through the latch reset) or by the outputs not kept. Such a
+   device does not answer during its start-up, so once more after it.
+
+   The device switching by itself in between (auto switch, its timer)
+   latches the outputs it switches, and the input of a switch: such a
+   change is taken as the device's (reg_read() notes it), not warned
+   about. Latches other than the ones of this write are left on the
+   device, its alarm brings them to the alarm handling - a press is not
+   lost. Only the ones of this write alone are reset here. */
+void ds2408::pio_verify(uint8_t pio, uint8_t own)
+{
+	auto lk = lock();
+	uint8_t v = reg_read(false);
+
+	if (v == 0) {
+		// coverity[sleep] - the device lock is held on purpose: the
+		// read back belongs to the write, nobody may use the device in
+		// between. The bus is free, the other devices are not held up.
+		usleep(PIO_VERIFY_DELAY_MS * 1000);
+		v = reg_read(false);
+	}
+	if (v == 0) {
+		// the latches stay, see above
+		logger.warn(rom + std::format(" PIO {:#04x} written, but no read back", pio));
+		return;
+	}
+	uint8_t moved = (data[PIO_OUT] ^ pio) & ~last_latch;
+	if (!wdt_pending && moved)
+		logger.warn(rom + std::format(" PIO {:#04x} written, but the device has {:#04x}",
+			pio, data[PIO_OUT]));
+	// the latches of a reset device mean nothing
+	if (wdt_pending || (last_latch & ~own) == 0) {
+		// coverity[sleep] - bus mutex must be held for the whole 1-Wire
+		// transaction; see latch_reset()
+		std::lock_guard<std::mutex> lock(ds->mtx);
+		latch_reset();
+	} else {
+		logger.verbose(rom + std::format(" latches {:#04x} left for the alarm handling",
+			last_latch));
+	}
+}
+
+/* Clears the reset flags (0x80, 0x88) of the status register: Write
+   Conditional Search Register (0xCC) to 0x8D, as for the PORL bit of a
+   DS2408. Newer owSlave firmware keeps them through a latch reset until
+   then, so a reset right before one is not missed. */
+int ds2408::status_clear()
+{
+	auto lk = lock();
+	uint8_t stat = data[STAT] & ~STAT_WATCHDOG;
+
+	// coverity[sleep] - bus mutex must be held for the whole 1-Wire
+	// transaction
+	std::lock_guard<std::mutex> lock(ds->mtx);
+	// coverity[sleep]
+	if (!ds->selectChannel(bus) || !ds->reset())
+		return -EIO;
+	// coverity[sleep]
+	ds->select(addr);
+	// coverity[sleep]
+	ds->write(0xCC);
+	// coverity[sleep]
+	ds->write(0x8D);
+	// coverity[sleep]
+	ds->write(0x00);
+	// coverity[sleep]
+	ds->write(stat);
+	// no answer to it, back to idle
+	// coverity[sleep]
+	ds->reset();
+	if (ds->last_err != 0)
+		return -EIO;
+	data[STAT] = stat;
+#ifdef TESTING
+	// the simulated device takes it, as the newer firmware does
+	sim_stat &= ~STAT_WATCHDOG;
+#endif
+	return 0;
 }
 
 /* Register read for an alarm, called from the alarm handling. The read
@@ -953,14 +1077,19 @@ uint8_t ds2408::alarm_read(uint8_t& latch)
  *
  * Returns 0xaa in case of successful read and latch reset
  * Returns 0xff in case of latch reset issue
- * Returns 0 in case of bus error or timeout -> to be repeated
+ * Returns 0 when the device did not answer (status 0xff, not retried)
+ * or every read failed its CRC: data[] is left as it was
  * */
 uint8_t ds2408::reg_read(bool latch_reset)
 {
 	auto lk = lock();
-	uint8_t tmp, err = 0;
+	uint8_t tmp;
 	uint8_t retry = REG_RETRY - 1;
 	bool ret;
+	// the last read failed its CRC, data[] was left alone
+	bool crc_bad = false;
+	// only the first mismatch of this read is logged
+	const unsigned crc_logged = crc_errors;
 	uint8_t buf[3];  // Put everything in the buffer so we can compute CRC easily.
 	// what the device drove before this read, lost if it was reset
 	uint8_t prev_out = data[PIO_OUT];
@@ -988,30 +1117,62 @@ uint8_t ds2408::reg_read(bool latch_reset)
 		// try this: alway read not running into a watchdog
 		// on the slave
 		// if (ds->last_err == 0)
-#ifdef USE_I2C
+		uint8_t rd[10];
 		// coverity[sleep]
-		ds->read (data, 10);
-#else
-		uint8_t dummy[10];
-		ds->read (dummy, 10);
+		ds->read (rd, 10);
+#ifndef USE_I2C
+		// no bus: a good read of the registers as they are, the status
+		// from the simulation
+		std::memcpy(rd, data, sizeof(rd));
 #ifdef TESTING
-		data[STAT] = sim_stat;
+		rd[STAT] = sim_stat;
 #else
-		data[STAT] = 0x00;
+		rd[STAT] = 0x00;
+#endif
+		uint16_t sim_crc = ~DS2482::crc16(rd, 8, DS2482::crc16(buf, 3, 0));
+		rd[8] = sim_crc & 0xff;
+		rd[9] = sim_crc >> 8;
+#ifdef TESTING
+		// or exactly what a test lets the bus answer
+		if (!sim_reads.empty()) {
+			std::memcpy(rd, sim_reads.front().data(), sizeof(rd));
+			sim_reads.erase(sim_reads.begin());
+		}
 #endif
 #endif
-		/* check for valid status register */
-		if (data[STAT] != 0xff)
-			break;
-		if (err == 0)
-			err = ds->last_err;
-		// if we got here, there is an issue and we
-		// will try again
-		//delay(5);
+		/* No answer: the device is gone, restarting or holds the bus,
+		   all reads 0xff - no status register has that. Retrying does
+		   not help, data[] and the latches stay as they are. */
+		if (rd[STAT] == 0xff) {
+			logger.warn(rom + " register read: no answer (status 0xff)");
+			access_result(false);
+			return 0;
+		}
+		/* a slave slipping a time slot shifts the rest of the bytes,
+		   e.g. making up a watchdog status: only take what passes the
+		   CRC (command, address and 8 bytes) */
+		crc_bad = !DS2482::check_crc16(rd, 8, rd + 8, DS2482::crc16(buf, 3, 0));
+		if (crc_bad) {
+			// marks it in status/1wire.vcd, with the status it claimed
+			ds->log_event('E', rd[STAT]);
+			if (crc_errors++ == crc_logged) {
+				std::string raw;
+				for (uint8_t b : rd)
+					raw += std::format(" {:02x}", b);
+				logger.warn(rom + " register read CRC mismatch:" + raw);
+			}
+			continue;
+		}
+		std::memcpy(data, rd, sizeof(rd));
+		break;
 	} while (--retry > 0);
-	if (err) {
-		if ((retry == 0 || data[STAT] == 0xff) && !latch_reset)
-			return 0xff;
+	// a garbled answer is an answer as well, the device is there
+	access_result(true);
+	// data[] still holds the previous read: do not take it as this one,
+	// nor reset the latches not read. The device keeps its alarm.
+	if (crc_bad) {
+		logger.warn(rom + " register read failed its CRC on every retry");
+		return 0;
 	}
 	// clear the alarm status, only when asked: any other read (e.g. an
 	// uncached BYTE) must not swallow latches an alarm has not read yet
@@ -1025,6 +1186,14 @@ uint8_t ds2408::reg_read(bool latch_reset)
 	}
 
 	logger.verbose(rom + " " + std::format(" read_regs OUT={:#x} LS={:#x} LATCH={:#x} STAT={:#x}", data[PIO_OUT], data[PIO_LS], last_latch, data[STAT]));
+	/* not written from here (pio_set() keeps data[PIO_OUT] up to date):
+	   the device switched by itself, e.g. its own timer or button */
+	if (prev_known && data[PIO_OUT] != prev_out && data[STAT] != 0xff &&
+	    !(data[STAT] & STAT_WATCHDOG)) {
+		logger.info(rom + std::format(" outputs changed by the device: {:#04x} -> {:#04x}",
+			prev_out, data[PIO_OUT]));
+		notify_outputs(prev_out ^ data[PIO_OUT]);
+	}
 	if (data[STAT] & 0x40) {
 		/* status in 5 signals a dimming down */
 		pins[0].level = 0;
@@ -1036,6 +1205,8 @@ uint8_t ds2408::reg_read(bool latch_reset)
 			if (!wdt_pending) {
 				wdt_pending = true;
 				wdt_out = prev_out;
+				// coverity[atomicity] - taken under the device lock,
+				// held for all of reg_read(): nobody changed it since
 				wdt_out_known = prev_known;
 			}
 			out_known = false;
@@ -1137,7 +1308,7 @@ uint8_t ds2408::level_set(uint8_t pio, uint8_t level, uint8_t cmd, uint8_t val)
 	uint8_t data[5] = { 0xC5, cmd, pio, val, level };
 	uint16_t crc;
 #endif
-	logger.log(LogLevel::DEBUG, "set PIO level=" + std::to_string(pct) + "% (" + std::to_string(level) + ") for PIO " + std::to_string(pio));
+	logger.debug("set PIO level=" + std::to_string(pct) + "% (" + std::to_string(level) + ") for PIO " + std::to_string(pio));
 
 #ifndef USE_I2C
 	(void)val;
@@ -1156,7 +1327,7 @@ uint8_t ds2408::level_set(uint8_t pio, uint8_t level, uint8_t cmd, uint8_t val)
 			data[1] = TMR_TYPE_STOP_DIM;
 		data[3] = level;
 	}
-	logger.debug(std::format("send cmd {:#x} {:#x} {:#x} {:#x}", data[1], data[2], data[3], data[4]));
+	logger.verbose(std::format("send cmd {:#x} {:#x} {:#x} {:#x}", data[1], data[2], data[3], data[4]));
 	// coverity[sleep] - bus mutex must be held for the whole 1-Wire
 	// transaction
 	{
@@ -1184,7 +1355,6 @@ uint8_t ds2408::level_set(uint8_t pio, uint8_t level, uint8_t cmd, uint8_t val)
 	// no bus access, so outside the bus lock above
 	uint16_t crc16 = DS2482::crc16(data, 5, 0);
 	if (crc == static_cast<uint16_t>(~crc16)) {
-		logger.verbose(std::format("CRC ok {:#x}", crc));
 		if (cmd == TMR_TYPE_ON)
 			pins[pio].level = pct;
 		return 0xAA;
@@ -1242,6 +1412,10 @@ int ds2408::watchdog_restore()
 		return 0;
 	wdt_pending = false;
 	wdt_count++;
+	// first, so a reset flag seen after the restore is a new reset
+	// coverity[sleep] - bus mutex must be held
+	if (status_clear() != 0)
+		err++;
 	if (wdt_out_known) {
 		logger.info(rom + std::format(" watchdog: restoring PIO {:#x}", wdt_out));
 		// coverity[sleep] - bus mutex must be held
@@ -1262,6 +1436,16 @@ int ds2408::watchdog_restore()
 		err++;
 	if (brightness != 0 && brightness_set((uint8_t)brightness) != 0)
 		err++;
+	/* reset again by the restore itself, as switching a load pulling
+	   the supply does: do not go round in circles, leave the outputs
+	   as the device has them */
+	if (wdt_pending) {
+		wdt_pending = false;
+		// coverity[sleep] - bus mutex must be held
+		status_clear();
+		logger.warn(rom + " reset again by the restore, outputs left as they are");
+		return -EAGAIN;
+	}
 	if (err) {
 		logger.warn(rom + std::format(" watchdog: restore incomplete, {} failed", err));
 		return -EAGAIN;

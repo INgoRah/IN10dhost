@@ -82,13 +82,33 @@ class ds2408 : public OwDev, public IDS2408 {
 		// watchdog resets seen since the start
 		unsigned wdt_count = 0;
 		int r_watchdog(char* buf, size_t size, bool uncached, int idx);
+		// register reads dropped for a CRC mismatch since the start
+		unsigned crc_errors = 0;
+		int r_crc_errors(char* buf, size_t size, bool uncached, int idx);
+		/* read back after a PIO write, see pio_set(); own: the outputs
+		   the write changed */
+		void pio_verify(uint8_t pio, uint8_t own);
+		// sends ACT_DEV_CHANGE for the plain outputs in diff
+		void notify_outputs(uint8_t diff);
 #ifdef TESTING
 		// GTest testing support: the status register the simulated
 		// bus reports, e.g. STAT_WATCHDOG
 		uint8_t sim_stat = 0;
 		// and whether its PIO and level writes fail
 		bool sim_fail = false;
+		// raw answers (8 registers, CRC16) for the next register reads,
+		// taken before the simulated good read above
+		std::vector<std::array<uint8_t, 10>> sim_reads;
+		// the device restarts (status 0x80) with every PIO write
+		bool sim_reset_on_pio = false;
 		FRIEND_TEST(FsTest, Ds2408Watchdog);
+		FRIEND_TEST(FsTest, Ds2408RegReadCrc);
+		FRIEND_TEST(FsTest, Ds2408Stale);
+		FRIEND_TEST(FsTest, RoleSwitchFailure);
+		FRIEND_TEST(FsTest, Ds2408UncachedRead);
+		FRIEND_TEST(FsTest, Ds2408PioVerify);
+		FRIEND_TEST(FsTest, Ds2408PioVerifyAutoSwitch);
+		FRIEND_TEST(FsTest, Ds2408WatchdogNoAlarm);
 #endif
 	public:
 		/* [0] PIO Logic State  = sensed
@@ -106,6 +126,8 @@ class ds2408 : public OwDev, public IDS2408 {
 		using OwDev::OwDev;
 		using OwDev::type;
 		void begin(bool soft=false) override;
+		// a status check, see poll in the device's directory
+		int poll() override;
 
 		ds2408() { type = "ds2408"; };
 		ds2408(std::string rom) : OwDev(std::move(rom)) {
@@ -122,6 +144,8 @@ class ds2408 : public OwDev, public IDS2408 {
 
 		// ds2408 functions
 		uint8_t pio_set(uint8_t pio);
+		// clears the reset flags of the status register on the device
+		int status_clear();
 		uint8_t reg_read(bool latch_reset);
 		uint8_t alarm_read(uint8_t& latch);
 		uint8_t latch_reset();
@@ -153,6 +177,8 @@ class ds2408 : public OwDev, public IDS2408 {
 		int get_threshold() const;
 		// a register read saw the watchdog status, not yet restored
 		bool watchdog_pending() const;
+		// when SwitchHandler::dev_watchdog() last reported one
+		std::chrono::steady_clock::time_point wdt_seen{};
 		/* After a watchdog reset: writes the cached state back - the
 		   outputs as before the reset, the PWM levels, threshold and
 		   brightness. Returns 0, or -EAGAIN if a part failed. */

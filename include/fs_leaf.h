@@ -20,6 +20,12 @@ class FsLeaf {
 		int w_save(const char* buf, size_t size, int idx);
 		int r_save_interval(char* buf, size_t size, bool uncached, int idx);
 		int w_save_interval(const char* buf, size_t size, int idx);
+		int r_presence(char* buf, size_t size, bool uncached, int idx);
+		int w_presence(const char* buf, size_t size, int idx);
+		int r_unplugged(char* buf, size_t size, bool uncached, int idx);
+		int w_unplugged(const char* buf, size_t size, int idx);
+		int unplugged_size(int idx) const;
+		std::string unplugged_text() const;
 		int w_1wire_save(const char* buf, size_t size, int idx);
 		int r_1wire(char* buf, size_t size, bool uncached, int idx);
 		int r_version(char* buf, size_t size, bool uncached, int idx);

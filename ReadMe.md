@@ -86,6 +86,8 @@ leaves either the old or the new file, never a broken one.
   the start (also those the log level does not show) and the last one
   of each with its time
 - `1wire.vcd`: the recent 1-Wire bus traffic as a VCD trace
+- `unplugged`: the devices marked as taken off on purpose, one ROM per
+  line; writable, see [stale devices](#stale-devices)
 
 ```
 uptime 86400
@@ -113,7 +115,78 @@ and brightness. The alarm handling notices it from the status register,
 writes the cached state back (the outputs as they were before the
 reset), counts it in `<rom>/watchdog` and hands plugins an
 `ACT_DEV_WATCHDOG` event, e.g. for a script to apply a current
-brightness (see `plugin/example.js`).
+brightness (see `plugin/example.js`). The same happens when any other
+register read sees the reset, e.g. an uncached read of `<rom>/BYTE`.
+
+A PIO write is read back, so a device restarting from the switching
+itself (e.g. a load pulling its supply) is noticed right away. It is
+restored once; if the restore restarts it again, its outputs are left
+off and a warning tells so. After a restore the reset flags are cleared
+on the device (0xCC to 0x8D); newer owSlave firmware keeps them through
+a latch reset until then.
+
+The device may switch by itself in the meantime (auto switch, its
+timer); it latches the output it switched and the switch input. Such a
+change is no warning: it is taken over as the device's and sent to the
+plugins (`ACT_DEV_CHANGE`), as any change the device made is on a
+register read. Latches other than the ones of the write itself are
+left on the device, so the alarm handling still gets the press. This
+needs the outputs in the device's conditional search mask - a change
+it does not latch is warned about.
+
+An owSlave firmware older than 2024-11 raises no alarm after a
+watchdog reset. For such a device let in10dfs check its status
+regularly, the latches are left alone:
+
+```sh
+echo 60 > /mnt/1wire/29.0800F7FF66772C/poll    # every 60 s
+```
+
+## alarm
+
+`/alarm` lists the devices the alarm handling has flagged, until their
+latches are cleared (write to `<rom>/latch.ALL`) - no bus access.
+`/uncached/alarm` runs a conditional search instead and lists who is in
+alarm on the bus right now, as owfs does; nothing is handled and no
+latches are read or reset by it. Below both, a device is the same as
+in the root, or under `/uncached`:
+
+```sh
+ls /mnt/1wire/uncached/alarm
+cat /mnt/1wire/uncached/alarm/29.0701F8FE6677F4/latch.ALL
+```
+
+## stale devices
+
+A device gone from the bus (unplugged, broken) becomes stale: when a
+search (start up, a listing of `/uncached`) does not find it, or after
+3 accesses in a row without an answer. As in owfs it is no longer
+listed and its files read as missing (`ENOENT`) - in10dfs does not
+make up values such as "all outputs off", the outputs of a device cut
+off from the bus may well still be on. Unlike owfs it is never dropped:
+it stays in `data.json` with its names, pins and roles, marked
+`"stale": true`.
+
+The busses with a stale device are searched every 5 minutes; once it
+is found again, or answers an access, it is back as before. A device
+that lost its power reports that on its first read and gets its
+outputs restored, see above. Plugins get an `ACT_DEV_CHANGE` event with
+`"state": "stale"`, `"unplugged"` or `"running"` on each change.
+
+```sh
+echo 60 > /mnt/1wire/settings/presence     # search every 60 s, 0: never
+```
+
+A device taken off on purpose can be marked unplugged: hidden like a
+stale one (also `"unplugged": true` in `data.json`), but neither polled
+nor searched for. A search that finds it anyway (start up, `/uncached`,
+the search for another stale device on its bus) takes it back.
+
+```sh
+echo 29.0701F8FE6677F4 > /mnt/1wire/status/unplugged      # mark it
+cat /mnt/1wire/status/unplugged                           # list them
+echo -29.0701F8FE6677F4 > /mnt/1wire/status/unplugged     # stale again
+```
 
 ## switches
 

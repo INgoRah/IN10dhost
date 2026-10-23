@@ -6,6 +6,8 @@
 #include <fstream>
 #include <filesystem>
 #include <unistd.h>
+#include <csignal>
+#include <sys/resource.h>
 #include <fuse3/fuse.h>
 
 #include <gtest/gtest.h>
@@ -245,6 +247,52 @@ TEST_F(FsTest, ReadAlarms)
 	EXPECT_TRUE(S_ISDIR(st.st_mode));
 	res = fs_ops.readdir("/alarm", nullptr, filler, 0, nullptr, FUSE_READDIR_PLUS);
 	EXPECT_EQ(res, 0);
+}
+
+// /uncached/alarm: a conditional search, what the bus has in alarm
+// now - not the flags of the alarm handling /alarm lists. Below it
+// the same as under /uncached.
+TEST_F(FsTest, UncachedAlarm) {
+	std::vector<std::string> seen;
+	auto record = [](void* buf, const char* name, const struct stat*,
+					 off_t, enum fuse_fill_dir_flags) {
+		static_cast<std::vector<std::string>*>(buf)->push_back(name);
+		return 0;
+	};
+	const std::string rom = "29.0701F8FE6677F4";
+	char buf[64] = {};
+	struct stat st;
+
+	ow.update_device(1, rom);
+	ow.update_data();
+	ow.begin();
+	OwDev* dev = ow.find(rom);
+	ASSERT_NE(dev, nullptr);
+	dev->name = "hall";
+	dev->alarm = true;
+
+	EXPECT_EQ(fs_ops.getattr("/uncached/alarm", &st, nullptr), 0);
+	EXPECT_TRUE(S_ISDIR(st.st_mode));
+	EXPECT_EQ(fs_ops.getattr("/uncached/alarm/", &st, nullptr), 0);
+	EXPECT_TRUE(S_ISDIR(st.st_mode));
+	fs_ops.readdir("/uncached", &seen, record, 0, nullptr, FUSE_READDIR_PLUS);
+	EXPECT_NE(std::find(seen.begin(), seen.end(), "alarm"), seen.end());
+
+	// the cached flag is listed under /alarm only, the simulated bus
+	// has no device in alarm
+	seen.clear();
+	fs_ops.readdir("/alarm", &seen, record, 0, nullptr, FUSE_READDIR_PLUS);
+	EXPECT_NE(std::find(seen.begin(), seen.end(), rom), seen.end());
+	seen.clear();
+	EXPECT_EQ(fs_ops.readdir("/uncached/alarm", &seen, record, 0, nullptr, FUSE_READDIR_PLUS), 0);
+	EXPECT_EQ(std::find(seen.begin(), seen.end(), rom), seen.end());
+	EXPECT_TRUE(ow.search(false).empty());
+
+	// a device below it is the one under /uncached
+	EXPECT_EQ(fs_ops.getattr(("/uncached/alarm/" + rom + "/name").c_str(), &st, nullptr), 0);
+	EXPECT_GT(fs_ops.read(("/uncached/alarm/" + rom + "/name").c_str(), buf, sizeof(buf), 0, nullptr), 0);
+	EXPECT_STREQ(buf, "hall");
+	dev->alarm = false;
 }
 
 TEST_F(FsTest, DevDirs) {
@@ -1528,11 +1576,14 @@ TEST_F(FsTest, Ds2408Watchdog) {
 	EXPECT_EQ(cfg["last_watchdog"]["rom"], rom);
 	EXPECT_EQ(cfg["last_watchdog"]["type"], "ds2408");
 	EXPECT_EQ(cfg["last_watchdog"]["bus"], 2);
+	EXPECT_EQ(cfg["last_watchdog"]["status"], STAT_WATCHDOG);
 	EXPECT_EQ(cfg["last_watchdog"]["brightness"], 50);
 	EXPECT_EQ(cfg["last_watchdog"]["threshold"], 30);
 
-	// still reported (firmware not clearing it): restored again, with
-	// the outputs the restore wrote
+	// the restore cleared the reset flag on the device; reported again
+	// (a new reset): restored again, with the outputs the restore wrote
+	EXPECT_EQ(dev->sim_stat, 0);
+	dev->sim_stat = STAT_WATCHDOG;
 	EXPECT_TRUE(swHdl.dev_alarm(2, dev->addr));
 	EXPECT_EQ(watchdog(rom), "2");
 	EXPECT_EQ(dev->data[PIO_OUT], 0xF5);
@@ -1550,6 +1601,7 @@ TEST_F(FsTest, Ds2408Watchdog) {
 	dev->reg_read(true);
 	EXPECT_EQ(dev->watchdog_restore(), -EAGAIN);
 	EXPECT_EQ(watchdog(rom), "3");
+	dev->sim_stat = STAT_WATCHDOG;
 	EXPECT_TRUE(swHdl.dev_alarm(2, dev->addr));
 	EXPECT_EQ(watchdog(rom), "4");
 	EXPECT_EQ(plugins.config_of("faulty")["watchdogs"], 3);
@@ -1581,6 +1633,746 @@ TEST_F(FsTest, Ds2408Watchdog) {
 	plugins.remove("faulty");
 	ow.set_log_dir(old_dir);
 	fs::remove_all(dir);
+}
+
+/* The warning a reset leaves in the log: what kind it was, how long
+   since the previous one, and when the other ROM of a dual-ROM chip
+   (here a ds2450 with the same serial) was last selected. */
+TEST_F(FsTest, Ds2408WatchdogLog) {
+	namespace fs = std::filesystem;
+	fs::path dir = fs::temp_directory_path() / std::format("in10dfs-wdtlog-{}", getpid());
+	std::string old_dir = ow.get_log_dir();
+	ow.set_log_dir(dir.string());
+
+	std::string rom = OwDev::canonical_rom("29.1900FDFF6677");
+	std::string twin_rom = OwDev::canonical_rom("20.1900FDFF6677");
+	std::string other_rom = OwDev::canonical_rom("29.1A00FDFF6677");
+	ow.update_device(0, rom);
+	ow.update_device(0, twin_rom);
+	ow.update_device(0, other_rom);
+	ow.update_data();
+	ow.begin();
+	swHdl.begin(&ds);
+	ds2408* dev = (ds2408*)ow.find(rom);
+	OwDev* twin = ow.find(twin_rom);
+	ds2408* other = (ds2408*)ow.find(other_rom);
+	ASSERT_NE(dev, nullptr);
+	ASSERT_NE(twin, nullptr);
+	ASSERT_NE(other, nullptr);
+	LogLevel lvl = logger.get_level();
+	logger.set_level(LogLevel::NONE);
+
+	// same serial, other family: one chip
+	EXPECT_EQ(ow.twins(dev), std::vector<OwDev*>{ twin });
+	EXPECT_EQ(ow.twins(twin), std::vector<OwDev*>{ dev });
+	EXPECT_TRUE(ow.twins(other).empty());
+	EXPECT_EQ(ds.last_select(twin->addr), std::chrono::steady_clock::time_point{});
+
+	// a watchdog, the first one, the twin never selected
+	dev->data[STAT] = STAT_WATCHDOG;
+	swHdl.dev_watchdog(dev);
+	EXPECT_EQ(logger.warnings().last, std::format(
+		"Watchdog on {}! (status 0x88, first since start, {} last selected never)",
+		rom, twin_rom));
+
+	// a power-on reset, after the twin was used
+	ds.select(twin->addr);
+	EXPECT_NE(ds.last_select(twin->addr), std::chrono::steady_clock::time_point{});
+	dev->data[STAT] = 0x80;
+	swHdl.dev_watchdog(dev);
+	std::string last = logger.warnings().last;
+	EXPECT_TRUE(last.starts_with(std::format("Reset on {}! (status 0x80, previous ", rom))) << last;
+	EXPECT_NE(last.find(std::format("s ago, {} last selected ", twin_rom)), std::string::npos) << last;
+	EXPECT_TRUE(last.ends_with(" s ago)")) << last;
+
+	// no twin, nothing about one
+	other->data[STAT] = STAT_WATCHDOG;
+	swHdl.dev_watchdog(other);
+	EXPECT_EQ(logger.warnings().last, std::format(
+		"Watchdog on {}! (status 0x88, first since start)", other_rom));
+
+	logger.set_level(lvl);
+	ow.set_log_dir(old_dir);
+	fs::remove_all(dir);
+}
+
+/* Old firmware raises no alarm after a watchdog reset: one seen by any
+   register read - an uncached read, the ds2408 status poll - is handled
+   by the device polling as the alarm handling would. */
+TEST_F(FsTest, Ds2408WatchdogNoAlarm) {
+	namespace fs = std::filesystem;
+	char buf[16] = {};
+	fs::path dir = fs::temp_directory_path() / std::format("in10dfs-wdtpoll-{}", getpid());
+	std::string old_dir = ow.get_log_dir();
+	ow.set_log_dir(dir.string());
+
+	std::string rom = OwDev::canonical_rom("29.1B00FDFF6677");
+	auto watchdog = [&]() {
+		std::memset(buf, 0, sizeof(buf));
+		fs_ops.read(("/" + rom + "/watchdog").c_str(), buf, sizeof(buf), 0, nullptr);
+		return std::string(buf);
+	};
+	ow.update_device(1, rom);
+	ow.update_data();
+	ow.begin();
+	swHdl.begin(&ds);
+	ds2408* dev = (ds2408*)ow.find(rom);
+	ASSERT_NE(dev, nullptr);
+	LogLevel lvl = logger.get_level();
+	logger.set_level(LogLevel::NONE);
+	EXPECT_EQ(dev->pio_set(0xFE), 0xAA);
+
+	// nothing pending: the device polling leaves it alone
+	ow.dev_poll();
+	EXPECT_EQ(watchdog(), "0");
+
+	// an uncached read sees it: reported and restored with the next
+	// device polling, not only with an alarm
+	dev->sim_stat = STAT_WATCHDOG;
+	std::memset(buf, 0, sizeof(buf));
+	fs_ops.read(("/uncached/" + rom + "/BYTE").c_str(), buf, sizeof(buf), 0, nullptr);
+	EXPECT_TRUE(dev->watchdog_pending());
+	ow.dev_poll();
+	EXPECT_FALSE(dev->watchdog_pending());
+	EXPECT_EQ(watchdog(), "1");
+	EXPECT_EQ(dev->data[PIO_OUT], 0xFE);
+	EXPECT_TRUE(logger.warnings().last.starts_with("Watchdog on " + rom + "!"))
+		<< logger.warnings().last;
+
+	// the status poll of a ds2408 finds it by itself
+	dev->sim_stat = 0;
+	dev->reg_read(false);
+	dev->sim_stat = STAT_WATCHDOG;
+	EXPECT_EQ(fs_ops.write(("/" + rom + "/poll").c_str(), "1", 1, 0, nullptr), 1);
+	ow.dev_poll();
+	EXPECT_EQ(watchdog(), "2");
+	EXPECT_FALSE(dev->watchdog_pending());
+
+	dev->sim_stat = 0;
+	fs_ops.write(("/" + rom + "/poll").c_str(), "0", 1, 0, nullptr);
+	logger.set_level(lvl);
+	ow.set_log_dir(old_dir);
+	fs::remove_all(dir);
+}
+
+/* An uncached PIO, sensed or latch read goes to the device, as BYTE
+   does: the device may have switched by itself (its own timer). */
+TEST_F(FsTest, Ds2408UncachedRead) {
+	char buf[16] = {};
+	std::string rom = OwDev::canonical_rom("29.1C00FDFF6677");
+	auto rd = [&](const std::string& path) {
+		std::memset(buf, 0, sizeof(buf));
+		fs_ops.read(path.c_str(), buf, sizeof(buf), 0, nullptr);
+		return std::string(buf);
+	};
+	// what the device answers to F0 88 00: 8 registers and their CRC16
+	auto answer = [](uint8_t ls, uint8_t out, uint8_t latch) {
+		const uint8_t cmd[3] = { 0xF0, 0x88, 0x00 };
+		std::array<uint8_t, 10> a = { ls, out, latch, 0xff, 0x00, 0x00, 0xff, 0xff, 0, 0 };
+		uint16_t crc = ~DS2482::crc16(a.data(), 8, DS2482::crc16(cmd, 3, 0));
+		a[8] = crc & 0xff;
+		a[9] = crc >> 8;
+		return a;
+	};
+	ow.update_device(1, rom);
+	ow.update_data();
+	ow.begin();
+	ds2408* dev = (ds2408*)ow.find(rom);
+	ASSERT_NE(dev, nullptr);
+	LogLevel lvl = logger.get_level();
+	logger.set_level(LogLevel::NONE);
+
+	// PIO.3 on (active low)
+	EXPECT_EQ(dev->pio_set(0xF7), 0xAA);
+	EXPECT_EQ(rd("/" + rom + "/PIO.3"), "1");
+
+	// the device switched it off by itself: only an uncached read sees it
+	dev->sim_reads = { answer(0xFF, 0xFF, 0x00) };
+	EXPECT_EQ(rd("/" + rom + "/PIO.3"), "1");
+	EXPECT_EQ(dev->sim_reads.size(), 1u);
+	EXPECT_EQ(rd("/uncached/" + rom + "/PIO.3"), "0");
+	EXPECT_TRUE(dev->sim_reads.empty());
+	EXPECT_EQ(rd("/" + rom + "/PIO.3"), "0");
+
+	// sensed: the logic state as read now
+	dev->sim_reads = { answer(0xF7, 0xFF, 0x00) };
+	EXPECT_EQ(rd("/uncached/" + rom + "/sensed.3"), "0");
+	EXPECT_TRUE(dev->sim_reads.empty());
+
+	// latches on the device not yet handled by the alarm: shown, but
+	// left for it - neither reset on the device nor collected here
+	dev->sim_reads = { answer(0xFF, 0xFF, 0x08) };
+	EXPECT_EQ(rd("/uncached/" + rom + "/latch.3"), "1");
+	EXPECT_TRUE(dev->sim_reads.empty());
+	EXPECT_EQ(dev->latched, 0);
+	EXPECT_EQ(rd("/" + rom + "/latch.3"), "0");
+
+	logger.set_level(lvl);
+}
+
+/* A PIO write is read back: what the device really has, and a device
+   restarting from the switching (a load pulling its supply) - which is
+   restored once, but not again if the restore restarts it as well. */
+TEST_F(FsTest, Ds2408PioVerify) {
+	namespace fs = std::filesystem;
+	fs::path dir = fs::temp_directory_path() / std::format("in10dfs-pioverify-{}", getpid());
+	std::string old_dir = ow.get_log_dir();
+	ow.set_log_dir(dir.string());
+	std::string rom = OwDev::canonical_rom("29.1D00FDFF6677");
+	// what the device answers to F0 88 00: 8 registers and their CRC16
+	auto answer = [](uint8_t out, uint8_t stat) {
+		const uint8_t cmd[3] = { 0xF0, 0x88, 0x00 };
+		std::array<uint8_t, 10> a = { out, out, 0x00, 0xff, 0x00, stat, 0xff, 0xff, 0, 0 };
+		uint16_t crc = ~DS2482::crc16(a.data(), 8, DS2482::crc16(cmd, 3, 0));
+		a[8] = crc & 0xff;
+		a[9] = crc >> 8;
+		return a;
+	};
+	std::array<uint8_t, 10> none;
+	none.fill(0xff);
+	ow.update_device(0, rom);
+	ow.update_data();
+	ow.begin();
+	swHdl.begin(&ds);
+	ds2408* dev = (ds2408*)ow.find(rom);
+	ASSERT_NE(dev, nullptr);
+	LogLevel lvl = logger.get_level();
+	logger.set_level(LogLevel::NONE);
+	auto warns = [&]() { return logger.warnings().count; };
+
+	// kept: no warning
+	uint64_t w = warns();
+	EXPECT_EQ(dev->pio_set(0xF7), 0xAA);
+	EXPECT_EQ(dev->data[PIO_OUT], 0xF7);
+	EXPECT_EQ(warns(), w);
+
+	// not kept by the device
+	dev->sim_reads = { answer(0xFF, 0x00) };
+	EXPECT_EQ(dev->pio_set(0xF3), 0xAA);
+	EXPECT_TRUE(dev->sim_reads.empty());
+	EXPECT_EQ(dev->data[PIO_OUT], 0xFF);
+	EXPECT_EQ(logger.warnings().last, rom + " PIO 0xf3 written, but the device has 0xff");
+
+	// no answer while it starts up: read once more after it
+	dev->sim_reads = { none, answer(0xF3, 0x00) };
+	w = warns();
+	EXPECT_EQ(dev->pio_set(0xF3), 0xAA);
+	EXPECT_TRUE(dev->sim_reads.empty());
+	EXPECT_EQ(dev->data[PIO_OUT], 0xF3);
+	// the first one, not retried by reg_read()
+	EXPECT_EQ(warns(), w + 1);
+	dev->sim_reads = { none, none };
+	EXPECT_EQ(dev->pio_set(0xF3), 0xAA);
+	EXPECT_EQ(logger.warnings().last, rom + " PIO 0xf3 written, but no read back");
+
+	// restarted by the write: seen by the read back, restored with the
+	// next device polling - which restarts it again: given up
+	dev->sim_reset_on_pio = true;
+	EXPECT_EQ(dev->pio_set(0xF7), 0xAA);
+	EXPECT_TRUE(dev->watchdog_pending());
+	ow.dev_poll();
+	EXPECT_FALSE(dev->watchdog_pending());
+	EXPECT_EQ(dev->wdt_count, 1u);
+	EXPECT_EQ(logger.warnings().last, rom + " reset again by the restore, outputs left as they are");
+	// and the flag is cleared on the device, not reported again
+	EXPECT_EQ(dev->sim_stat, 0);
+	ow.dev_poll();
+	EXPECT_EQ(dev->wdt_count, 1u);
+
+	dev->sim_reset_on_pio = false;
+	logger.set_level(lvl);
+	ow.set_log_dir(old_dir);
+	fs::remove_all(dir);
+}
+
+/* A register read failing its CRC, as a slave slipping a time slot
+   makes it up: read again, never taken as is, in particular not for a
+   watchdog. */
+/* The device switching by itself right after a PIO write (auto switch:
+   a press on PIO.0 toggles PIO.2) latches the switch and the output it
+   switched: taken as the device's, no warning, the change goes to the
+   plugins, and the latches stay on the device for the alarm handling. */
+TEST_F(FsTest, Ds2408PioVerifyAutoSwitch) {
+	std::string rom = OwDev::canonical_rom("29.1E00FDFF6677");
+	auto answer = [](uint8_t out, uint8_t latch) {
+		const uint8_t cmd[3] = { 0xF0, 0x88, 0x00 };
+		std::array<uint8_t, 10> a = { out, out, latch, 0xff, 0x00, 0x00, 0xff, 0xff, 0, 0 };
+		uint16_t crc = ~DS2482::crc16(a.data(), 8, DS2482::crc16(cmd, 3, 0));
+		a[8] = crc & 0xff;
+		a[9] = crc >> 8;
+		return a;
+	};
+	ow.update_device(0, rom);
+	ow.update_data();
+	ow.begin();
+	ds2408* dev = (ds2408*)ow.find(rom);
+	ASSERT_NE(dev, nullptr);
+	dev->cfg[CFG_PIN_ID + 2] = CFG_OUT_LOW;
+	dev->cfg[CFG_PIN_ID + 3] = CFG_OUT_LOW;
+	dev->data[PIO_OUT] = 0xff;
+	dev->out_known = true;
+	LogLevel lvl = logger.get_level();
+	logger.set_level(LogLevel::NONE);
+	auto warns = [&]() { return logger.warnings().count; };
+	plugins.remove("faulty");
+	plugins.load(json{ { "faulty", { { "mode", "record" } } } });
+
+	// PIO.3 on; meanwhile the press on PIO.0 switched PIO.2 on
+	uint64_t w = warns();
+	dev->sim_reads = { answer(0xF3, 0x0D) };
+	EXPECT_EQ(dev->pio_set(0xF7), 0xAA);
+	EXPECT_TRUE(dev->sim_reads.empty());
+	EXPECT_EQ(warns(), w);
+	EXPECT_EQ(dev->data[PIO_OUT], 0xF3);
+	EXPECT_TRUE(dev->pin_is_on(2));
+	// the write, then the device's change
+	json cfg = plugins.config_of("faulty");
+	EXPECT_EQ(cfg["changes"], 2);
+	ASSERT_EQ(cfg["last"]["changed"].size(), 1u);
+	EXPECT_EQ(cfg["last"]["changed"][0]["pin"], 2);
+	EXPECT_EQ(cfg["last"]["changed"][0]["on"], true);
+	// not reset: the alarm handling gets the press
+	EXPECT_EQ(dev->data[PIO_LATCH], 0x0D);
+
+	// only the latch of the write itself: reset
+	dev->sim_reads = { answer(0xFB, 0x08) };
+	EXPECT_EQ(dev->pio_set(0xFB), 0xAA);
+	EXPECT_EQ(dev->data[PIO_LATCH], 0x00);
+	EXPECT_EQ(warns(), w);
+
+	// a change the device does not latch is still a warning
+	dev->sim_reads = { answer(0xFF, 0x00) };
+	EXPECT_EQ(dev->pio_set(0xF3), 0xAA);
+	EXPECT_EQ(warns(), w + 1);
+
+	plugins.remove("faulty");
+	logger.set_level(lvl);
+}
+
+TEST_F(FsTest, Ds2408RegReadCrc) {
+	char buf[16] = {};
+	std::string rom = OwDev::canonical_rom("29.1800FDFF6677");
+	auto crc_errors = [&]() {
+		std::memset(buf, 0, sizeof(buf));
+		fs_ops.read(("/" + rom + "/crc_errors").c_str(), buf, sizeof(buf), 0, nullptr);
+		return std::string(buf);
+	};
+	ow.update_device(2, rom);
+	ow.update_data();
+	ow.begin();
+	swHdl.begin(&ds);
+	ds2408* dev = (ds2408*)ow.find(rom);
+	ASSERT_NE(dev, nullptr);
+	LogLevel lvl = logger.get_level();
+	logger.set_level(LogLevel::NONE);
+
+	// as read from 29.0402FBFD66778F: one bit lost at the activity
+	// latch shifts all after it, the status claims a reset (0x81)
+	const std::array<uint8_t, 10> slipped =
+		{ 0xfd, 0xfd, 0x85, 0x7f, 0x00, 0x81, 0x82, 0x7f, 0x37, 0xc1 };
+	// the read without the slip
+	const std::array<uint8_t, 10> good =
+		{ 0xfd, 0xfd, 0x0a, 0xff, 0x00, 0x02, 0x05, 0xff, 0x6e, 0x82 };
+	// no answer at all
+	std::array<uint8_t, 10> none;
+	none.fill(0xff);
+	EXPECT_EQ(crc_errors(), "0");
+
+	// read again, the good one is taken
+	dev->sim_reads = { slipped, good };
+	EXPECT_EQ(dev->reg_read(false), 0xAA);
+	EXPECT_TRUE(dev->sim_reads.empty());
+	EXPECT_EQ(crc_errors(), "1");
+	EXPECT_EQ(dev->last_latch, 0x0a);
+	EXPECT_EQ(dev->data[STAT], 0x02);
+	EXPECT_EQ(dev->data[PIO_TIME], 0x05);
+	EXPECT_FALSE(dev->watchdog_pending());
+	// marked in the trace, with the status it claimed (bus 2: d)
+	std::vector<char> vcd(DS2482::log_size());
+	int n = ds.log_dump(vcd.data(), vcd.size());
+	ASSERT_GT(n, 0);
+	EXPECT_NE(std::string(vcd.data(), n).find("b01000101 a\nb10000001 d\n"),
+		std::string::npos);
+
+	// every try (REG_RETRY - 1) fails: nothing taken, the latches are
+	// not reset on the device, no watchdog
+	uint8_t before[10];
+	std::memcpy(before, dev->data, sizeof(before));
+	dev->sim_reads.assign(19, slipped);
+	EXPECT_EQ(dev->reg_read(true), 0);
+	EXPECT_TRUE(dev->sim_reads.empty());
+	EXPECT_EQ(crc_errors(), "20");
+	EXPECT_EQ(std::memcmp(dev->data, before, sizeof(before)), 0);
+	EXPECT_FALSE(dev->watchdog_pending());
+
+	// the same through the alarm handling: no watchdog, no latches
+	dev->sim_reads.assign(19, slipped);
+	EXPECT_TRUE(swHdl.dev_alarm(2, dev->addr));
+	EXPECT_EQ(crc_errors(), "39");
+	EXPECT_EQ(dev->wdt_count, 0u);
+	EXPECT_EQ(dev->latched, 0);
+
+	// no answer (status 0xff) is not a CRC error and fails at once:
+	// not retried, nothing taken
+	dev->sim_reads = { none, good };
+	EXPECT_EQ(dev->reg_read(false), 0);
+	EXPECT_EQ(dev->sim_reads.size(), 1u);
+	EXPECT_EQ(crc_errors(), "39");
+	EXPECT_EQ(dev->data[STAT], 0x02);
+	dev->sim_reads.clear();
+
+	// the simulated bus answers with a good CRC by itself
+	EXPECT_EQ(dev->reg_read(false), 0xAA);
+	EXPECT_EQ(crc_errors(), "39");
+
+	logger.set_level(lvl);
+}
+
+// defined in src/ow_devices.cpp, what load() uses per device
+extern std::unique_ptr<OwDev> make_device_from_json(const json& j);
+
+// Gone from the bus: stale after STALE_FAILS accesses without an
+// answer or when a search misses it. Kept and saved with its config,
+// but left out of the directories and its files missing, as in owfs.
+TEST_F(FsTest, Ds2408Stale) {
+	char buf[64] = {};
+	struct stat st;
+	std::vector<std::string> seen;
+	std::string rom = OwDev::canonical_rom("29.1900FDFF6677");
+	auto list = [&](const char* path) {
+		seen.clear();
+		fs_ops.readdir(path, &seen, [](void* b, const char* name,
+				const struct stat*, off_t, enum fuse_fill_dir_flags) {
+			static_cast<std::vector<std::string>*>(b)->push_back(name);
+			return 0;
+		}, 0, nullptr, (enum fuse_readdir_flags)0);
+		return std::find(seen.begin(), seen.end(), rom) != seen.end();
+	};
+	ow.update_device(2, rom);
+	ow.update_data();
+	ow.begin();
+	ds2408* dev = (ds2408*)ow.find(rom);
+	ASSERT_NE(dev, nullptr);
+	dev->name = "kitchen";
+	LogLevel lvl = logger.get_level();
+	logger.set_level(LogLevel::NONE);
+	plugins.remove("faulty");
+	plugins.load(json{ { "faulty", { { "mode", "record" } } } });
+	std::array<uint8_t, 10> none;
+	none.fill(0xff);
+
+	EXPECT_TRUE(list("/"));
+	EXPECT_TRUE(list("/bus.2"));
+	// two reads without an answer are not enough, a good one in
+	// between starts the count again
+	dev->sim_reads = { none, none };
+	EXPECT_EQ(dev->reg_read(false), 0);
+	EXPECT_EQ(dev->reg_read(false), 0);
+	EXPECT_EQ(dev->reg_read(false), 0xAA);
+	dev->sim_reads = { none, none };
+	EXPECT_EQ(dev->reg_read(false), 0);
+	EXPECT_EQ(dev->reg_read(false), 0);
+	EXPECT_FALSE(dev->stale());
+	EXPECT_EQ(plugins.config_of("faulty")["changes"], 0);
+
+	// the third one in a row
+	dev->sim_reads = { none };
+	EXPECT_EQ(dev->reg_read(false), 0);
+	EXPECT_TRUE(dev->stale());
+	json cfg = plugins.config_of("faulty");
+	EXPECT_EQ(cfg["changes"], 1);
+	EXPECT_EQ(cfg["last"]["state"], "stale");
+	EXPECT_EQ(cfg["last"]["rom"], rom);
+
+	// not listed and missing, but still known with its config
+	EXPECT_FALSE(list("/"));
+	EXPECT_FALSE(list("/bus.2"));
+	EXPECT_EQ(fs_ops.getattr(("/" + rom).c_str(), &st, nullptr), -ENOENT);
+	EXPECT_EQ(fs_ops.getattr(("/bus.2/" + rom + "/PIO.0").c_str(), &st, nullptr), -ENOENT);
+	EXPECT_EQ(fs_ops.read(("/" + rom + "/PIO.0").c_str(), buf, sizeof(buf), 0, nullptr), -ENOENT);
+	EXPECT_EQ(fs_ops.write(("/" + rom + "/PIO.0").c_str(), "1", 1, 0, nullptr), -ENOENT);
+	EXPECT_EQ(fs_ops.readdir(("/" + rom).c_str(), buf, filler, 0, nullptr,
+		(enum fuse_readdir_flags)0), -ENOENT);
+	EXPECT_EQ(ow.find(rom), dev);
+	auto pins = ow.pins();
+	EXPECT_TRUE(std::none_of(pins.begin(), pins.end(),
+		[&](const PinInfo& p) { return p.rom == rom; }));
+
+	// saved as stale, and loaded so
+	json j = dev->to_json();
+	EXPECT_EQ(j.value("stale", false), true);
+	EXPECT_EQ(j.value("name", ""), "kitchen");
+	auto restored = make_device_from_json(j);
+	restored->init();
+	EXPECT_TRUE(restored->stale());
+	EXPECT_EQ(restored->rom_code, dev->rom_code);
+
+	// an answer takes it back
+	EXPECT_EQ(dev->reg_read(false), 0xAA);
+	EXPECT_FALSE(dev->stale());
+	EXPECT_EQ(plugins.config_of("faulty")["last"]["state"], "running");
+	EXPECT_TRUE(list("/"));
+	EXPECT_EQ(fs_ops.getattr(("/" + rom).c_str(), &st, nullptr), 0);
+	EXPECT_EQ(dev->to_json().value("stale", true), false);
+
+	// a search that misses it, and one that finds it again
+	ow.presence(2, {});
+	EXPECT_TRUE(dev->stale());
+	EXPECT_FALSE(list("/bus.2"));
+	ow.presence(2, { dev->rom_code });
+	EXPECT_FALSE(dev->stale());
+	EXPECT_TRUE(list("/bus.2"));
+
+	// so does a failing PIO write, three in a row
+	dev->sim_fail = true;
+	for (int i = 0; i < 3; i++)
+		dev->pio_set(0x0f);
+	EXPECT_TRUE(dev->stale());
+	dev->sim_fail = false;
+	EXPECT_EQ(dev->pio_set(0x0f), 0xAA);
+	EXPECT_FALSE(dev->stale());
+
+	// unplugged on purpose: hidden like a stale one, listed under
+	// status/unplugged, saved so
+	int len = fs_ops.write("/status/unplugged", (rom + "\n").c_str(), rom.size() + 1, 0, nullptr);
+	EXPECT_EQ(len, (int)rom.size() + 1);
+	EXPECT_TRUE(dev->unplugged());
+	EXPECT_TRUE(dev->stale());
+	EXPECT_EQ(plugins.config_of("faulty")["last"]["state"], "unplugged");
+	EXPECT_FALSE(list("/"));
+	EXPECT_EQ(fs_ops.getattr(("/" + rom).c_str(), &st, nullptr), -ENOENT);
+	std::memset(buf, 0, sizeof(buf));
+	EXPECT_GT(fs_ops.read("/status/unplugged", buf, sizeof(buf), 0, nullptr), 0);
+	EXPECT_EQ(std::string(buf), rom + "\n");
+	j = dev->to_json();
+	EXPECT_EQ(j.value("unplugged", false), true);
+	EXPECT_EQ(j.value("stale", false), true);
+	restored = make_device_from_json(j);
+	restored->init();
+	EXPECT_TRUE(restored->unplugged());
+	// failing accesses and a search missing it leave it unplugged, no
+	// presence search for it
+	dev->access_result(false);
+	ow.presence(2, {});
+	EXPECT_TRUE(dev->unplugged());
+	// unknown or malformed ROMs
+	EXPECT_EQ(fs_ops.write("/status/unplugged", "29.0000000000", 13, 0, nullptr), -EINVAL);
+	EXPECT_EQ(fs_ops.write("/status/unplugged", "29.AB00FDFF6677", 15, 0, nullptr), -ENOENT);
+	// removed from the list it is stale again
+	std::string off = "-" + rom;
+	EXPECT_EQ(fs_ops.write("/status/unplugged", off.c_str(), off.size(), 0, nullptr), (int)off.size());
+	EXPECT_FALSE(dev->unplugged());
+	EXPECT_TRUE(dev->stale());
+	EXPECT_EQ(fs_ops.read("/status/unplugged", buf, sizeof(buf), 0, nullptr), 0);
+	// plugged in again and found by a search
+	EXPECT_EQ(fs_ops.write("/status/unplugged", rom.c_str(), rom.size(), 0, nullptr), (int)rom.size());
+	ow.presence(2, { dev->rom_code });
+	EXPECT_FALSE(dev->stale());
+	EXPECT_EQ(plugins.config_of("faulty")["last"]["state"], "running");
+
+	plugins.remove("faulty");
+	logger.set_level(lvl);
+}
+
+// A device family in10dfs has no class for is left out, not added
+// half made
+TEST_F(FsTest, UnknownFamilyIgnored) {
+	size_t before = cache.devices.size();
+	ow.update_device(1, "10.0501FAFE6677");
+	EXPECT_EQ(cache.devices.size(), before);
+	EXPECT_EQ(ow.find(OwDev::canonical_rom("10.0501FAFE6677")), nullptr);
+}
+
+// A hand edited config: a bus list shorter than bus_count, the same
+// ROM twice, a bus that does not exist - loads without overrunning
+TEST_F(FsTest, LoadBrokenConfig) {
+	namespace fsys = std::filesystem;
+	std::string old_path = ow.get_data_path();
+	fsys::path file = fsys::temp_directory_path() / "in10dfs_broken_test.json";
+	json dev = { {"type", "ds2408"}, {"bus", 1}, {"rom", "29.0701F8FE6677F4"},
+		{"id", 7}, {"name", "a"} };
+	json other = dev;
+	other["bus"] = 7;
+	other["rom"] = "29.0801F7FE6677F5";
+	json dup = dev;
+	dup["name"] = "b";
+	{
+		std::ofstream(file) << json{ {"version", 1}, {"bus_count", MAX_BUS},
+			{"busses", json::array()}, {"devices", { dev, dup, other }} }.dump();
+	}
+	LogLevel lvl = logger.get_level();
+	logger.set_level(LogLevel::NONE);
+	EXPECT_NO_THROW(ow.load(file.string()));
+	logger.set_level(lvl);
+
+	// the bus lists made up, the second one dropped
+	EXPECT_EQ(cache.busses.size(), (size_t)MAX_BUS);
+	EXPECT_EQ(cache.devices.size(), 2u);
+	OwDev* d = ow.find(std::string("29.0701F8FE6677F4"));
+	ASSERT_NE(d, nullptr);
+	EXPECT_EQ(d->name, "a");
+	ASSERT_EQ(ow.list_devices(1).size(), 1u);
+	EXPECT_EQ(ow.list_devices(1)[0], d);
+	// no such bus: kept and found, but listed nowhere
+	OwDev* o = ow.find(OwDev::canonical_rom("29.0801F7FE6677F5"));
+	ASSERT_NE(o, nullptr);
+	for (int bus = 0; bus < MAX_BUS; bus++)
+		for (OwDev* l : ow.list_devices(bus))
+			EXPECT_NE(l, o);
+
+	fsys::remove(file);
+	ow.set_data_path(old_path);
+}
+
+// Without a config file there is nothing to save to
+TEST_F(FsTest, SaveWithoutPath) {
+	std::string old_path = ow.get_data_path();
+	LogLevel lvl = logger.get_level();
+	logger.set_level(LogLevel::NONE);
+	ow.set_data_path("");
+	EXPECT_EQ(ow.save(), -ENOENT);
+	EXPECT_EQ(fs_ops.write("/settings/save", "1", 1, 0, nullptr), -ENOENT);
+	logger.set_level(lvl);
+	ow.set_data_path(old_path);
+}
+
+// The disk full while writing: the old file stays, no temporary one.
+// A file size limit makes write() fail (EFBIG) as a full disk would.
+TEST_F(FsTest, SaveWriteFails) {
+	namespace fsys = std::filesystem;
+	fsys::path file = fsys::temp_directory_path() / "in10dfs_full_test.json";
+	fsys::path tmp = file.string() + ".tmp";
+	{
+		std::ofstream(file) << "old";
+	}
+	struct rlimit old_lim;
+	ASSERT_EQ(getrlimit(RLIMIT_FSIZE, &old_lim), 0);
+	struct rlimit lim = old_lim;
+	lim.rlim_cur = 16;
+	auto old_sig = signal(SIGXFSZ, SIG_IGN);
+	LogLevel lvl = logger.get_level();
+	logger.set_level(LogLevel::NONE);
+	ASSERT_EQ(setrlimit(RLIMIT_FSIZE, &lim), 0);
+	int res = ow.save(file.string());
+	setrlimit(RLIMIT_FSIZE, &old_lim);
+	signal(SIGXFSZ, old_sig);
+	logger.set_level(lvl);
+
+	EXPECT_EQ(res, -EFBIG);
+	EXPECT_FALSE(fsys::exists(tmp));
+	std::ifstream in(file);
+	std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+	EXPECT_EQ(content, "old");
+	fsys::remove(file);
+}
+
+// Switching by role reports the outputs it could not switch
+TEST_F(FsTest, RoleSwitchFailure) {
+	ow.update_device(1, "29.0701F8FE6677F4");
+	ow.update_data();
+	ow.begin();
+	ds2408* dev = (ds2408*)ow.find(0x290701F8FE6677F4);
+	ASSERT_NE(dev, nullptr);
+	for (int i = 0; i < 8; i++)
+		dev->pins[i].role = PinRole::none;
+	dev->cfg[CFG_PIN_ID + 2] = CFG_OUT_LOW;
+	dev->cfg[CFG_PIN_ID + 3] = CFG_OUT_LOW;
+	dev->pins[2].role = PinRole::light;
+	dev->pins[3].role = PinRole::light;
+	dev->data[PIO_OUT] = 0xff;
+	LogLevel lvl = logger.get_level();
+	logger.set_level(LogLevel::NONE);
+
+	dev->sim_fail = true;
+	EXPECT_EQ(ow.role_switch(PinRole::light, true), 2);
+	dev->sim_fail = false;
+	EXPECT_EQ(ow.role_switch(PinRole::light, true), 0);
+	EXPECT_TRUE(dev->pin_is_on(2));
+	EXPECT_TRUE(dev->pin_is_on(3));
+
+	dev->pins[2].role = PinRole::none;
+	dev->pins[3].role = PinRole::none;
+	logger.set_level(lvl);
+}
+
+// poll_time(): a device due before the next second; an unplugged one
+// is neither waited for nor polled
+TEST_F(FsTest, PollTimeDeviceDue) {
+	ow.update_device(0, "20.0200F8FE66771E");
+	ow.update_data();
+	ow.begin();
+	OwDev* dev = ow.find(std::string("20.0200F8FE66771E"));
+	ASSERT_NE(dev, nullptr);
+	// the second tick just ran, the device was never polled
+	ow.dev_poll();
+	ASSERT_EQ(fs_ops.write("/20.0200F8FE66771E/poll", "5", 1, 0, nullptr), 1);
+	EXPECT_EQ(ow.poll_time(), 0);
+
+	LogLevel lvl = logger.get_level();
+	logger.set_level(LogLevel::NONE);
+	dev->set_unplugged(true);
+	EXPECT_GT(ow.poll_time(), 0);
+	// not polled: no device counted, its timer not started
+	EXPECT_LE(ow.dev_poll(), 0);
+	EXPECT_EQ(dev->poll_next(), 0);
+	dev->set_unplugged(false);
+	dev->set_stale(false);
+	logger.set_level(lvl);
+	fs_ops.write("/20.0200F8FE66771E/poll", "0", 1, 0, nullptr);
+}
+
+// presence_check() only searches the busses with a stale device; the
+// simulated bus cannot be searched, so nobody's state changes
+TEST_F(FsTest, PresenceCheckStaleBusOnly) {
+	ow.update_device(1, "29.0701F8FE6677F4");
+	ow.update_data();
+	OwDev* dev = ow.find(std::string("29.0701F8FE6677F4"));
+	ASSERT_NE(dev, nullptr);
+	LogLevel lvl = logger.get_level();
+	logger.set_level(LogLevel::NONE);
+	ow.presence_check();
+	EXPECT_FALSE(dev->stale());
+	dev->set_stale(true);
+	ow.presence_check();
+	EXPECT_TRUE(dev->stale());
+	dev->set_stale(false);
+
+	// the I2C Arduino is never found by a 1-Wire search, nor missing
+	ow.update_device(0, "AD.0900F8FF6677E2");
+	ow.update_data();
+	OwDev* ard = ow.find(std::string("AD.0900F8FF6677E2"));
+	ASSERT_NE(ard, nullptr);
+	ow.presence(0, {});
+	EXPECT_FALSE(ard->stale());
+	logger.set_level(lvl);
+}
+
+// defined in src/ow_devices.cpp, what save() and load() use
+extern void to_json(json& j, const Config& c);
+extern void from_json(const json& j, Config& c);
+
+// settings/presence: seconds between the searches for stale devices,
+// 0 none, stored in the config
+TEST_F(FsTest, PresenceSetting) {
+	char buf[16] = {};
+	int old = ow.get_presence();
+
+	EXPECT_EQ(Config{}.presence, 300);
+	EXPECT_EQ(fs_ops.write("/settings/presence", "0\n", 2, 0, nullptr), 2);
+	EXPECT_EQ(ow.get_presence(), 0);
+	EXPECT_EQ(fs_ops.write("/settings/presence", "600", 3, 0, nullptr), 3);
+	EXPECT_GT(fs_ops.read("/settings/presence", buf, sizeof(buf), 0, nullptr), 0);
+	EXPECT_STREQ(buf, "600");
+	for (const char* bad : { "-1", "x", "86401", "5s" })
+		EXPECT_EQ(fs_ops.write("/settings/presence", bad, strlen(bad), 0, nullptr), -EINVAL) << bad;
+	EXPECT_EQ(ow.get_presence(), 600);
+	json j;
+	to_json(j, cache);
+	EXPECT_EQ(j["presence"], 600);
+	Config c;
+	from_json(j, c);
+	EXPECT_EQ(c.presence, 600);
+	ow.set_presence(old);
 }
 
 TEST_F(FsTest, Ds2408WriteCfg) {
@@ -1927,9 +2719,6 @@ TEST_F(FsTest, RoleDirs) {
 		fs_ops.write((pin + "/name").c_str(), "", 0, 0, nullptr);
 	}
 }
-
-// defined in src/ow_devices.cpp, what load() uses per device
-extern std::unique_ptr<OwDev> make_device_from_json(const json& j);
 
 // "poll" is common to every device type and has to survive a save and
 // reload, whatever the type adds to or overrides in to_json()

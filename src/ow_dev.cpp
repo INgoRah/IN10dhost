@@ -12,6 +12,9 @@
 
 extern Plugins plugins;
 
+/* accesses in a row without an answer before a device counts as gone */
+#define STALE_FAILS 3
+
 static struct filetype generic[] = {
 	{ "id", 3 },
 	{ "status", 1 },
@@ -79,6 +82,8 @@ json OwDev::to_json() const
 		{"id", id},
 		{"name", name},
 		{"poll", poll_interval},
+		{"stale", state == DS_STALE || state == DS_UNPLUGGED},
+		{"unplugged", state == DS_UNPLUGGED},
 	};
 }
 
@@ -92,6 +97,11 @@ void OwDev::from_json(const json& j)
 	j.at("type").get_to(type);
 	if (j.contains("poll"))
 		j.at("poll").get_to(poll_interval);
+	// stays so until it is found again, see init() and begin()
+	if (j.value("unplugged", false))
+		state = DS_UNPLUGGED;
+	else if (j.value("stale", false))
+		state = DS_STALE;
 }
 
 // Dow-CRC using polynomial X^8 + X^5 + X^4 + X^0
@@ -158,13 +168,15 @@ void OwDev::update()
 // rescan revisiting an already-known device) only take effect once -
 // and, critically, never downgrade an already-DS_RUNNING device's state
 // back to DS_INIT, which would defeat begin()'s own once-only guard.
+// A device loaded as stale or unplugged stays so.
 void OwDev::init()
 {
 	auto lk = lock();
 	if (state == DS_RUNNING)
 		return;
 	update();
-	state = DS_INIT;
+	if (state != DS_STALE && state != DS_UNPLUGGED)
+		state = DS_INIT;
 }
 
 void OwDev::begin(DS2482 *ds, bool soft)
@@ -173,11 +185,67 @@ void OwDev::begin(DS2482 *ds, bool soft)
 
 	// coverity[missing_lock] - set once at bring-up, under the device lock
 	this->ds = ds;
-	if (state == DS_RUNNING || state == DS_STALE)
+	// a stale one is not touched, the next access that gets an answer
+	// takes it back to running, see access_result()
+	if (state == DS_RUNNING || state == DS_STALE || state == DS_UNPLUGGED)
 		return;
 	begin(soft);
-	state = DS_RUNNING;
+	if (state != DS_STALE)
+		state = DS_RUNNING;
 };
+
+void OwDev::set_state(int to)
+{
+	auto lk = lock();
+	if (state == to)
+		return;
+	fails = 0;
+	state = to;
+	if (to == DS_STALE)
+		logger.warn(rom + " is gone from bus " + std::to_string(bus));
+	else if (to == DS_UNPLUGGED)
+		logger.info(rom + " is unplugged from bus " + std::to_string(bus));
+	else
+		logger.info(rom + " is back on bus " + std::to_string(bus));
+	// sent once the device is unlocked, see notify_change()
+	notify_change(json{
+		{"bus", bus},
+		{"type", type},
+		{"rom", rom.c_str()},
+		{"state", to == DS_STALE ? "stale" : to == DS_UNPLUGGED ? "unplugged" : "running"}
+	});
+}
+
+void OwDev::set_stale(bool on)
+{
+	auto lk = lock();
+	if (on && state == DS_UNPLUGGED)
+		return;
+	// a device not up yet (DS_INIT) is not taken for running
+	if (!on && state != DS_STALE && state != DS_UNPLUGGED)
+		return;
+	set_state(on ? DS_STALE : DS_RUNNING);
+}
+
+void OwDev::set_unplugged(bool on)
+{
+	auto lk = lock();
+	if (on)
+		set_state(DS_UNPLUGGED);
+	else if (state == DS_UNPLUGGED)
+		set_state(DS_STALE);
+}
+
+void OwDev::access_result(bool ok)
+{
+	auto lk = lock();
+	if (ok) {
+		fails = 0;
+		set_stale(false);
+	} else if (state != DS_STALE && state != DS_UNPLUGGED && ++fails >= STALE_FAILS) {
+		set_stale(true);
+	}
+}
 
 // "Is it due" query: -1 no polling configured, 0 not due yet, 1 due
 // now. When due, also advances last_poll to schedule the next poll -
