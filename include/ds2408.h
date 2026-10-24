@@ -44,6 +44,9 @@ class ds2408 : public OwDev, public IDS2408 {
 		int w_threshold(const char* buf, size_t size, int idx);
 		int r_brightness(char* buf, size_t size, bool uncached, int idx);
 		int w_brightness(const char* buf, size_t size, int idx);
+		bool vis_extport(int idx) const;
+		int r_extport(char* buf, size_t size, bool uncached, int idx);
+		int w_extport(const char* buf, size_t size, int idx);
 		int r_level(char* buf, size_t size, bool uncached, int idx);
 		int w_level(const char* buf, size_t size, int idx);
 		// PIO.* only lists the pins currently configured as an output,
@@ -61,6 +64,10 @@ class ds2408 : public OwDev, public IDS2408 {
 		static const size_t n_table;
 		int threshold = 0;
 		int brightness = 0;
+		// extended port as last set, restored after a watchdog reset
+		uint8_t ext_ddr = 0;
+		uint8_t ext_port = 0;
+		bool ext_known = false;
 		// name, role, room and level per pin, see interface/pin.h; only
 		// kept here, never written to the device
 		std::array<Pin, 8> pins;
@@ -137,8 +144,10 @@ class ds2408 : public OwDev, public IDS2408 {
 		uint8_t latch_reset();
 		int cfg_read();
 		int cfg_write(const uint8_t* data, int len = DS2408_CFG_SIZE);
-		uint8_t level_set(uint8_t pio, uint8_t level,
-			uint8_t cmd = TMR_TYPE_ON, uint8_t val = 0);
+		// owSlave custom command 0xC5 TYPE PIN VAL1 VAL2, bytes as is
+		uint8_t custom_cmd(uint8_t pio, uint8_t cmd, uint8_t val1, uint8_t val2);
+		// PWM level in percent, kept in pins[].level, see custom_cmd()
+		uint8_t level_set(uint8_t pio, uint8_t level);
 		uint8_t pin_switch(uint8_t pio, enum _pio_mode state, uint8_t lvl = 0);
 		// whether an output is on as far as known here: a PWM pin with a
 		// level above 0, otherwise its output latch bit cleared (active
@@ -159,6 +168,10 @@ class ds2408 : public OwDev, public IDS2408 {
 		std::string room(int pio) const;
 		int brightness_set(uint8_t brightness);
 		int threshold_set(uint8_t threshold);
+		// a FEAT_xxx bit cleared in the config, see FEAT_xxx_MIN_VERSION
+		bool has_feature(uint16_t min_ver, uint8_t feat) const;
+		// experimental: owSlave extended port, DDRC and PORTC as is
+		int extport_set(uint8_t ddr, uint8_t port);
 		int get_brightness() const;
 		int get_threshold() const;
 		// a register read saw the watchdog status, not yet restored

@@ -1253,13 +1253,71 @@ TEST_F(FsTest, AlarmReaddirSkipsNonAlarmingDevices) {
 	EXPECT_EQ(res, 0);
 	EXPECT_EQ(std::find(seen.begin(), seen.end(), dev->rom), seen.end());
 }
+TEST_F(FsTest, Ds2408ExtPort) {
+	char buf[32];
+	int res;
+
+	ow.update_device(1, "29.0701F8FE6677F4");
+	ow.update_data();
+	// extport_set() goes through custom_cmd(), which needs dev->ds
+	ow.begin();
+	ds2408* dev = (ds2408*)ow.find(0x290701F8FE6677F4);
+	ASSERT_NE(dev, nullptr);
+	std::vector<std::string> seen;
+	auto record_filler = [](void* buf, const char* name, const struct stat*,
+							 off_t, enum fuse_fill_dir_flags) {
+		static_cast<std::vector<std::string>*>(buf)->push_back(name);
+		return 0;
+	};
+	auto listed = [&]() {
+		seen.clear();
+		fs_ops.readdir("/29.0701F8FE6677F4", &seen, record_filler, 0, nullptr, FUSE_READDIR_PLUS);
+		return std::find(seen.begin(), seen.end(), "extport") != seen.end();
+	};
+
+	// only with FEAT_TIMER cleared on a firmware new enough to set it
+	dev->cfg[CFG_FEAT_ID] = 0xff;
+	dev->cfg[CFG_VERS_ID] = 1;
+	dev->cfg[CFG_VERS_ID + 1] = 10;
+	EXPECT_FALSE(listed());
+	EXPECT_EQ(fs_ops.read("/29.0701F8FE6677F4/extport", buf, sizeof(buf), 0, nullptr), -ENOENT);
+	std::strcpy(buf, "1 1");
+	EXPECT_EQ(fs_ops.write("/29.0701F8FE6677F4/extport", buf, 3, 0, nullptr), -ENOENT);
+	// from 1.9 on (FEAT_MIN_VERSION)
+	dev->cfg[CFG_FEAT_ID] = (uint8_t)~FEAT_TIMER;
+	dev->cfg[CFG_VERS_ID + 1] = 8;
+	EXPECT_FALSE(listed());
+	dev->cfg[CFG_VERS_ID + 1] = 9;
+	EXPECT_TRUE(listed());
+
+	res = fs_ops.read("/29.0701F8FE6677F4/extport", buf, sizeof(buf), 0, nullptr);
+	EXPECT_EQ(res, 9);
+	EXPECT_STREQ(buf, "0x00 0x00");
+
+	// decimal and hex, DDRC first
+	std::strcpy(buf, "0x0f 5");
+	res = fs_ops.write("/29.0701F8FE6677F4/extport", buf, 6, 0, nullptr);
+	EXPECT_EQ(res, 6);
+	res = fs_ops.read("/29.0701F8FE6677F4/extport", buf, sizeof(buf), 0, nullptr);
+	EXPECT_STREQ(buf, "0x0f 0x05");
+
+	// both bytes needed, each 0..255; the value is left alone
+	std::strcpy(buf, "0x0f");
+	EXPECT_EQ(fs_ops.write("/29.0701F8FE6677F4/extport", buf, 4, 0, nullptr), -EINVAL);
+	std::strcpy(buf, "1 256");
+	EXPECT_EQ(fs_ops.write("/29.0701F8FE6677F4/extport", buf, 5, 0, nullptr), -EINVAL);
+	std::strcpy(buf, "abc");
+	EXPECT_EQ(fs_ops.write("/29.0701F8FE6677F4/extport", buf, 3, 0, nullptr), -EINVAL);
+	fs_ops.read("/29.0701F8FE6677F4/extport", buf, sizeof(buf), 0, nullptr);
+	EXPECT_STREQ(buf, "0x0f 0x05");
+}
 TEST_F(FsTest, Ds2408ThresholdBrightness) {
 	char buf[32];
 	int res;
 
 	ow.update_device(1, "29.0701F8FE6677F4");
 	ow.update_data();
-	// threshold_set()/brightness_set() go through level_set(), which
+	// threshold_set()/brightness_set() go through custom_cmd(), which
 	// needs dev->ds - only begin() assigns it
 	ow.begin();
 	ds2408* dev = (ds2408*)ow.find(0x290701F8FE6677F4);
