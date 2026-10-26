@@ -13,8 +13,12 @@
 #include "ard_i2c.h"
 #include "ds2408.h"
 #include "plugins.h"
+#include "fw_update.h"
 
 #define LATCH_RESET_RETRY 20
+/* between the tries of a latch reset or PIO write: short, the bus lock
+   is held meanwhile */
+#define RETRY_WAIT_US 200
 /** Retries for activity latch reset */
 #define ACTRES_RETRY 5;
 /** Retries for register read */
@@ -45,6 +49,8 @@ const FsEntry<ds2408> ds2408::table[] = {
 	{ "level.*", 3, 8, false, &ds2408::vis_level, nullptr, &ds2408::r_level, &ds2408::w_level },
 	{ "watchdog", 5, 0, false, nullptr, nullptr, &ds2408::r_watchdog, nullptr },
 	{ "crc_errors", 5, 0, false, nullptr, nullptr, &ds2408::r_crc_errors, nullptr },
+	// write an image file name: firmware update; read: how it goes
+	{ "firmware", 0, 0, false, &ds2408::vis_firmware, &ds2408::firmware_size, &ds2408::r_firmware, &ds2408::w_firmware },
 };
 const size_t ds2408::n_table = sizeof(ds2408::table) / sizeof(ds2408::table[0]);
 
@@ -65,6 +71,12 @@ void from_json(const json& j, Pin& p)
 	p.name = j.value("name", "");
 	p.role = pin_role_parse(j.value("role", "")).value_or(PinRole::none);
 	p.room = j.value("room", "");
+}
+
+ds2408::~ds2408()
+{
+	if (fw_thread.joinable())
+		fw_thread.join();
 }
 
 json ds2408::to_json() const {
@@ -774,6 +786,8 @@ int ds2408::fs_attr(std::string& path) const
 int ds2408::fs_read(string& path, char* buf, size_t size, bool uncached)
 {
 	auto lk = lock();
+	if (fw_busy && path.find("firmware") == string::npos)
+		return -EBUSY;
 	int r = fs_table::read(*this, table, n_table, path, buf, size, uncached);
 	if (r != fs_table::NOT_FOUND) {
 		return r;
@@ -784,6 +798,8 @@ int ds2408::fs_read(string& path, char* buf, size_t size, bool uncached)
 int ds2408::fs_write(string& path, const char* buf, size_t size)
 {
 	auto lk = lock();
+	if (fw_busy && path.find("firmware") == string::npos)
+		return -EBUSY;
 	int r = fs_table::write(*this, table, n_table, path, buf, size);
 	if (r != fs_table::NOT_FOUND)
 		return r;
@@ -814,6 +830,8 @@ int ds2408::poll()
 uint8_t ds2408::latch_reset()
 {
 	auto lk = lock();
+	if (fw_busy)
+		return 0xff;
 	uint8_t retry, tmp;
 	bool res;
 #ifdef USE_I2C
@@ -850,7 +868,8 @@ uint8_t ds2408::latch_reset()
 		}
 		if (err == 0)
 			err = ds->last_err;
-		delay(LATCH_RESET_RETRY - retry);
+		// coverity[sleep] - bus mutex must be held
+		usleep(RETRY_WAIT_US);
 #endif
 	} while (--retry > 0);
 
@@ -915,6 +934,8 @@ uint8_t ds2408::pin_switch(uint8_t pio, enum _pio_mode state, uint8_t lvl)
 uint8_t ds2408::pio_set(uint8_t pio)
 {
 	auto lk = lock();
+	if (fw_busy)
+		return 0xff;
 	uint8_t r, retry, err = 0;
 	bool ret;
 
@@ -955,7 +976,7 @@ uint8_t ds2408::pio_set(uint8_t pio)
 			if (err == 0)
 				err = ds->last_err;
 			// coverity[sleep] - bus mutex must be held
-			usleep(1000);
+			usleep(RETRY_WAIT_US);
 		} while (--retry > 0);
 		// if err && retry > 0: err = 0
 		if (r == 0xAA) {
@@ -1030,6 +1051,9 @@ uint8_t ds2408::alarm_read(uint8_t& latch)
 uint8_t ds2408::reg_read(bool latch_reset)
 {
 	auto lk = lock();
+	// in the bootloader, see fw_busy
+	if (fw_busy)
+		return 0;
 	uint8_t tmp, err = 0;
 	uint8_t retry = REG_RETRY - 1;
 	bool ret;
@@ -1162,6 +1186,8 @@ uint8_t ds2408::reg_read(bool latch_reset)
 int ds2408::cfg_read()
 {
 	auto lk = lock();
+	if (fw_busy)
+		return -1;
 	int len = DS2408_CFG_SIZE;
 
 #ifdef USE_I2C
@@ -1199,6 +1225,8 @@ int ds2408::cfg_read()
 int ds2408::cfg_write(const uint8_t* data, int len)
 {
 	auto lk = lock();
+	if (fw_busy)
+		return -1;
 	int i;
 
 	if (len > DS2408_CFG_SIZE)
@@ -1241,6 +1269,8 @@ int ds2408::cfg_write(const uint8_t* data, int len)
 uint8_t ds2408::custom_cmd(uint8_t pio, uint8_t cmd, uint8_t val1, uint8_t val2)
 {
 	auto lk = lock();
+	if (fw_busy)
+		return 0xff;
 #ifdef USE_I2C
 	uint8_t data[5] = { 0xC5, cmd, pio, val1, val2 };
 	uint16_t crc;
@@ -1410,4 +1440,278 @@ int ds2408::watchdog_restore()
 		return -EAGAIN;
 	}
 	return 0;
+}
+
+// --- firmware update, see fw_update.h -----------------------------------
+
+#ifdef TESTING
+#define FW_ENTER_MS 1
+#define FW_START_MS 1
+#else
+/* the jump into the bootloader, until it answers */
+#define FW_ENTER_MS 100
+/* the watchdog reset after BL_CMD_EXIT and the application's start-up */
+#define FW_START_MS 1000
+#endif
+/* programming a page takes the device up to 10 ms, it does not answer
+   meanwhile; then its result is read, if not there yet once more */
+#define FW_PROG_MS 12
+#define FW_RESULT_TRIES 10
+
+/* The owSlave bootloader on the bus, protocol see owbootloader.h. Each
+   call one transaction under the bus lock, a page write including the
+   programming: the device does not watch the bus meanwhile and would
+   take another transaction's read slots for its result. */
+class OwBlLink : public FwLink {
+	DS2482* ds;
+	int bus;
+	uint8_t addr[8];
+
+	// the bus lock held
+	bool start()
+	{
+		// coverity[sleep] - bus mutex must be held
+		if (!ds->selectChannel(bus) || !ds->reset())
+			return false;
+		// coverity[sleep] - bus mutex must be held
+		ds->select(addr);
+		return ds->last_err == 0;
+	}
+public:
+	OwBlLink(DS2482* d, int b, const uint8_t* a) : ds(d), bus(b)
+	{
+		std::memcpy(addr, a, sizeof(addr));
+	}
+
+	int info(BlInfo& info) override
+	{
+		const uint8_t cmd = BL_CMD_INFO;
+		uint8_t raw[BL_INFO_SIZE + 2];
+		{
+			std::lock_guard<std::mutex> lock(ds->mtx);
+			if (!start())
+				return -EIO;
+			// coverity[sleep] - bus mutex must be held
+			ds->write(cmd);
+			// coverity[sleep] - bus mutex must be held
+			ds->read(raw, sizeof(raw));
+		}
+		if (!DS2482::check_crc16(raw, BL_INFO_SIZE, raw + BL_INFO_SIZE, DS2482::crc16(&cmd, 1, 0)))
+			return -EIO;
+		return bl_info_parse(raw, info) ? 0 : -EPROTO;
+	}
+
+	int write_page(uint16_t at, const uint8_t* data, size_t len) override
+	{
+		std::vector<uint8_t> msg = { BL_CMD_WRITE, (uint8_t)(at & 0xff), (uint8_t)(at >> 8) };
+		uint8_t crc[2];
+
+		msg.insert(msg.end(), data, data + len);
+		std::lock_guard<std::mutex> lock(ds->mtx);
+		if (!start())
+			return -EIO;
+		// coverity[sleep] - bus mutex must be held
+		ds->write(msg.data(), msg.size(), 0);
+		// coverity[sleep] - bus mutex must be held
+		ds->read(crc, sizeof(crc));
+		if (!DS2482::check_crc16(msg.data(), msg.size(), crc, 0)) {
+			// anything but BL_CONFIRM drops the page
+			// coverity[sleep] - bus mutex must be held
+			ds->write(0x00);
+			return -EIO;
+		}
+		// coverity[sleep] - bus mutex must be held
+		ds->write(BL_CONFIRM);
+		// coverity[sleep] - the device programs, nobody else may use
+		// the bus meanwhile, see above
+		usleep(FW_PROG_MS * 1000);
+		for (int i = 0; i < FW_RESULT_TRIES; i++) {
+			// coverity[sleep] - bus mutex must be held
+			uint8_t r = ds->read();
+			if (r != 0xff)
+				return r;
+			// coverity[sleep] - see above
+			usleep(2000);
+		}
+		return -ETIMEDOUT;
+	}
+
+	int read_page(uint16_t at, uint8_t* data, size_t len) override
+	{
+		const uint8_t msg[3] = { BL_CMD_READ, (uint8_t)(at & 0xff), (uint8_t)(at >> 8) };
+		uint8_t crc[2];
+		{
+			std::lock_guard<std::mutex> lock(ds->mtx);
+			if (!start())
+				return -EIO;
+			// coverity[sleep] - bus mutex must be held
+			ds->write(msg, sizeof(msg), 0);
+			// coverity[sleep] - bus mutex must be held
+			ds->read(data, len);
+			// coverity[sleep] - bus mutex must be held
+			ds->read(crc, sizeof(crc));
+		}
+		return DS2482::check_crc16(data, len, crc, DS2482::crc16(msg, sizeof(msg), 0)) ? 0 : -EIO;
+	}
+
+	int exit() override
+	{
+		uint8_t r;
+		{
+			std::lock_guard<std::mutex> lock(ds->mtx);
+			if (!start())
+				return -EIO;
+			// coverity[sleep] - bus mutex must be held
+			ds->write(BL_CMD_EXIT);
+			// coverity[sleep] - bus mutex must be held
+			r = ds->read();
+		}
+		if (r == BL_OK)
+			return 0;
+		return r == BL_ERR_NOAPP ? -ENOEXEC : -EIO;
+	}
+};
+
+std::function<std::unique_ptr<FwLink>(ds2408&)> ds2408::fw_link =
+	[](ds2408& dev) -> std::unique_ptr<FwLink> {
+		// begin() sets them under the device lock, this runs in fw_thread
+		auto lk = dev.lock();
+		// coverity[missing_lock] - the bus mutex is in *ds itself, the
+		// pointer is only read here
+		return std::make_unique<OwBlLink>(dev.ds, dev.bus, dev.addr);
+	};
+
+void ds2408::fw_set_status(std::string s)
+{
+	std::lock_guard<std::mutex> lk(fw_mtx);
+	fw_status = std::move(s);
+}
+
+bool ds2408::vis_firmware(int) const
+{
+	return has_feature(0x0109, FEAT_BL);
+}
+
+int ds2408::r_firmware(char* buf, size_t size, bool, int)
+{
+	// readable only where it is listed, see vis_firmware()
+	if (!vis_firmware(0))
+		return -ENOENT;
+	std::lock_guard<std::mutex> lk(fw_mtx);
+	int n = std::snprintf(buf, size, "%s\n", fw_status.c_str());
+
+	return n < (int)size ? n : (int)size - 1;
+}
+
+int ds2408::firmware_size(int) const
+{
+	std::lock_guard<std::mutex> lk(fw_mtx);
+	return (int)fw_status.size() + 1;
+}
+
+/* The file name of the image (Intel HEX or binary), see fw_load(). It
+   is loaded and checked here, an error is the answer of the write;
+   the update itself runs in fw_thread, see r_firmware() for how it
+   goes. */
+int ds2408::w_firmware(const char* buf, size_t size, int)
+{
+	auto lk = lock();
+	std::string path(buf, size);
+	std::vector<uint8_t> image;
+	std::string err;
+
+	if (!vis_firmware(0))
+		return -ENOENT;
+	while (!path.empty() && (path.back() == '\n' || path.back() == '\r' ||
+	       path.back() == '\0' || path.back() == ' '))
+		path.pop_back();
+	if (path.empty())
+		return -EINVAL;
+	if (fw_busy)
+		return -EBUSY;
+	int r = fw_load(path, image, err);
+	if (r < 0) {
+		logger.warn(rom + " firmware: " + err);
+		fw_set_status("error: " + err);
+		return r;
+	}
+	// a finished one: fw_busy is cleared under the device lock as its
+	// last step with it, see fw_run()
+	if (fw_thread.joinable())
+		fw_thread.join();
+	fw_busy = true;
+	fw_set_status("starting");
+	logger.info(rom + std::format(" firmware update: {} ({} bytes)", path, image.size()));
+	fw_thread = std::thread(&ds2408::fw_run, this, std::move(image));
+	return size;
+}
+
+int ds2408::fw_enter()
+{
+	// called from fw_thread: ds, bus and addr are set by begin()
+	auto lk = lock();
+	uint8_t msg[24] = { 0x86, 0xde, 0xad, BL_ENTER_CMD, BL_ENTER_KEY };
+
+#ifdef TESTING
+	sim_bl_enters++;
+#endif
+	// 0x86 and the 23 bytes the device takes, see cfg_write()
+	std::lock_guard<std::mutex> lock(ds->mtx);
+	// coverity[sleep] - bus mutex must be held
+	if (!ds->selectChannel(bus) || !ds->reset())
+		return -EIO;
+	// coverity[sleep] - bus mutex must be held
+	ds->select(addr);
+	// coverity[sleep] - bus mutex must be held
+	ds->write(msg, sizeof(msg), 0);
+	return ds->last_err == 0 ? 0 : -EIO;
+}
+
+/* The update, in fw_thread: into the bootloader (unless it is still in
+   it from an update broken off), the image written, back to the
+   application. Broken off the device stays in its bootloader, a new
+   update can be started. */
+void ds2408::fw_run(std::vector<uint8_t> image)
+{
+	std::unique_ptr<FwLink> link = fw_link(*this);
+	BlInfo info;
+	std::string err;
+	auto fail = [&](const std::string& msg) {
+		logger.warn(rom + " firmware update: " + msg);
+		fw_set_status("error: " + msg);
+		auto lk = lock();
+		fw_busy = false;
+	};
+
+	fw_set_status("entering bootloader");
+	if (link->info(info) < 0) {
+		if (fw_enter() < 0)
+			return fail("the device does not answer");
+		// coverity[sleep] - no lock held: fw_enter() releases the device
+		// lock on return (DevLock), fw_run() takes none here
+		std::this_thread::sleep_for(std::chrono::milliseconds(FW_ENTER_MS));
+		if (link->info(info) < 0)
+			return fail("no bootloader answers");
+	}
+	logger.info(rom + std::format(" bootloader {}: pages of {} bytes, {} bytes for the application",
+		info.version, info.page_size, info.app_size));
+	int r = fw_flash(*link, image, [this](int done, int total) {
+		fw_set_status(std::format("writing {}/{}", done, total));
+	}, err);
+	if (r < 0)
+		return fail(err + ", the device stays in its bootloader");
+	fw_set_status("starting the application");
+	r = link->exit();
+	if (r < 0)
+		return fail(std::string("the application does not start: ") + strerror(-r));
+	std::this_thread::sleep_for(std::chrono::milliseconds(FW_START_MS));
+	{
+		auto lk = lock();
+		fw_busy = false;
+		/* started by a reset: the next read sees it and the outputs
+		   are restored as after a watchdog reset, see dev_poll() */
+		reg_read(false);
+	}
+	logger.info(rom + std::format(" firmware update done, {} bytes", image.size()));
+	fw_set_status(std::format("done, {} bytes", image.size()));
 }

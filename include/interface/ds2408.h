@@ -94,6 +94,8 @@
 #define FEAT_ADC_LIGHT 0x02
 /** pin timers, extended auto switching and the extended port */
 #define FEAT_TIMER 0x04
+/** the 1-Wire bootloader: a firmware update over the bus */
+#define FEAT_BL 0x08
 /* firmware version, major and minor */
 #define CFG_VERS_ID 21
 /* older firmware leaves the feature byte as provisioned in the EEPROM,

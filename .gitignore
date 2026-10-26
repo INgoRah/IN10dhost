@@ -9,4 +9,6 @@ include/nlohmann/*
 out/*
 *.vcd
 coverage.info
-*.json
+*.jsonhil/hil.toml
+__pycache__/
+.pytest_cache/

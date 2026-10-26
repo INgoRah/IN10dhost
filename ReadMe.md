@@ -124,6 +124,29 @@ regularly, the latches are left alone:
 echo 60 > /mnt/1wire/29.0800F7FF66772C/poll    # every 60 s
 ```
 
+## firmware update
+
+An owSlave with the 1-Wire bootloader (ATmega168, ATtiny84 or
+ATtiny85, owSlave env `<mcu>-boot`, see its README) can be updated over
+the bus. Write the image - Intel
+HEX as PlatformIO builds it (`firmware.hex`) or the raw binary - to
+the device's `firmware` file, read it to see how it goes:
+
+```sh
+echo /tmp/firmware.hex > /mnt/1wire/29.0500FAFF6677FB/firmware
+cat /mnt/1wire/29.0500FAFF6677FB/firmware    # writing 12/50, done, 6338 bytes
+```
+
+The image is checked when written (a broken file is the answer of the
+write); the update runs in the background, the other devices keep
+working. in10dfs asks the application into its bootloader (config
+write `0xDE 0xAD 0xB0 0x07`), writes the pages, each read back, and
+starts the new application. Page 0 is erased first and written last: an
+update broken off leaves the device in its bootloader, it answers there
+with its own ROM, and the update can simply be done again. Meanwhile
+the device's other files answer `EBUSY`. After the update the outputs
+are restored as after a watchdog reset.
+
 ## switches
 
 A switch connects a button input (latch) to an output (PIO). Add one by

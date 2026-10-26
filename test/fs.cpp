@@ -24,6 +24,10 @@
 #include "plugins.h"
 #include "version.h"
 #include "switch_handler.h"
+#include "fw_update.h"
+#include "fw_fake.h"
+#include <atomic>
+#include <thread>
 
 extern OwDevices ow;
 extern DS2482 ds;
@@ -1839,6 +1843,240 @@ TEST_F(FsTest, Ds2408WatchdogNoAlarm) {
 /* A register read failing its CRC, as a slave slipping a time slot
    makes it up: read again, never taken as is, in particular not for a
    watchdog. */
+/* The firmware update through the "firmware" file: the application
+   asked into its bootloader, the image written, its status readable,
+   the device busy for everything else meanwhile. The bootloader is
+   the fake of fw_fake.h. */
+struct FwForward : public FwLink {
+	FakeBl* bl;
+	// BL_CMD_EXIT answered with no application
+	bool exit_fails = false;
+	explicit FwForward(FakeBl* b) : bl(b) {}
+	int info(BlInfo& i) override { return bl->info(i); }
+	int write_page(uint16_t a, const uint8_t* d, size_t n) override { return bl->write_page(a, d, n); }
+	int read_page(uint16_t a, uint8_t* d, size_t n) override { return bl->read_page(a, d, n); }
+	int exit() override { return exit_fails ? -ENOEXEC : bl->exit(); }
+};
+
+TEST_F(FsTest, Ds2408Firmware) {
+	namespace fs = std::filesystem;
+	std::string rom = OwDev::canonical_rom("29.2000FDFF6677");
+	std::string fw_file = "/" + rom + "/firmware";
+	fs::path dir = fs::temp_directory_path() / std::format("in10dfs-fwdev-{}", getpid());
+	char buf[128] = {};
+	auto status = [&]() {
+		std::memset(buf, 0, sizeof(buf));
+		fs_ops.read(fw_file.c_str(), buf, sizeof(buf), 0, nullptr);
+		return std::string(buf);
+	};
+	FakeBl bl;
+	bool exit_fails = false;
+	std::atomic<bool> go{false};
+	auto old_link = ds2408::fw_link;
+	ds2408::fw_link = [&](ds2408&) {
+		auto l = std::make_unique<FwForward>(&bl);
+		l->exit_fails = exit_fails;
+		return l;
+	};
+	// the application runs: no bootloader answers until it is entered
+	bl.info_fails = 1;
+	bl.on_write = [&]() {
+		while (!go)
+			std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	};
+	std::vector<uint8_t> image(300);
+	for (size_t i = 0; i < image.size(); i++)
+		image[i] = (uint8_t)(i + 7);
+	fs::create_directories(dir);
+	{
+		std::ofstream f(dir / "fw.bin", std::ios::binary);
+		f.write((const char*)image.data(), image.size());
+	}
+	std::string path = (dir / "fw.bin").string() + "\n";
+	auto update = [&]() {
+		return fs_ops.write(fw_file.c_str(), path.c_str(), path.size(), 0, nullptr);
+	};
+	ow.update_device(0, rom);
+	ow.update_data();
+	ow.begin();
+	ds2408* dev = (ds2408*)ow.find(rom);
+	ASSERT_NE(dev, nullptr);
+	auto wait_done = [&]() {
+		for (int i = 0; i < 500 && dev->fw_updating(); i++)
+			std::this_thread::sleep_for(std::chrono::milliseconds(10));
+		return !dev->fw_updating();
+	};
+	LogLevel lvl = logger.get_level();
+	logger.set_level(LogLevel::NONE);
+	std::vector<std::string> seen;
+	auto listed = [&]() {
+		seen.clear();
+		fs_ops.readdir(("/" + rom).c_str(), &seen, [](void* b, const char* name,
+				const struct stat*, off_t, enum fuse_fill_dir_flags) {
+			static_cast<std::vector<std::string>*>(b)->push_back(name);
+			return 0;
+		}, 0, nullptr, (enum fuse_readdir_flags)0);
+		return std::find(seen.begin(), seen.end(), "firmware") != seen.end();
+	};
+
+	// only with FEAT_BL cleared on a firmware new enough to set it
+	dev->cfg[CFG_FEAT_ID] = 0xff;
+	dev->cfg[CFG_VERS_ID] = 1;
+	dev->cfg[CFG_VERS_ID + 1] = 10;
+	EXPECT_FALSE(listed());
+	EXPECT_EQ(fs_ops.read(fw_file.c_str(), buf, sizeof(buf), 0, nullptr), -ENOENT);
+	EXPECT_EQ(update(), -ENOENT);
+	EXPECT_FALSE(dev->fw_updating());
+	dev->cfg[CFG_FEAT_ID] = (uint8_t)~FEAT_BL;
+	dev->cfg[CFG_VERS_ID + 1] = 8;
+	EXPECT_FALSE(listed());
+	dev->cfg[CFG_VERS_ID + 1] = 9;
+	EXPECT_TRUE(listed());
+
+	EXPECT_EQ(status(), "idle\n");
+	struct stat st;
+	EXPECT_EQ(fs_ops.getattr(fw_file.c_str(), &st, nullptr), 0);
+	EXPECT_EQ(st.st_size, 5);
+	// no file name at all
+	EXPECT_EQ(fs_ops.write(fw_file.c_str(), " \n", 2, 0, nullptr), -EINVAL);
+	// a file that is not there: the answer of the write
+	std::string none = (dir / "none.hex").string();
+	EXPECT_EQ(fs_ops.write(fw_file.c_str(), none.c_str(), none.size(), 0, nullptr), -ENOENT);
+	EXPECT_EQ(status().rfind("error: cannot open", 0), 0u) << status();
+	EXPECT_FALSE(dev->fw_updating());
+	// the status cut to what the reader asked for
+	EXPECT_EQ(fs_ops.read(fw_file.c_str(), buf, 6, 0, nullptr), 5);
+
+	EXPECT_EQ(update(), (int)path.size());
+	// held in its first page write: busy for all else
+	EXPECT_TRUE(dev->fw_updating());
+	EXPECT_EQ(update(), -EBUSY);
+	EXPECT_EQ(fs_ops.read(("/" + rom + "/BYTE").c_str(), buf, sizeof(buf), 0, nullptr), -EBUSY);
+	EXPECT_EQ(fs_ops.write(("/" + rom + "/PIO.0").c_str(), "1", 1, 0, nullptr), -EBUSY);
+	EXPECT_EQ(dev->pio_set(0x0f), 0xff);
+	EXPECT_EQ(dev->reg_read(false), 0);
+	EXPECT_EQ(dev->latch_reset(), 0xff);
+	EXPECT_EQ(dev->cfg_read(), -1);
+	EXPECT_EQ(dev->cfg_write(dev->cfg), -1);
+	EXPECT_EQ(dev->custom_cmd(0, TMR_TYPE_ON, 0, 0), 0xff);
+	go = true;
+	EXPECT_TRUE(wait_done());
+	EXPECT_EQ(status(), "done, 300 bytes\n");
+	EXPECT_EQ(dev->sim_bl_enters, 1);
+	EXPECT_TRUE(bl.exited);
+	EXPECT_TRUE(bl.erased_first);
+	EXPECT_EQ(std::memcmp(bl.flash.data(), image.data(), image.size()), 0);
+	EXPECT_GT(fs_ops.read(("/" + rom + "/BYTE").c_str(), buf, sizeof(buf), 0, nullptr), 0);
+
+	// again, the device still in its bootloader: not entered once more;
+	// a page failing for good breaks it off
+	bl.writes.clear();
+	bl.fail_writes = { 1, 2, 3 };
+	EXPECT_EQ(update(), (int)path.size());
+	EXPECT_TRUE(wait_done());
+	EXPECT_EQ(dev->sim_bl_enters, 1);
+	EXPECT_EQ(status().rfind("error: page 0x0080", 0), 0u) << status();
+	EXPECT_NE(status().find("stays in its bootloader"), std::string::npos) << status();
+	bl.fail_writes.clear();
+
+	// written, but the application does not start
+	exit_fails = true;
+	EXPECT_EQ(update(), (int)path.size());
+	EXPECT_TRUE(wait_done());
+	EXPECT_EQ(status().rfind("error: the application does not start", 0), 0u) << status();
+	exit_fails = false;
+
+	// neither the application nor a bootloader answers
+	bl.answers = false;
+	EXPECT_EQ(update(), (int)path.size());
+	EXPECT_TRUE(wait_done());
+	EXPECT_EQ(dev->sim_bl_enters, 2);
+	EXPECT_EQ(status(), "error: no bootloader answers\n");
+
+	ds2408::fw_link = old_link;
+	fs::remove_all(dir);
+	logger.set_level(lvl);
+}
+
+/* The bootloader link over the bus, as the update uses it by default:
+   the simulated bus has no device on it, every answer is zeros and so
+   fails its CRC. */
+TEST_F(FsTest, Ds2408FwBusLink) {
+	std::string rom = OwDev::canonical_rom("29.2100FDFF6677");
+	ow.update_device(0, rom);
+	ow.update_data();
+	ow.begin();
+	ds2408* dev = (ds2408*)ow.find(rom);
+	ASSERT_NE(dev, nullptr);
+	LogLevel lvl = logger.get_level();
+	logger.set_level(LogLevel::NONE);
+
+	std::unique_ptr<FwLink> link = ds2408::fw_link(*dev);
+	ASSERT_NE(link, nullptr);
+	BlInfo info;
+	uint8_t page[16] = { 1, 2, 3 };
+	EXPECT_EQ(link->info(info), -EIO);
+	EXPECT_EQ(link->write_page(0x80, page, sizeof(page)), -EIO);
+	EXPECT_EQ(link->read_page(0x80, page, sizeof(page)), -EIO);
+	EXPECT_EQ(link->exit(), -EIO);
+	logger.set_level(lvl);
+}
+
+/* The error answers of the writes: the device failing the command,
+   numbers out of range, pins that are none */
+TEST_F(FsTest, Ds2408WriteErrors) {
+	std::string rom = OwDev::canonical_rom("29.2200FDFF6677");
+	std::string base = "/" + rom + "/";
+	auto wr = [&](const char* leaf, const char* val) {
+		return fs_ops.write((base + leaf).c_str(), val, std::strlen(val), 0, nullptr);
+	};
+	ow.update_device(0, rom);
+	ow.update_data();
+	ow.begin();
+	ds2408* dev = (ds2408*)ow.find(rom);
+	ASSERT_NE(dev, nullptr);
+	LogLevel lvl = logger.get_level();
+	logger.set_level(LogLevel::NONE);
+	dev->cfg[CFG_FEAT_ID] = (uint8_t)~FEAT_TIMER;
+	dev->cfg[CFG_VERS_ID] = 1;
+	dev->cfg[CFG_VERS_ID + 1] = 10;
+	dev->cfg[CFG_PIN_ID + 2] = CFG_OUT_PWM;
+
+	// beyond an int
+	EXPECT_EQ(wr("BYTE", "99999999999"), -EINVAL);
+	EXPECT_EQ(wr("PIO.BYTE", "99999999999"), -EINVAL);
+	EXPECT_EQ(wr("brightness", "99999999999"), -EINVAL);
+	EXPECT_EQ(wr("extport", "0x100000000 0"), -EINVAL);
+	EXPECT_EQ(wr("level.2", "abc"), -EINVAL);
+	EXPECT_EQ(wr("level.2", "99999999999"), -EINVAL);
+	EXPECT_EQ(wr("level.2", "101"), -EINVAL);
+	// .ALL with blanks around the bits
+	EXPECT_EQ(wr("PIO.ALL", " 1, 1,1,1,1,1,1 ,1 "), 19);
+
+	// the device does not confirm the command
+	dev->sim_fail = true;
+	EXPECT_EQ(wr("threshold", "10"), -EAGAIN);
+	EXPECT_EQ(wr("brightness", "10"), -EAGAIN);
+	EXPECT_EQ(wr("extport", "0x30 0"), -EAGAIN);
+	EXPECT_EQ(wr("level.2", "50"), -EAGAIN);
+	EXPECT_EQ(dev->pin_switch(2, ON), (uint8_t)-1);
+	dev->sim_fail = false;
+
+	// a latch set: cleared on the device as well
+	dev->data[PIO_LATCH] = 0x04;
+	EXPECT_EQ(wr("latch.2", "1"), 1);
+	EXPECT_EQ(dev->data[PIO_LATCH], 0);
+
+	// no pin
+	EXPECT_EQ(dev->pin_label(-1), "?");
+	EXPECT_EQ(dev->role(8), PinRole::none);
+	EXPECT_EQ(dev->room(8), "");
+	EXPECT_FALSE(dev->pin_is_output(8));
+	EXPECT_FALSE(dev->pin_is_on(8));
+	EXPECT_EQ(dev->role_switch(PinRole::none, true), 0);
+	logger.set_level(lvl);
+}
+
 TEST_F(FsTest, Ds2408RegReadCrc) {
 	char buf[16] = {};
 	std::string rom = OwDev::canonical_rom("29.1800FDFF6677");

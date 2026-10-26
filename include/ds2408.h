@@ -4,13 +4,21 @@
 #include <gtest/gtest_prod.h>
 #endif
 #include <array>
+#include <atomic>
+#include <functional>
+#include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
+#include <vector>
 #include "ow_dev.h"
 #include "interface/ds2408.h"
 #include "fs_table.h"
 #include "interface/pin.h"
 
 #define DS2408_CFG_SIZE 26
+
+class FwLink;
 /** longest pin name, same as the size its fs entry reports */
 #define PIN_NAME_MAX 20
 
@@ -92,6 +100,25 @@ class ds2408 : public OwDev, public IDS2408 {
 		// register reads dropped for a CRC mismatch since the start
 		unsigned crc_errors = 0;
 		int r_crc_errors(char* buf, size_t size, bool uncached, int idx);
+		/* Firmware update through the owSlave bootloader, see
+		   fw_update.h: writing an image file name to "firmware" runs
+		   it in fw_thread, reading it gives fw_status. While it runs
+		   (fw_busy) nothing else may use the device: its files answer
+		   -EBUSY, the bus accesses fail without trying. */
+		std::atomic<bool> fw_busy{false};
+		std::thread fw_thread;
+		mutable std::mutex fw_mtx;
+		std::string fw_status = "idle";
+		void fw_set_status(std::string s);
+		void fw_run(std::vector<uint8_t> image);
+		// the config write that makes the application start its
+		// bootloader: 0xDE 0xAD BL_ENTER_CMD BL_ENTER_KEY
+		int fw_enter();
+		// only with the bootloader, see FEAT_BL
+		bool vis_firmware(int idx) const;
+		int r_firmware(char* buf, size_t size, bool uncached, int idx);
+		int w_firmware(const char* buf, size_t size, int idx);
+		int firmware_size(int idx) const;
 #ifdef TESTING
 		// GTest testing support: the status register the simulated
 		// bus reports, e.g. STAT_WATCHDOG
@@ -104,6 +131,10 @@ class ds2408 : public OwDev, public IDS2408 {
 		FRIEND_TEST(FsTest, Ds2408Watchdog);
 		FRIEND_TEST(FsTest, Ds2408RegReadCrc);
 		FRIEND_TEST(FsTest, Ds2408WatchdogNoAlarm);
+		FRIEND_TEST(FsTest, Ds2408Firmware);
+		FRIEND_TEST(FsTest, Ds2408WriteErrors);
+		// fw_enter() calls
+		int sim_bl_enters = 0;
 #endif
 	public:
 		/* [0] PIO Logic State  = sensed
@@ -127,6 +158,12 @@ class ds2408 : public OwDev, public IDS2408 {
 		ds2408() { type = "ds2408"; };
 		ds2408(std::string rom) : OwDev(std::move(rom)) {
 			type = "ds2408"; };
+		// waits for a running firmware update
+		~ds2408() override;
+		/* How the firmware update talks to the device in its
+		   bootloader: over the bus by default, tests put their own. */
+		static std::function<std::unique_ptr<FwLink>(ds2408&)> fw_link;
+		bool fw_updating() const { return fw_busy; }
 		uint8_t cfg[DS2408_CFG_SIZE] = {};
 
 		std::vector<string> fs_dir(string& path) const override;
