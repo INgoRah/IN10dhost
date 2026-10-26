@@ -122,6 +122,7 @@ add_executable(in10dfs
     src/ds2482.cpp
     src/ow_dev.cpp
     src/ds2408.cpp
+    src/fw_update.cpp
     src/ds2450.cpp
     src/ds1820.cpp
     src/ow_devices.cpp
@@ -150,6 +151,7 @@ if(TESTING)
         test/switches.cpp
         test/plugins.cpp
         test/cli.cpp
+        test/fw.cpp
     )
     set(test GTest::gtest_main)
 
