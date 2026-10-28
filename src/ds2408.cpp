@@ -42,6 +42,7 @@ const FsEntry<ds2408> ds2408::table[] = {
 	{ "brightness", 3, 0, false, nullptr, nullptr, &ds2408::r_brightness, &ds2408::w_brightness },
 	{ "level.*", 3, 8, false, &ds2408::vis_level, nullptr, &ds2408::r_level, &ds2408::w_level },
 	{ "watchdog", 5, 0, false, nullptr, nullptr, &ds2408::r_watchdog, nullptr },
+	{ "crc_errors", 5, 0, false, nullptr, nullptr, &ds2408::r_crc_errors, nullptr },
 };
 const size_t ds2408::n_table = sizeof(ds2408::table) / sizeof(ds2408::table[0]);
 
@@ -262,7 +263,7 @@ int ds2408::w_pio(const char* buf, size_t size, int idx)
 	}
 	try {
 		uint8_t tmp = (uint8_t)(std::stoi(buf) & 0xff);
-		logger.verbose(std::format("set PIO.{} = {}", idx, tmp));
+		logger.debug(std::format("{}.{}: set PIO.{} = {}", name, pins[idx].name, idx, tmp));
 		// inverted for plain IO: writing 1 clears the output latch bit,
 		// writing 0 sets it (see pin_switch); PWM takes the level as is
 		pin_switch(idx, (tmp == 0 ? OFF : ON), tmp);
@@ -591,6 +592,14 @@ int ds2408::r_watchdog(char* buf, size_t, bool, int)
 	return std::strlen(buf);
 }
 
+// register reads dropped for a CRC mismatch since the start
+int ds2408::r_crc_errors(char* buf, size_t, bool, int)
+{
+	auto lk = lock();
+	std::sprintf(buf, "%u", crc_errors);
+	return std::strlen(buf);
+}
+
 bool ds2408::vis_pio(int idx) const
 {
 	auto lk = lock();
@@ -736,6 +745,16 @@ void ds2408::begin(bool soft)
 	//cfg_read();
 	reg_read(true);
 	// level_set
+}
+
+/* Only ever called once poll_check() has just returned 1: reads the
+   registers, the latches stay for the alarm handling. For firmware that
+   raises no alarm after a reset, OwDevices::dev_poll() reports one
+   found here. */
+int ds2408::poll()
+{
+	auto lk = lock();
+	return reg_read(false) == 0xAA ? 1 : 0;
 }
 
 uint8_t ds2408::latch_reset()
@@ -887,7 +906,6 @@ uint8_t ds2408::pio_set(uint8_t pio)
 		// if err && retry > 0: err = 0
 		if (r == 0xAA) {
 			// success
-			logger.verbose(rom + std::format(" latch reset: after PIO write {:#x}", pio));
 			latch_reset();
 		}
 	}
@@ -961,6 +979,10 @@ uint8_t ds2408::reg_read(bool latch_reset)
 	uint8_t tmp, err = 0;
 	uint8_t retry = REG_RETRY - 1;
 	bool ret;
+	// the last read failed its CRC, data[] was left alone
+	bool crc_bad = false;
+	// only the first mismatch of this read is logged
+	const unsigned crc_logged = crc_errors;
 	uint8_t buf[3];  // Put everything in the buffer so we can compute CRC easily.
 	// what the device drove before this read, lost if it was reset
 	uint8_t prev_out = data[PIO_OUT];
@@ -988,18 +1010,48 @@ uint8_t ds2408::reg_read(bool latch_reset)
 		// try this: alway read not running into a watchdog
 		// on the slave
 		// if (ds->last_err == 0)
-#ifdef USE_I2C
+		uint8_t rd[10];
 		// coverity[sleep]
-		ds->read (data, 10);
-#else
-		uint8_t dummy[10];
-		ds->read (dummy, 10);
+		ds->read (rd, 10);
+#ifndef USE_I2C
+		// no bus: a good read of the registers as they are, the status
+		// from the simulation
+		std::memcpy(rd, data, sizeof(rd));
 #ifdef TESTING
-		data[STAT] = sim_stat;
+		rd[STAT] = sim_stat;
 #else
-		data[STAT] = 0x00;
+		rd[STAT] = 0x00;
+#endif
+		uint16_t sim_crc = ~DS2482::crc16(rd, 8, DS2482::crc16(buf, 3, 0));
+		rd[8] = sim_crc & 0xff;
+		rd[9] = sim_crc >> 8;
+#ifdef TESTING
+		// or exactly what a test lets the bus answer
+		if (!sim_reads.empty()) {
+			std::memcpy(rd, sim_reads.front().data(), sizeof(rd));
+			sim_reads.erase(sim_reads.begin());
+		}
 #endif
 #endif
+		/* a slave slipping a time slot shifts the rest of the bytes,
+		   e.g. making up a watchdog status: only take what passes the
+		   CRC (command, address and 8 bytes) */
+		// all 0xff: no answer at all, retried below as before
+		crc_bad = ds->last_err == 0 &&
+			!std::all_of(rd, rd + 10, [](uint8_t b) { return b == 0xff; }) &&
+			!DS2482::check_crc16(rd, 8, rd + 8, DS2482::crc16(buf, 3, 0));
+		if (crc_bad) {
+			// marks it in status/1wire.vcd, with the status it claimed
+			ds->log_event('E', rd[STAT]);
+			if (crc_errors++ == crc_logged) {
+				std::string raw;
+				for (uint8_t b : rd)
+					raw += std::format(" {:02x}", b);
+				logger.warn(rom + " register read CRC mismatch:" + raw);
+			}
+			continue;
+		}
+		std::memcpy(data, rd, sizeof(rd));
 		/* check for valid status register */
 		if (data[STAT] != 0xff)
 			break;
@@ -1009,6 +1061,12 @@ uint8_t ds2408::reg_read(bool latch_reset)
 		// will try again
 		//delay(5);
 	} while (--retry > 0);
+	// data[] still holds the previous read: do not take it as this one,
+	// nor reset the latches not read. The device keeps its alarm.
+	if (crc_bad) {
+		logger.warn(rom + " register read failed its CRC on every retry");
+		return 0;
+	}
 	if (err) {
 		if ((retry == 0 || data[STAT] == 0xff) && !latch_reset)
 			return 0xff;
@@ -1184,7 +1242,6 @@ uint8_t ds2408::level_set(uint8_t pio, uint8_t level, uint8_t cmd, uint8_t val)
 	// no bus access, so outside the bus lock above
 	uint16_t crc16 = DS2482::crc16(data, 5, 0);
 	if (crc == static_cast<uint16_t>(~crc16)) {
-		logger.verbose(std::format("CRC ok {:#x}", crc));
 		if (cmd == TMR_TYPE_ON)
 			pins[pio].level = pct;
 		return 0xAA;

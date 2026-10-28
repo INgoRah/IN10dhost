@@ -1528,6 +1528,7 @@ TEST_F(FsTest, Ds2408Watchdog) {
 	EXPECT_EQ(cfg["last_watchdog"]["rom"], rom);
 	EXPECT_EQ(cfg["last_watchdog"]["type"], "ds2408");
 	EXPECT_EQ(cfg["last_watchdog"]["bus"], 2);
+	EXPECT_EQ(cfg["last_watchdog"]["status"], STAT_WATCHDOG);
 	EXPECT_EQ(cfg["last_watchdog"]["brightness"], 50);
 	EXPECT_EQ(cfg["last_watchdog"]["threshold"], 30);
 
@@ -1581,6 +1582,205 @@ TEST_F(FsTest, Ds2408Watchdog) {
 	plugins.remove("faulty");
 	ow.set_log_dir(old_dir);
 	fs::remove_all(dir);
+}
+
+/* The warning a reset leaves in the log: what kind it was, how long
+   since the previous one, and when the other ROM of a dual-ROM chip
+   (here a ds2450 with the same serial) was last selected. */
+TEST_F(FsTest, Ds2408WatchdogLog) {
+	namespace fs = std::filesystem;
+	fs::path dir = fs::temp_directory_path() / std::format("in10dfs-wdtlog-{}", getpid());
+	std::string old_dir = ow.get_log_dir();
+	ow.set_log_dir(dir.string());
+
+	std::string rom = OwDev::canonical_rom("29.1900FDFF6677");
+	std::string twin_rom = OwDev::canonical_rom("20.1900FDFF6677");
+	std::string other_rom = OwDev::canonical_rom("29.1A00FDFF6677");
+	ow.update_device(0, rom);
+	ow.update_device(0, twin_rom);
+	ow.update_device(0, other_rom);
+	ow.update_data();
+	ow.begin();
+	swHdl.begin(&ds);
+	ds2408* dev = (ds2408*)ow.find(rom);
+	OwDev* twin = ow.find(twin_rom);
+	ds2408* other = (ds2408*)ow.find(other_rom);
+	ASSERT_NE(dev, nullptr);
+	ASSERT_NE(twin, nullptr);
+	ASSERT_NE(other, nullptr);
+	LogLevel lvl = logger.get_level();
+	logger.set_level(LogLevel::NONE);
+
+	// same serial, other family: one chip
+	EXPECT_EQ(ow.twins(dev), std::vector<OwDev*>{ twin });
+	EXPECT_EQ(ow.twins(twin), std::vector<OwDev*>{ dev });
+	EXPECT_TRUE(ow.twins(other).empty());
+	EXPECT_EQ(ds.last_select(twin->addr), std::chrono::steady_clock::time_point{});
+
+	// a watchdog, the first one, the twin never selected
+	dev->data[STAT] = STAT_WATCHDOG;
+	swHdl.dev_watchdog(dev);
+	EXPECT_EQ(logger.warnings().last, std::format(
+		"Watchdog on {}! (status 0x88, first since start, {} last selected never)",
+		rom, twin_rom));
+
+	// a power-on reset, after the twin was used
+	ds.select(twin->addr);
+	EXPECT_NE(ds.last_select(twin->addr), std::chrono::steady_clock::time_point{});
+	dev->data[STAT] = 0x80;
+	swHdl.dev_watchdog(dev);
+	std::string last = logger.warnings().last;
+	EXPECT_TRUE(last.starts_with(std::format("Reset on {}! (status 0x80, previous ", rom))) << last;
+	EXPECT_NE(last.find(std::format("s ago, {} last selected ", twin_rom)), std::string::npos) << last;
+	EXPECT_TRUE(last.ends_with(" s ago)")) << last;
+
+	// no twin, nothing about one
+	other->data[STAT] = STAT_WATCHDOG;
+	swHdl.dev_watchdog(other);
+	EXPECT_EQ(logger.warnings().last, std::format(
+		"Watchdog on {}! (status 0x88, first since start)", other_rom));
+
+	logger.set_level(lvl);
+	ow.set_log_dir(old_dir);
+	fs::remove_all(dir);
+}
+
+/* Old firmware raises no alarm after a watchdog reset: one seen by any
+   register read - an uncached read, the ds2408 status poll - is handled
+   by the device polling as the alarm handling would. */
+TEST_F(FsTest, Ds2408WatchdogNoAlarm) {
+	namespace fs = std::filesystem;
+	char buf[16] = {};
+	fs::path dir = fs::temp_directory_path() / std::format("in10dfs-wdtpoll-{}", getpid());
+	std::string old_dir = ow.get_log_dir();
+	ow.set_log_dir(dir.string());
+
+	std::string rom = OwDev::canonical_rom("29.1B00FDFF6677");
+	auto watchdog = [&]() {
+		std::memset(buf, 0, sizeof(buf));
+		fs_ops.read(("/" + rom + "/watchdog").c_str(), buf, sizeof(buf), 0, nullptr);
+		return std::string(buf);
+	};
+	ow.update_device(1, rom);
+	ow.update_data();
+	ow.begin();
+	swHdl.begin(&ds);
+	ds2408* dev = (ds2408*)ow.find(rom);
+	ASSERT_NE(dev, nullptr);
+	LogLevel lvl = logger.get_level();
+	logger.set_level(LogLevel::NONE);
+	EXPECT_EQ(dev->pio_set(0xFE), 0xAA);
+
+	// nothing pending: the device polling leaves it alone
+	ow.dev_poll();
+	EXPECT_EQ(watchdog(), "0");
+
+	// an uncached read sees it: reported and restored with the next
+	// device polling, not only with an alarm
+	dev->sim_stat = STAT_WATCHDOG;
+	std::memset(buf, 0, sizeof(buf));
+	fs_ops.read(("/uncached/" + rom + "/BYTE").c_str(), buf, sizeof(buf), 0, nullptr);
+	EXPECT_TRUE(dev->watchdog_pending());
+	ow.dev_poll();
+	EXPECT_FALSE(dev->watchdog_pending());
+	EXPECT_EQ(watchdog(), "1");
+	EXPECT_EQ(dev->data[PIO_OUT], 0xFE);
+	EXPECT_TRUE(logger.warnings().last.starts_with("Watchdog on " + rom + "!"))
+		<< logger.warnings().last;
+
+	// the status poll of a ds2408 finds it by itself
+	dev->sim_stat = 0;
+	dev->reg_read(false);
+	dev->sim_stat = STAT_WATCHDOG;
+	EXPECT_EQ(fs_ops.write(("/" + rom + "/poll").c_str(), "1", 1, 0, nullptr), 1);
+	ow.dev_poll();
+	EXPECT_EQ(watchdog(), "2");
+	EXPECT_FALSE(dev->watchdog_pending());
+
+	dev->sim_stat = 0;
+	fs_ops.write(("/" + rom + "/poll").c_str(), "0", 1, 0, nullptr);
+	logger.set_level(lvl);
+	ow.set_log_dir(old_dir);
+	fs::remove_all(dir);
+}
+
+/* A register read failing its CRC, as a slave slipping a time slot
+   makes it up: read again, never taken as is, in particular not for a
+   watchdog. */
+TEST_F(FsTest, Ds2408RegReadCrc) {
+	char buf[16] = {};
+	std::string rom = OwDev::canonical_rom("29.1800FDFF6677");
+	auto crc_errors = [&]() {
+		std::memset(buf, 0, sizeof(buf));
+		fs_ops.read(("/" + rom + "/crc_errors").c_str(), buf, sizeof(buf), 0, nullptr);
+		return std::string(buf);
+	};
+	ow.update_device(2, rom);
+	ow.update_data();
+	ow.begin();
+	swHdl.begin(&ds);
+	ds2408* dev = (ds2408*)ow.find(rom);
+	ASSERT_NE(dev, nullptr);
+	LogLevel lvl = logger.get_level();
+	logger.set_level(LogLevel::NONE);
+
+	// as read from 29.0402FBFD66778F: one bit lost at the activity
+	// latch shifts all after it, the status claims a reset (0x81)
+	const std::array<uint8_t, 10> slipped =
+		{ 0xfd, 0xfd, 0x85, 0x7f, 0x00, 0x81, 0x82, 0x7f, 0x37, 0xc1 };
+	// the read without the slip
+	const std::array<uint8_t, 10> good =
+		{ 0xfd, 0xfd, 0x0a, 0xff, 0x00, 0x02, 0x05, 0xff, 0x6e, 0x82 };
+	// no answer at all
+	std::array<uint8_t, 10> none;
+	none.fill(0xff);
+	EXPECT_EQ(crc_errors(), "0");
+
+	// read again, the good one is taken
+	dev->sim_reads = { slipped, good };
+	EXPECT_EQ(dev->reg_read(false), 0xAA);
+	EXPECT_TRUE(dev->sim_reads.empty());
+	EXPECT_EQ(crc_errors(), "1");
+	EXPECT_EQ(dev->last_latch, 0x0a);
+	EXPECT_EQ(dev->data[STAT], 0x02);
+	EXPECT_EQ(dev->data[PIO_TIME], 0x05);
+	EXPECT_FALSE(dev->watchdog_pending());
+	// marked in the trace, with the status it claimed (bus 2: d)
+	std::vector<char> vcd(DS2482::log_size());
+	int n = ds.log_dump(vcd.data(), vcd.size());
+	ASSERT_GT(n, 0);
+	EXPECT_NE(std::string(vcd.data(), n).find("b01000101 a\nb10000001 d\n"),
+		std::string::npos);
+
+	// every try (REG_RETRY - 1) fails: nothing taken, the latches are
+	// not reset on the device, no watchdog
+	uint8_t before[10];
+	std::memcpy(before, dev->data, sizeof(before));
+	dev->sim_reads.assign(19, slipped);
+	EXPECT_EQ(dev->reg_read(true), 0);
+	EXPECT_TRUE(dev->sim_reads.empty());
+	EXPECT_EQ(crc_errors(), "20");
+	EXPECT_EQ(std::memcmp(dev->data, before, sizeof(before)), 0);
+	EXPECT_FALSE(dev->watchdog_pending());
+
+	// the same through the alarm handling: no watchdog, no latches
+	dev->sim_reads.assign(19, slipped);
+	EXPECT_TRUE(swHdl.dev_alarm(2, dev->addr));
+	EXPECT_EQ(crc_errors(), "39");
+	EXPECT_EQ(dev->wdt_count, 0u);
+	EXPECT_EQ(dev->latched, 0);
+
+	// no answer is not a CRC error, read again as before
+	dev->sim_reads = { none, good };
+	EXPECT_EQ(dev->reg_read(false), 0xAA);
+	EXPECT_EQ(crc_errors(), "39");
+	EXPECT_EQ(dev->data[STAT], 0x02);
+
+	// the simulated bus answers with a good CRC by itself
+	EXPECT_EQ(dev->reg_read(false), 0xAA);
+	EXPECT_EQ(crc_errors(), "39");
+
+	logger.set_level(lvl);
 }
 
 TEST_F(FsTest, Ds2408WriteCfg) {

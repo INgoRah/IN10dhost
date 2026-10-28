@@ -343,7 +343,7 @@ int OwDevices::save(const std::string& path) {
 		::close(dfd);
 	}
 	saved_at = std::chrono::system_clock::now();
-	logger.verbose("config saved to " + path);
+	logger.debug("config saved to " + path);
 	return 0;
 }
 
@@ -439,6 +439,18 @@ OwDev* OwDevices::find(uint8_t bus, uint8_t id, uint8_t type)
 		}
 	}
 	return nullptr;
+}
+
+std::vector<OwDev*> OwDevices::twins(const OwDev* dev)
+{
+	std::vector<OwDev*> res;
+	for (size_t i = 0; i < deviceCount; ++i) {
+		OwDev* d = dev_list[i].dev;
+		if (d && d != dev && d->addr[0] != dev->addr[0] &&
+		    std::equal(d->addr + 1, d->addr + 7, dev->addr + 1))
+			res.push_back(d);
+	}
+	return res;
 }
 
 IDev* OwDevices::get_dev(uint64_t targetCode)
@@ -683,6 +695,14 @@ int OwDevices::dev_poll()
 		} else if (check == 0) {
 			ret = std::max(ret, 0);
 		}
+	}
+	/* a reset seen by any register read - the poll above, an uncached
+	   read from the file system - not only by the alarm handling: an
+	   older owSlave firmware raises no alarm after it */
+	for (auto& dev : cache.devices) {
+		auto* d = dynamic_cast<ds2408*>(&*dev);
+		if (d && d->watchdog_pending())
+			swHdl.dev_watchdog(d);
 	}
 	if (cnt == 0)
 		return ret; // no device needs polling

@@ -124,6 +124,10 @@ class OwDevices : public IDevices
 		OwDev* find(uint64_t targetCode);
 		IDev* get_dev(uint64_t targetCode);
 		OwDev* find(uint8_t bus, uint8_t id, uint8_t type = 0x29);
+		/* The other ROMs of the same chip: an owSlave built with
+		   DUAL_ROM answers under two family codes with the same serial
+		   (e.g. 20.0200FDFF667734 and 29.0200FDFF6677F8). */
+		std::vector<OwDev*> twins(const OwDev* dev);
 		int bus_count() const { return MAX_BUS; }
 		void set_poll(int poll) { cache.poll = poll; };
 		int get_poll() { return cache.poll; };

@@ -5,6 +5,8 @@
 #include <mutex>
 #include <iostream>
 #include <fstream> // Required for std::ofstream
+#include <chrono>
+#include <unordered_map>
 
 #define stOk 0
 #define stTimeout 1
@@ -115,6 +117,9 @@ public:
 	void write(const uint8_t *buf, uint16_t count, uint8_t power/* = 0 */);
 	// Issue a 1-Wire rom select command, you do the reset first.
 	void select(const  uint8_t rom[8]);
+	/* When select() last addressed this ROM, the epoch if never.
+	   Has its own lock, the bus mutex is not needed. */
+	std::chrono::steady_clock::time_point last_select(const uint8_t rom[8]);
 
 	// Clear the search state so that if will start from the beginning again.
 	void reset_search();
@@ -144,6 +149,9 @@ private:
 	uint8_t searchExhausted = 0;
 	/* adapter supports plain-I2C combined transfers (I2C_FUNC_I2C) */
 	bool _combined = false;
+	/* select() times per ROM (8 bytes as one key), see last_select() */
+	std::mutex sel_mtx;
+	std::unordered_map<uint64_t, std::chrono::steady_clock::time_point> selected;
 
 	void set_error(int err_code, int def);
 	void _write(uint8_t b);

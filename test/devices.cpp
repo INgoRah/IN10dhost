@@ -520,6 +520,20 @@ TEST_F(DevTest, ds2450)
 	// directly since fs_read_volt() never passes it through; dat[]
 	// was just populated by the poll() above
 	EXPECT_EQ(dev->adc_read(0, 2), 0);
+
+	// convert and read both end with a bus reset, so no slave is left
+	// waiting for more slots (the owSlave emulation hangs on that):
+	// the trace ends with the reset (state '0') on the device's bus
+	auto trace_ends_with_reset = [&]() {
+		std::vector<char> vcd(DS2482::log_size());
+		int n = ds.log_dump(vcd.data(), vcd.size());
+		std::string t(vcd.data(), n > 0 ? n : 0);
+		return t.ends_with("b00110000 a\nb00000000 b\n");
+	};
+	EXPECT_EQ(dev->adc_read(0, 0), 0);
+	EXPECT_TRUE(trace_ends_with_reset());
+	EXPECT_EQ(dev->adc_read(0, 1), 0);
+	EXPECT_TRUE(trace_ends_with_reset());
 }
 
 // every other config-loading test in this suite uses a ds2408-only

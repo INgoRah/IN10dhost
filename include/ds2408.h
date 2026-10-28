@@ -82,13 +82,21 @@ class ds2408 : public OwDev, public IDS2408 {
 		// watchdog resets seen since the start
 		unsigned wdt_count = 0;
 		int r_watchdog(char* buf, size_t size, bool uncached, int idx);
+		// register reads dropped for a CRC mismatch since the start
+		unsigned crc_errors = 0;
+		int r_crc_errors(char* buf, size_t size, bool uncached, int idx);
 #ifdef TESTING
 		// GTest testing support: the status register the simulated
 		// bus reports, e.g. STAT_WATCHDOG
 		uint8_t sim_stat = 0;
 		// and whether its PIO and level writes fail
 		bool sim_fail = false;
+		// raw answers (8 registers, CRC16) for the next register reads,
+		// taken before the simulated good read above
+		std::vector<std::array<uint8_t, 10>> sim_reads;
 		FRIEND_TEST(FsTest, Ds2408Watchdog);
+		FRIEND_TEST(FsTest, Ds2408RegReadCrc);
+		FRIEND_TEST(FsTest, Ds2408WatchdogNoAlarm);
 #endif
 	public:
 		/* [0] PIO Logic State  = sensed
@@ -106,6 +114,8 @@ class ds2408 : public OwDev, public IDS2408 {
 		using OwDev::OwDev;
 		using OwDev::type;
 		void begin(bool soft=false) override;
+		// a status check, see poll in the device's directory
+		int poll() override;
 
 		ds2408() { type = "ds2408"; };
 		ds2408(std::string rom) : OwDev(std::move(rom)) {
@@ -153,6 +163,8 @@ class ds2408 : public OwDev, public IDS2408 {
 		int get_threshold() const;
 		// a register read saw the watchdog status, not yet restored
 		bool watchdog_pending() const;
+		// when SwitchHandler::dev_watchdog() last reported one
+		std::chrono::steady_clock::time_point wdt_seen{};
 		/* After a watchdog reset: writes the cached state back - the
 		   outputs as before the reset, the PWM levels, threshold and
 		   brightness. Returns 0, or -EAGAIN if a part failed. */
