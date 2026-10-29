@@ -2,7 +2,7 @@
 #define _VERSION_H
 
 /* The release version, keep in step with debian/changelog */
-#define IN10DFS_VERSION "0.5.1"
+#define IN10DFS_VERSION "0.5.2"
 
 /* "<version>", followed by " (<git hash>[-dirty])" when built from a
    git checkout outside a Debian package build, see cmake/git_version.cmake */
