@@ -6,6 +6,7 @@
 #include <sstream>
 #include <string>
 #include <fuse3/fuse.h>
+#include "parse.h"
 #include "main.h"
 #include "fs.h"
 #include "ow_devices.h"
@@ -122,7 +123,7 @@ int ds2408::w_byte(const char* buf, size_t size, int)
 {
 	auto lk = lock();
 	try {
-		uint8_t tmp = (uint8_t)(std::stoi(buf) & 0xff);
+		uint8_t tmp = (uint8_t)(parse_num(buf, size) & 0xff);
 		pio_set(tmp);
 		return size;
 	} catch (const std::invalid_argument&) {
@@ -178,13 +179,12 @@ static bool parse_all(const std::string& s, uint8_t& bits)
 	return i == 8;
 }
 
-// .BYTE: a number 0..255
+// .BYTE: a number 0..255, see parse_num()
 static bool parse_byte(const std::string& s, uint8_t& bits)
 {
 	try {
-		size_t end;
-		int v = std::stoi(s, &end);
-		if (end != s.size() || v < 0 || v > 255)
+		int v = parse_num(s.data(), s.size());
+		if (v < 0 || v > 255)
 			return false;
 		bits = (uint8_t)v;
 		return true;
@@ -263,7 +263,7 @@ int ds2408::w_pio(const char* buf, size_t size, int idx)
 		return size;
 	}
 	try {
-		uint8_t tmp = (uint8_t)(std::stoi(buf) & 0xff);
+		uint8_t tmp = (uint8_t)(parse_num(buf, size) & 0xff);
 		logger.debug(std::format("{}.{}: set PIO.{} = {}", name, pins[idx].name, idx, tmp));
 		// inverted for plain IO: writing 1 clears the output latch bit,
 		// writing 0 sets it (see pin_switch); PWM takes the level as is
@@ -531,7 +531,7 @@ int ds2408::w_pin_func(const char* buf, size_t size, int idx)
 {
 	auto lk = lock();
 	try {
-		uint8_t tmp = (uint8_t)(std::stoi(buf) & 0xff);
+		uint8_t tmp = (uint8_t)(parse_num(buf, size) & 0xff);
 		cfg[CFG_PIN_ID + idx] = tmp;
 		return size;
 	} catch (const std::invalid_argument&) {
@@ -552,7 +552,7 @@ int ds2408::w_threshold(const char* buf, size_t size, int)
 {
 	auto lk = lock();
 	try {
-		uint8_t tmp = (uint8_t)(std::stoi(buf) & 0xff);
+		uint8_t tmp = (uint8_t)(parse_num(buf, size) & 0xff);
 		if (threshold_set(tmp) == 0)
 			return size;
 		return -EAGAIN;
@@ -574,7 +574,7 @@ int ds2408::w_brightness(const char* buf, size_t size, int)
 {
 	auto lk = lock();
 	try {
-		uint8_t tmp = (uint8_t)(std::stoi(buf) & 0xff);
+		uint8_t tmp = (uint8_t)(parse_num(buf, size) & 0xff);
 		if (brightness_set(tmp) == 0)
 			return size;
 		return -EAGAIN;
@@ -613,15 +613,27 @@ int ds2408::r_extport(char* buf, size_t, bool, int)
 int ds2408::w_extport(const char* buf, size_t size, int)
 {
 	auto lk = lock();
-	std::string s(buf, size);
-	int ddr, port;
+	std::istringstream in(std::string(buf, size));
+	std::string tok[2], extra;
+	int val[2];
 
 	if (!vis_extport(0))
 		return -ENOENT;
-	if (std::sscanf(s.c_str(), "%i %i", &ddr, &port) != 2
-		|| ddr < 0 || ddr > 0xff || port < 0 || port > 0xff)
+	if (!(in >> tok[0] >> tok[1]) || in >> extra)
 		return -EINVAL;
-	if (extport_set((uint8_t)ddr, (uint8_t)port) != 0)
+	try {
+		for (int i = 0; i < 2; i++) {
+			val[i] = parse_num(tok[i].data(), tok[i].size());
+			if (val[i] < 0 || val[i] > 0xff)
+				return -EINVAL;
+		}
+	} catch (const std::invalid_argument&) {
+		return -EINVAL;
+	} catch (const std::out_of_range&) {
+		return -EINVAL;
+	}
+	uint8_t ddr = (uint8_t)val[0], port = (uint8_t)val[1];
+	if (extport_set(ddr, port) != 0)
 		return -EAGAIN;
 	return size;
 }
@@ -691,7 +703,7 @@ int ds2408::w_level(const char* buf, size_t size, int idx)
 	if (!vis_level(idx))
 		return -ENOENT;
 	try {
-		pct = std::stoi(std::string(buf, size));
+		pct = parse_num(buf, size);
 	} catch (const std::invalid_argument&) {
 		return -EINVAL;
 	} catch (const std::out_of_range&) {

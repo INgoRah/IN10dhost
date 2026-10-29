@@ -11,6 +11,7 @@
 #include <cstdint>
 
 #include <fuse3/fuse.h>
+#include "parse.h"
 #include "main.h"
 #include "fs.h"
 #include "ard_i2c.h"
@@ -495,7 +496,7 @@ int Ard_i2c::w_mode(const char* buf, size_t size, int)
 {
 	auto lk = lock();
 	try {
-		uint8_t tmp = (uint8_t)(std::stoi(buf) & 0xff);
+		uint8_t tmp = (uint8_t)(parse_num(buf, size) & 0xff);
 		logger.log(LogLevel::DEBUG, "write mode, set val=" + std::to_string(tmp));
 		set_mode(tmp);
 		return size;
@@ -553,7 +554,7 @@ int Ard_i2c::w_test(const char* buf, size_t size, int)
 {
 	auto lk = lock();
 	try {
-		uint8_t tmp = (uint8_t)(std::stoi(buf) & 0xff);
+		uint8_t tmp = (uint8_t)(parse_num(buf, size) & 0xff);
 		logger.log(LogLevel::DEBUG, "write test, set val=" + std::to_string(tmp));
 #ifdef USE_I2C
 		int fd = open("/dev/i2c-0", O_RDWR);

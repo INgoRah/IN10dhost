@@ -125,6 +125,7 @@ add_executable(in10dfs
     src/ds2450.cpp
     src/ds1820.cpp
     src/ow_devices.cpp
+    src/parse.cpp
     src/plugins.cpp
     src/switch_handler.cpp
     src/version.cpp
