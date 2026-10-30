@@ -6,6 +6,8 @@
 #define TMR_TYPE_BRIGHTNESS 0xE3
 /** Configure brigthness threshold when to switch */
 #define TMR_TYPE_THRESHOLD 0xE5
+/** Extended PORT setting: VAL1 to DDRC, VAL2 to PORTC */
+#define TMR_TYPE_EXTPORT 0xE7
 
 /** Switch on without timer (force on) */
 #define TMR_TYPE_ON 0xDD
@@ -86,6 +88,18 @@
 #define CFG_OUT_HIGH 0x22
 #define CFG_OUT_PWM 0x23
 
+/* feature byte, a bit cleared if supported */
+#define CFG_FEAT_ID 19
+#define FEAT_TEMP 0x01
+#define FEAT_ADC_LIGHT 0x02
+/** pin timers, extended auto switching and the extended port */
+#define FEAT_TIMER 0x04
+/* firmware version, major and minor */
+#define CFG_VERS_ID 21
+/* older firmware leaves the feature byte as provisioned in the EEPROM,
+   so the bits are taken from this version on only */
+#define FEAT_EXTPORT_MIN_VERSION 0x0109
+
 enum _pio_mode {
 	OFF,
 	LEVEL,
@@ -98,11 +112,11 @@ class IDS2408 {
 		virtual uint8_t pio_set(uint8_t pio) = 0;
 		virtual uint8_t reg_read(bool latch_reset) = 0;
 		virtual uint8_t latch_reset() = 0;
-		virtual uint8_t level_set(uint8_t pio, uint8_t level,
-			uint8_t cmd = TMR_TYPE_ON, uint8_t val = 0) = 0;
+		virtual uint8_t level_set(uint8_t pio, uint8_t level) = 0;
 		virtual uint8_t pin_switch(uint8_t pio, enum _pio_mode state,
 			uint8_t lvl = 0) = 0;
 		virtual int brightness_set(uint8_t brightness) = 0;
 		virtual int threshold_set(uint8_t threshold) = 0;
+		virtual int extport_set(uint8_t ddr, uint8_t port) = 0;
 };
 #endif

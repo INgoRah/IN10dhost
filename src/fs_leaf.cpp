@@ -2,6 +2,7 @@
 #include <chrono>
 #include <cstring>
 #include <format>
+#include "parse.h"
 #include "main.h"
 #include "fs_leaf.h"
 #include "ow_devices.h"
@@ -42,7 +43,7 @@ int FsLeaf::r_log(char* buf, size_t, bool, int)
 int FsLeaf::w_log(const char* buf, size_t size, int)
 {
 	try {
-		int tmp = std::stoi(buf);
+		int tmp = parse_num(buf, size);
 		if (tmp < 0 || tmp > 8)
 			return -EINVAL;
 		logger.set_level((LogLevel)tmp);
@@ -63,7 +64,7 @@ int FsLeaf::r_poll(char* buf, size_t, bool, int)
 int FsLeaf::w_poll(const char* buf, size_t size, int)
 {
 	try {
-		uint8_t tmp = (uint8_t)(std::stoi(buf));
+		uint8_t tmp = (uint8_t)(parse_num(buf, size));
 		ow.set_poll(tmp);
 		return size;
 	} catch (const std::invalid_argument&) {

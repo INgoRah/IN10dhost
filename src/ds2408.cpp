@@ -6,6 +6,7 @@
 #include <sstream>
 #include <string>
 #include <fuse3/fuse.h>
+#include "parse.h"
 #include "main.h"
 #include "fs.h"
 #include "ow_devices.h"
@@ -40,6 +41,7 @@ const FsEntry<ds2408> ds2408::table[] = {
 	{ "pin.*/room", PIN_NAME_MAX, 8, false, nullptr, nullptr, &ds2408::r_pin_room, &ds2408::w_pin_room },
 	{ "threshold", 3, 0, false, nullptr, nullptr, &ds2408::r_threshold, &ds2408::w_threshold },
 	{ "brightness", 3, 0, false, nullptr, nullptr, &ds2408::r_brightness, &ds2408::w_brightness },
+	{ "extport", 9, 0, false, &ds2408::vis_extport, nullptr, &ds2408::r_extport, &ds2408::w_extport },
 	{ "level.*", 3, 8, false, &ds2408::vis_level, nullptr, &ds2408::r_level, &ds2408::w_level },
 	{ "watchdog", 5, 0, false, nullptr, nullptr, &ds2408::r_watchdog, nullptr },
 	{ "crc_errors", 5, 0, false, nullptr, nullptr, &ds2408::r_crc_errors, nullptr },
@@ -121,7 +123,7 @@ int ds2408::w_byte(const char* buf, size_t size, int)
 {
 	auto lk = lock();
 	try {
-		uint8_t tmp = (uint8_t)(std::stoi(buf) & 0xff);
+		uint8_t tmp = (uint8_t)(parse_num(buf, size) & 0xff);
 		pio_set(tmp);
 		return size;
 	} catch (const std::invalid_argument&) {
@@ -177,13 +179,12 @@ static bool parse_all(const std::string& s, uint8_t& bits)
 	return i == 8;
 }
 
-// .BYTE: a number 0..255
+// .BYTE: a number 0..255, see parse_num()
 static bool parse_byte(const std::string& s, uint8_t& bits)
 {
 	try {
-		size_t end;
-		int v = std::stoi(s, &end);
-		if (end != s.size() || v < 0 || v > 255)
+		int v = parse_num(s.data(), s.size());
+		if (v < 0 || v > 255)
 			return false;
 		bits = (uint8_t)v;
 		return true;
@@ -262,7 +263,7 @@ int ds2408::w_pio(const char* buf, size_t size, int idx)
 		return size;
 	}
 	try {
-		uint8_t tmp = (uint8_t)(std::stoi(buf) & 0xff);
+		uint8_t tmp = (uint8_t)(parse_num(buf, size) & 0xff);
 		logger.debug(std::format("{}.{}: set PIO.{} = {}", name, pins[idx].name, idx, tmp));
 		// inverted for plain IO: writing 1 clears the output latch bit,
 		// writing 0 sets it (see pin_switch); PWM takes the level as is
@@ -530,7 +531,7 @@ int ds2408::w_pin_func(const char* buf, size_t size, int idx)
 {
 	auto lk = lock();
 	try {
-		uint8_t tmp = (uint8_t)(std::stoi(buf) & 0xff);
+		uint8_t tmp = (uint8_t)(parse_num(buf, size) & 0xff);
 		cfg[CFG_PIN_ID + idx] = tmp;
 		return size;
 	} catch (const std::invalid_argument&) {
@@ -551,7 +552,7 @@ int ds2408::w_threshold(const char* buf, size_t size, int)
 {
 	auto lk = lock();
 	try {
-		uint8_t tmp = (uint8_t)(std::stoi(buf) & 0xff);
+		uint8_t tmp = (uint8_t)(parse_num(buf, size) & 0xff);
 		if (threshold_set(tmp) == 0)
 			return size;
 		return -EAGAIN;
@@ -573,7 +574,7 @@ int ds2408::w_brightness(const char* buf, size_t size, int)
 {
 	auto lk = lock();
 	try {
-		uint8_t tmp = (uint8_t)(std::stoi(buf) & 0xff);
+		uint8_t tmp = (uint8_t)(parse_num(buf, size) & 0xff);
 		if (brightness_set(tmp) == 0)
 			return size;
 		return -EAGAIN;
@@ -582,6 +583,59 @@ int ds2408::w_brightness(const char* buf, size_t size, int)
 	} catch (const std::out_of_range&) {
 		return -EINVAL;
 	}
+}
+
+bool ds2408::has_feature(uint16_t min_ver, uint8_t feat) const
+{
+	auto lk = lock();
+	uint16_t ver = (uint16_t)(cfg[CFG_VERS_ID] << 8 | cfg[CFG_VERS_ID + 1]);
+
+	return ver >= min_ver && (cfg[CFG_FEAT_ID] & feat) == 0;
+}
+
+bool ds2408::vis_extport(int) const
+{
+	return has_feature(FEAT_EXTPORT_MIN_VERSION, FEAT_TIMER);
+}
+
+// experimental extended port: "<ddr> <port>", decimal or 0x hex, as
+// DDRC and PORTC of the owSlave
+int ds2408::r_extport(char* buf, size_t, bool, int)
+{
+	auto lk = lock();
+	// readable only where it is listed, see vis_extport()
+	if (!vis_extport(0))
+		return -ENOENT;
+	std::sprintf(buf, "0x%02x 0x%02x", ext_ddr, ext_port);
+	return std::strlen(buf);
+}
+
+int ds2408::w_extport(const char* buf, size_t size, int)
+{
+	auto lk = lock();
+	std::istringstream in(std::string(buf, size));
+	std::string tok[2], extra;
+	int val[2];
+
+	if (!vis_extport(0))
+		return -ENOENT;
+	if (!(in >> tok[0] >> tok[1]) || in >> extra)
+		return -EINVAL;
+	try {
+		for (int i = 0; i < 2; i++) {
+			val[i] = parse_num(tok[i].data(), tok[i].size());
+			if (val[i] < 0 || val[i] > 0xff)
+				return -EINVAL;
+		}
+	} catch (const std::invalid_argument&) {
+		return -EINVAL;
+	} catch (const std::out_of_range&) {
+		return -EINVAL;
+	}
+	uint8_t ddr = (uint8_t)val[0], port = (uint8_t)val[1];
+	if (extport_set(ddr, port) != 0)
+		return -EAGAIN;
+	return size;
 }
 
 // watchdog resets seen since the start
@@ -649,7 +703,7 @@ int ds2408::w_level(const char* buf, size_t size, int idx)
 	if (!vis_level(idx))
 		return -ENOENT;
 	try {
-		pct = std::stoi(std::string(buf, size));
+		pct = parse_num(buf, size);
 	} catch (const std::invalid_argument&) {
 		return -EINVAL;
 	} catch (const std::out_of_range&) {
@@ -835,7 +889,7 @@ uint8_t ds2408::pin_switch(uint8_t pio, enum _pio_mode state, uint8_t lvl)
 		}
 		// TODO Toggle leads to dim stages
 		// level_set() keeps the level for readback once it is applied
-		if (level_set(pio, lvl, TMR_TYPE_ON) != 0xAA)
+		if (level_set(pio, lvl) != 0xAA)
 			return -1;
 	} else {
 		uint8_t tmp = 0;
@@ -1175,46 +1229,35 @@ int ds2408::cfg_write(const uint8_t* data, int len)
 }
 
 /*
-	level: 0..100 percent, larger values are taken as 100. The device
-	takes 0..254, so it is converted here, like the Arduino host did in
-	SwitchHandler::setLevel() before calling ds2408xPinSet().
-	The level a TMR_TYPE_ON sets is kept per pin in pins[].level once the
-	device confirmed it, for everyone calling this - level.*, PIO.* and
-	the switch handler through pin_switch() - to read back.
-	cmd:
-	- TMR_TYPE_BRIGHTNESS: set current brightness: level_set(0, 0, 0xE3, light)
-	- TMR_TYPE_THRESHOLD
+	owSlave custom command: 0xC5 TYPE PIN VAL1 VAL2, answered with the
+	inverted CRC16 over all of it. The bytes are sent as they are given,
+	see level_set() for a PWM level in percent.
+	cmd (TYPE), see TMR_TYPE_xxx:
+	- TMR_TYPE_ON, TMR_TYPE_STOP_DIM: val2 the PWM level 0..254
+	- TMR_TYPE_BRIGHTNESS: val1 the current brightness
+	- TMR_TYPE_THRESHOLD: val1 the threshold
+	- TMR_TYPE_EXTPORT: val1 to DDRC, val2 to PORTC (experimental)
 */
-uint8_t ds2408::level_set(uint8_t pio, uint8_t level, uint8_t cmd, uint8_t val)
+uint8_t ds2408::custom_cmd(uint8_t pio, uint8_t cmd, uint8_t val1, uint8_t val2)
 {
 	auto lk = lock();
-	uint8_t pct = level > 100 ? 100 : level;
-
-	level = (uint8_t)(pct * 254 / 100);
 #ifdef USE_I2C
-	uint8_t data[5] = { 0xC5, cmd, pio, val, level };
+	uint8_t data[5] = { 0xC5, cmd, pio, val1, val2 };
 	uint16_t crc;
 #endif
-	logger.log(LogLevel::DEBUG, "set PIO level=" + std::to_string(pct) + "% (" + std::to_string(level) + ") for PIO " + std::to_string(pio));
 
 #ifndef USE_I2C
-	(void)val;
+	(void)pio;
+	(void)cmd;
+	(void)val1;
+	(void)val2;
 #ifdef TESTING
 	if (sim_fail)
 		return 0xff;
 #endif
-	if (cmd == TMR_TYPE_ON)
-		pins[pio].level = pct;
 	return 0xaa;
 #else
-	/* if setting any level, a level 0 means stop */
-	if (cmd == TMR_TYPE_ON) {
-		if (level == 0)
-			/* dim down */
-			data[1] = TMR_TYPE_STOP_DIM;
-		data[3] = level;
-	}
-	logger.debug(std::format("send cmd {:#x} {:#x} {:#x} {:#x}", data[1], data[2], data[3], data[4]));
+	logger.verbose(std::format("send cmd {:#x} {:#x} {:#x} {:#x}", data[1], data[2], data[3], data[4]));
 	// coverity[sleep] - bus mutex must be held for the whole 1-Wire
 	// transaction
 	{
@@ -1241,24 +1284,44 @@ uint8_t ds2408::level_set(uint8_t pio, uint8_t level, uint8_t cmd, uint8_t val)
 	}
 	// no bus access, so outside the bus lock above
 	uint16_t crc16 = DS2482::crc16(data, 5, 0);
-	if (crc == static_cast<uint16_t>(~crc16)) {
-		if (cmd == TMR_TYPE_ON)
-			pins[pio].level = pct;
+	if (crc == static_cast<uint16_t>(~crc16))
 		return 0xAA;
-	}
-	else
-		logger.warn(std::format("CRC mismatch {:#x} <> {:#x}", crc, ~crc16));
-
+	logger.warn(std::format("CRC mismatch {:#x} <> {:#x}", crc, ~crc16));
 
 	return 0xff;
 #endif
+}
+
+/*
+	level: 0..100 percent, larger values are taken as 100. The device
+	takes 0..254, so it is converted here, like the Arduino host did in
+	SwitchHandler::setLevel() before calling ds2408xPinSet().
+	The level is kept per pin in pins[].level once the device confirmed
+	it, for everyone calling this - level.*, PIO.* and the switch handler
+	through pin_switch() - to read back.
+*/
+uint8_t ds2408::level_set(uint8_t pio, uint8_t level)
+{
+	auto lk = lock();
+	uint8_t pct = level > 100 ? 100 : level;
+	uint8_t raw = (uint8_t)(pct * 254 / 100);
+	/* if setting any level, a level 0 means stop */
+	uint8_t cmd = raw == 0 ? TMR_TYPE_STOP_DIM : TMR_TYPE_ON;
+
+	logger.debug("set PIO level=" + std::to_string(pct) + "% (" + std::to_string(raw) + ") for PIO " + std::to_string(pio));
+	// coverity[sleep] - device lock held for the whole command, see dev_mtx
+	if (custom_cmd(pio, cmd, raw, raw) != 0xAA)
+		return 0xff;
+	pins[pio].level = pct;
+	return 0xAA;
 }
 
 int ds2408::brightness_set(uint8_t brightness)
 {
 	auto lk = lock();
 	this->brightness = brightness;
-	if (level_set(0, 0, TMR_TYPE_BRIGHTNESS, brightness) != 0xAA)
+	// coverity[sleep] - device lock held for the whole command, see dev_mtx
+	if (custom_cmd(0, TMR_TYPE_BRIGHTNESS, brightness, 0) != 0xAA)
 		return -EAGAIN;
 	return 0;
 }
@@ -1267,7 +1330,20 @@ int ds2408::threshold_set(uint8_t threshold)
 {
 	auto lk = lock();
 	this->threshold = threshold;
-	if (level_set(0, 0, TMR_TYPE_THRESHOLD, threshold) != 0xAA)
+	// coverity[sleep] - device lock held for the whole command, see dev_mtx
+	if (custom_cmd(0, TMR_TYPE_THRESHOLD, threshold, 0) != 0xAA)
+		return -EAGAIN;
+	return 0;
+}
+
+int ds2408::extport_set(uint8_t ddr, uint8_t port)
+{
+	auto lk = lock();
+	ext_ddr = ddr;
+	ext_port = port;
+	ext_known = true;
+	// coverity[sleep] - device lock held for the whole command, see dev_mtx
+	if (custom_cmd(0, TMR_TYPE_EXTPORT, ddr, port) != 0xAA)
 		return -EAGAIN;
 	return 0;
 }
@@ -1319,6 +1395,16 @@ int ds2408::watchdog_restore()
 		err++;
 	if (brightness != 0 && brightness_set((uint8_t)brightness) != 0)
 		err++;
+	if (ext_known && extport_set(ext_ddr, ext_port) != 0)
+		err++;
+	/* reset again by the restore itself, as switching a load pulling
+	   the supply does: do not go round in circles, leave the outputs
+	   as the device has them */
+	if (wdt_pending) {
+		wdt_pending = false;
+		logger.warn(rom + " reset again by the restore, outputs left as they are");
+		return -EAGAIN;
+	}
 	if (err) {
 		logger.warn(rom + std::format(" watchdog: restore incomplete, {} failed", err));
 		return -EAGAIN;

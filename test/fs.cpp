@@ -13,6 +13,7 @@
 
 #include "main.h"
 #include "fs.h"
+#include "parse.h"
 #include "ds2482.h"
 #include "ow_devices.h"
 #include "ds2408.h"
@@ -1253,13 +1254,144 @@ TEST_F(FsTest, AlarmReaddirSkipsNonAlarmingDevices) {
 	EXPECT_EQ(res, 0);
 	EXPECT_EQ(std::find(seen.begin(), seen.end(), dev->rom), seen.end());
 }
+TEST(Parse, Num) {
+	auto num = [](const char* s) { return parse_num(s, std::strlen(s)); };
+
+	EXPECT_EQ(num("120"), 120);
+	EXPECT_EQ(num("0xFE"), 254);
+	EXPECT_EQ(num("0Xfe"), 254);
+	EXPECT_EQ(num("-5"), -5);
+	EXPECT_EQ(num("-0x10"), -16);
+	// no octal
+	EXPECT_EQ(num("010"), 10);
+	EXPECT_EQ(num("0"), 0);
+	// echo's newline, white space and a NUL around it
+	EXPECT_EQ(num(" 42\n"), 42);
+	EXPECT_EQ(parse_num("7\0", 2), 7);
+	// only size bytes are taken
+	EXPECT_EQ(parse_num("123", 2), 12);
+
+	EXPECT_THROW(num(""), std::invalid_argument);
+	EXPECT_THROW(num("  "), std::invalid_argument);
+	EXPECT_THROW(num("abc"), std::invalid_argument);
+	EXPECT_THROW(num("0x"), std::invalid_argument);
+	EXPECT_THROW(num("12abc"), std::invalid_argument);
+	EXPECT_THROW(num("0xFG"), std::invalid_argument);
+	EXPECT_THROW(num("1 2"), std::invalid_argument);
+	EXPECT_THROW(num("99999999999999999999"), std::out_of_range);
+	EXPECT_THROW(num("99999999999"), std::out_of_range);
+	EXPECT_THROW(num("0x100000000"), std::out_of_range);
+}
+TEST_F(FsTest, Ds2408HexWrite) {
+	char buf[32];
+
+	ow.update_device(1, "29.0701F8FE6677F4");
+	ow.update_data();
+	ow.begin();
+	ds2408* dev = (ds2408*)ow.find(0x290701F8FE6677F4);
+	ASSERT_NE(dev, nullptr);
+
+	std::strcpy(buf, "0xFE\n");
+	EXPECT_EQ(fs_ops.write("/29.0701F8FE6677F4/threshold", buf, 5, 0, nullptr), 5);
+	fs_ops.read("/29.0701F8FE6677F4/threshold", buf, sizeof(buf), 0, nullptr);
+	EXPECT_STREQ(buf, "254");
+	std::strcpy(buf, "0x10");
+	EXPECT_EQ(fs_ops.write("/29.0701F8FE6677F4/brightness", buf, 4, 0, nullptr), 4);
+	fs_ops.read("/29.0701F8FE6677F4/brightness", buf, sizeof(buf), 0, nullptr);
+	EXPECT_STREQ(buf, "16");
+	// used to be taken as 0, stoi() stopping at the x
+	std::strcpy(buf, "0xZZ");
+	EXPECT_EQ(fs_ops.write("/29.0701F8FE6677F4/threshold", buf, 4, 0, nullptr), -EINVAL);
+	std::strcpy(buf, "12abc");
+	EXPECT_EQ(fs_ops.write("/29.0701F8FE6677F4/threshold", buf, 5, 0, nullptr), -EINVAL);
+	fs_ops.read("/29.0701F8FE6677F4/threshold", buf, sizeof(buf), 0, nullptr);
+	EXPECT_STREQ(buf, "254");
+
+	// extended port
+	dev->cfg[CFG_FEAT_ID] = (uint8_t)~FEAT_TIMER;
+	dev->cfg[CFG_VERS_ID] = 1;
+	dev->cfg[CFG_VERS_ID + 1] = 10;
+	std::strcpy(buf, "0xFE 0X01\n");
+	EXPECT_EQ(fs_ops.write("/29.0701F8FE6677F4/extport", buf, 10, 0, nullptr), 10);
+	fs_ops.read("/29.0701F8FE6677F4/extport", buf, sizeof(buf), 0, nullptr);
+	EXPECT_STREQ(buf, "0xfe 0x01");
+	// decimal, not octal
+	std::strcpy(buf, "010 0");
+	EXPECT_EQ(fs_ops.write("/29.0701F8FE6677F4/extport", buf, 5, 0, nullptr), 5);
+	fs_ops.read("/29.0701F8FE6677F4/extport", buf, sizeof(buf), 0, nullptr);
+	EXPECT_STREQ(buf, "0x0a 0x00");
+	std::strcpy(buf, "1 2 3");
+	EXPECT_EQ(fs_ops.write("/29.0701F8FE6677F4/extport", buf, 5, 0, nullptr), -EINVAL);
+	std::strcpy(buf, "1 2x");
+	EXPECT_EQ(fs_ops.write("/29.0701F8FE6677F4/extport", buf, 4, 0, nullptr), -EINVAL);
+	std::strcpy(buf, "0x100 0");
+	EXPECT_EQ(fs_ops.write("/29.0701F8FE6677F4/extport", buf, 7, 0, nullptr), -EINVAL);
+}
+TEST_F(FsTest, Ds2408ExtPort) {
+	char buf[32];
+	int res;
+
+	ow.update_device(1, "29.0701F8FE6677F4");
+	ow.update_data();
+	// extport_set() goes through custom_cmd(), which needs dev->ds
+	ow.begin();
+	ds2408* dev = (ds2408*)ow.find(0x290701F8FE6677F4);
+	ASSERT_NE(dev, nullptr);
+	std::vector<std::string> seen;
+	auto record_filler = [](void* buf, const char* name, const struct stat*,
+							 off_t, enum fuse_fill_dir_flags) {
+		static_cast<std::vector<std::string>*>(buf)->push_back(name);
+		return 0;
+	};
+	auto listed = [&]() {
+		seen.clear();
+		fs_ops.readdir("/29.0701F8FE6677F4", &seen, record_filler, 0, nullptr, FUSE_READDIR_PLUS);
+		return std::find(seen.begin(), seen.end(), "extport") != seen.end();
+	};
+
+	// only with FEAT_TIMER cleared on a firmware new enough to set it
+	dev->cfg[CFG_FEAT_ID] = 0xff;
+	dev->cfg[CFG_VERS_ID] = 1;
+	dev->cfg[CFG_VERS_ID + 1] = 10;
+	EXPECT_FALSE(listed());
+	EXPECT_EQ(fs_ops.read("/29.0701F8FE6677F4/extport", buf, sizeof(buf), 0, nullptr), -ENOENT);
+	std::strcpy(buf, "1 1");
+	EXPECT_EQ(fs_ops.write("/29.0701F8FE6677F4/extport", buf, 3, 0, nullptr), -ENOENT);
+	// from 1.9 on (FEAT_MIN_VERSION)
+	dev->cfg[CFG_FEAT_ID] = (uint8_t)~FEAT_TIMER;
+	dev->cfg[CFG_VERS_ID + 1] = 8;
+	EXPECT_FALSE(listed());
+	dev->cfg[CFG_VERS_ID + 1] = 9;
+	EXPECT_TRUE(listed());
+
+	res = fs_ops.read("/29.0701F8FE6677F4/extport", buf, sizeof(buf), 0, nullptr);
+	EXPECT_EQ(res, 9);
+	EXPECT_STREQ(buf, "0x00 0x00");
+
+	// decimal and hex, DDRC first
+	std::strcpy(buf, "0x0f 5");
+	res = fs_ops.write("/29.0701F8FE6677F4/extport", buf, 6, 0, nullptr);
+	EXPECT_EQ(res, 6);
+	res = fs_ops.read("/29.0701F8FE6677F4/extport", buf, sizeof(buf), 0, nullptr);
+	EXPECT_STREQ(buf, "0x0f 0x05");
+
+	// both bytes needed, each 0..255; the value is left alone
+	std::strcpy(buf, "0x0f");
+	EXPECT_EQ(fs_ops.write("/29.0701F8FE6677F4/extport", buf, 4, 0, nullptr), -EINVAL);
+	std::strcpy(buf, "1 256");
+	EXPECT_EQ(fs_ops.write("/29.0701F8FE6677F4/extport", buf, 5, 0, nullptr), -EINVAL);
+	std::strcpy(buf, "abc");
+	EXPECT_EQ(fs_ops.write("/29.0701F8FE6677F4/extport", buf, 3, 0, nullptr), -EINVAL);
+	fs_ops.read("/29.0701F8FE6677F4/extport", buf, sizeof(buf), 0, nullptr);
+	EXPECT_STREQ(buf, "0x0f 0x05");
+}
 TEST_F(FsTest, Ds2408ThresholdBrightness) {
 	char buf[32];
 	int res;
 
 	ow.update_device(1, "29.0701F8FE6677F4");
 	ow.update_data();
-	// threshold_set()/brightness_set() go through level_set(), which
+	// threshold_set()/brightness_set() go through custom_cmd(), which
 	// needs dev->ds - only begin() assigns it
 	ow.begin();
 	ds2408* dev = (ds2408*)ow.find(0x290701F8FE6677F4);

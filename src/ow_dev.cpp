@@ -4,6 +4,7 @@
 #include <string>
 #include <fuse3/fuse.h>
 #include <algorithm> // for std::max,min...
+#include "parse.h"
 #include "main.h"
 #include "fs.h"
 #include "ow_devices.h"
@@ -288,7 +289,7 @@ int OwDev::fs_write(string& path, const char* buf, size_t size)
 	}
 	if (path.find("id") != string::npos) {
 		try {
-			id = (uint8_t)std::stoi(buf);
+			id = (uint8_t)parse_num(buf, size);
 		} catch (const std::exception& e) {
 			logger.warn("Invalid id value: " + std::string(buf));
 			return -1;
@@ -296,7 +297,7 @@ int OwDev::fs_write(string& path, const char* buf, size_t size)
 	}
 	if (path.find("poll") != string::npos) {
 		try {
-			poll_interval = (uint16_t)std::stoi(buf);
+			poll_interval = (uint16_t)parse_num(buf, size);
 		} catch (const std::exception& e) {
 			logger.warn("Invalid poll value: " + std::string(buf));
 			return -1;
