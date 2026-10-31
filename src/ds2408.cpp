@@ -1390,6 +1390,7 @@ int ds2408::watchdog_restore()
 		if (level_set(pio, pins[pio].level) != 0xAA)
 			err++;
 	}
+#if 0
 	// 0 is the device's default as well
 	if (threshold != 0 && threshold_set((uint8_t)threshold) != 0)
 		err++;
@@ -1397,7 +1398,8 @@ int ds2408::watchdog_restore()
 		err++;
 	if (ext_known && extport_set(ext_ddr, ext_port) != 0)
 		err++;
-	/* reset again by the restore itself, as switching a load pulling
+#endif
+		/* reset again by the restore itself, as switching a load pulling
 	   the supply does: do not go round in circles, leave the outputs
 	   as the device has them */
 	if (wdt_pending) {
