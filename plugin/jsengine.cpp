@@ -29,7 +29,12 @@
  *   ow.threshold_set(rom, value)
  *                            brightness above which a ds2408 does not
  *                            switch its timed lights
- *                            all four return true on success
+ *   ow.extport_set(rom, ddr, port)
+ *                            set the extended port of a ds2408
+ *                            (experimental, owSlave PORTC/DDRC)
+ *                            all five return true on success
+ *   ow.sleep(ms)             wait 0..100 ms, e.g. for a pulse; counts
+ *                            towards the callback's time limit
  *   ow.temp(rom)             read a ds1820 temperature, null if not one
  *   ow.volt(rom, channel)    read a cached ds2450 voltage
  *   ow.pins([role])          the pins with that role ("light", ...), or
@@ -72,6 +77,7 @@
 #include <set>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "plugin.h"
@@ -83,6 +89,8 @@
 
 /* how long one script callback may run before it is interrupted */
 #define SCRIPT_TIMEOUT_MS 200
+/* the longest ow.sleep(), well within SCRIPT_TIMEOUT_MS */
+#define SCRIPT_SLEEP_MAX_MS 100
 
 class JsEngine : public Plugin {
 private:
@@ -285,6 +293,36 @@ private:
 		return JS_NewBool(ctx, d->threshold_set(val) == 0);
 	}
 
+	static JSValue js_extport_set(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv)
+	{
+		uint8_t ddr, port;
+
+		if (argc < 3)
+			return JS_FALSE;
+		IDS2408* d = dynamic_cast<IDS2408*>(arg_dev(ctx, argc, argv));
+		if (d == nullptr)
+			return JS_FALSE;
+		if (!arg_u8(ctx, argv[1], "ddr", ddr) || !arg_u8(ctx, argv[2], "port", port))
+			return JS_EXCEPTION;
+
+		return JS_NewBool(ctx, d->extport_set(ddr, port) == 0);
+	}
+
+	/* Blocks the script (and the event it handles) for a short while,
+	   the interrupt handler only sees it once the script runs on */
+	static JSValue js_sleep(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv)
+	{
+		int32_t ms;
+
+		if (argc < 1 || JS_ToInt32(ctx, &ms, argv[0]) < 0)
+			return JS_EXCEPTION;
+		if (ms < 0 || ms > SCRIPT_SLEEP_MAX_MS)
+			return JS_ThrowRangeError(ctx, "ms must be 0..%d, got %d", SCRIPT_SLEEP_MAX_MS, ms);
+		std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+
+		return JS_UNDEFINED;
+	}
+
 	static JSValue js_temp(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv)
 	{
 		IDS1820* d = dynamic_cast<IDS1820*>(arg_dev(ctx, argc, argv));
@@ -478,6 +516,10 @@ private:
 			JS_NewCFunction(ctx, js_brightness_set, "brightness_set", 2));
 		JS_SetPropertyStr(ctx, owobj, "threshold_set",
 			JS_NewCFunction(ctx, js_threshold_set, "threshold_set", 2));
+		JS_SetPropertyStr(ctx, owobj, "extport_set",
+			JS_NewCFunction(ctx, js_extport_set, "extport_set", 3));
+		JS_SetPropertyStr(ctx, owobj, "sleep",
+			JS_NewCFunction(ctx, js_sleep, "sleep", 1));
 		/* states for pin_switch(), the values of enum _pio_mode */
 		JS_SetPropertyStr(ctx, owobj, "OFF", JS_NewInt32(ctx, OFF));
 		JS_SetPropertyStr(ctx, owobj, "ON", JS_NewInt32(ctx, ON));

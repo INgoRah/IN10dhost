@@ -90,6 +90,8 @@ Available to scripts:
 | `ow.level_set(rom, pin, level)` | set a ds2408 PWM pin to `level` 0..255, 0 is off |
 | `ow.brightness_set(rom, value)` | hand a ds2408 the current brightness 0..255, for devices without their own light sensor |
 | `ow.threshold_set(rom, value)` | brightness 0..255 above which a ds2408's timed lights switch |
+| `ow.extport_set(rom, ddr, port)` | set a ds2408's extended port (experimental, owSlave PORTC/DDRC; PC0..PC5) |
+| `ow.sleep(ms)` | wait 0..100 ms, e.g. for a pulse between two calls; counts towards the 200 ms limit |
 | `ow.temp(rom)` | read a ds1820 temperature, `null` if that rom is not one |
 | `ow.volt(rom, channel)` | read a cached ds2450 voltage |
 | `ow.pins([role])` | the pins with that role (`"light"`, ...), or with any role, as `[{rom, pin, name, role, room, output, on}, ...]` |
@@ -113,6 +115,17 @@ ow.file_add("heating/target", 8);
 
 function onRead(path)        { return target; }
 function onWrite(path, data) { target = data.trim(); }
+```
+
+A ds2408's `ACT_ALARM_AFTER` payload carries, besides `bus` and `rom`,
+`latch` (the latches of this alarm, one bit per PIO) and `sensed` (the
+levels read with them), so a script can react to one input:
+
+```js
+case ACT_ALARM_AFTER:
+    if (data.latch & (1 << 5) && data.sensed & (1 << 5))
+        ow.log(data.rom + ": PIO 5 changed, now high");
+    return 1;
 ```
 
 A ds2408's `ACT_DEV_CHANGE` payload carries, besides the raw `pio`

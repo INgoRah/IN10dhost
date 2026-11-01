@@ -221,7 +221,6 @@ uint16_t SwitchHandler::srcData(uint8_t busNr, uint8_t adr1)
 		return 0;
 	}
 	src.sa.latch = nr;
-	//v = ow->getVersion(src.sa.bus, src.sa.adr);
 	if (data[6] == 0xff)
 		src.sa.press = 0;
 	else {

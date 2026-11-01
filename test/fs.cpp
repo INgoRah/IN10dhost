@@ -744,13 +744,15 @@ TEST_F(FsTest, WriteReadDevLevel) {
 	fs_ops.write("/29.0701F8FE6677F4/PIO.0", buf, 3, 0, nullptr);
 	res = fs_ops.read("/29.0701F8FE6677F4/PIO.0", buf, 3, 0, nullptr);
 	EXPECT_STREQ(buf, "50");
+	// the raw output latch: the PWM pin's bit is always written as 1,
+	// its level is driven by the level commands (see pwm_mask())
 	res = fs_ops.read("/29.0701F8FE6677F4/BYTE", buf, 3, 0, nullptr);
-	EXPECT_STREQ(buf, "0");
+	EXPECT_STREQ(buf, "1");
 	buf[0] = '0';
 	buf[1] = '\0';
 	fs_ops.write("/29.0701F8FE6677F4/PIO.0", buf, 2, 0, nullptr);
 	res = fs_ops.read("/29.0701F8FE6677F4/BYTE", buf, 3, 0, nullptr);
-	EXPECT_STREQ(buf, "0");
+	EXPECT_STREQ(buf, "1");
 	logger.set_level(lvl);
 }
 
@@ -1653,7 +1655,8 @@ TEST_F(FsTest, Ds2408Watchdog) {
 	EXPECT_TRUE(swHdl.dev_alarm(2, dev->addr));
 	EXPECT_FALSE(dev->watchdog_pending());
 	EXPECT_EQ(watchdog(rom), "1");
-	EXPECT_EQ(dev->data[PIO_OUT], 0xF5);
+	// pin 1 is PWM: its bit written as 1, the level restored on its own
+	EXPECT_EQ(dev->data[PIO_OUT], 0xF7);
 	EXPECT_EQ(dev->pins[1].level, 40);
 	json cfg = plugins.config_of("faulty");
 	EXPECT_EQ(cfg["watchdogs"], 1);
@@ -1664,11 +1667,13 @@ TEST_F(FsTest, Ds2408Watchdog) {
 	EXPECT_EQ(cfg["last_watchdog"]["brightness"], 50);
 	EXPECT_EQ(cfg["last_watchdog"]["threshold"], 30);
 
-	// still reported (firmware not clearing it): restored again, with
-	// the outputs the restore wrote
+	// the restore cleared the reset flag on the device; reported again
+	// (a new reset): restored again, with the outputs the restore wrote
+	EXPECT_EQ(dev->sim_stat, 0);
+	dev->sim_stat = STAT_WATCHDOG;
 	EXPECT_TRUE(swHdl.dev_alarm(2, dev->addr));
 	EXPECT_EQ(watchdog(rom), "2");
-	EXPECT_EQ(dev->data[PIO_OUT], 0xF5);
+	EXPECT_EQ(dev->data[PIO_OUT], 0xF7);
 
 	// gone: a plain alarm again, nothing restored
 	dev->sim_stat = 0;
@@ -1683,6 +1688,7 @@ TEST_F(FsTest, Ds2408Watchdog) {
 	dev->reg_read(true);
 	EXPECT_EQ(dev->watchdog_restore(), -EAGAIN);
 	EXPECT_EQ(watchdog(rom), "3");
+	dev->sim_stat = STAT_WATCHDOG;
 	EXPECT_TRUE(swHdl.dev_alarm(2, dev->addr));
 	EXPECT_EQ(watchdog(rom), "4");
 	EXPECT_EQ(plugins.config_of("faulty")["watchdogs"], 3);

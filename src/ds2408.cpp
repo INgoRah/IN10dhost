@@ -912,12 +912,30 @@ uint8_t ds2408::pin_switch(uint8_t pio, enum _pio_mode state, uint8_t lvl)
 	return 0;
 }
 
+/* The PWM pins' bits: always written as 1 (off), the level commands
+   drive them. While its PWM runs the timer has the pin, a 1 does not
+   change it. A 0 makes it a plain output driven low - the PWM gone - and
+   the device then takes it as on without a timer and ignores any level
+   (owSlave timed_switch(): "already on"), until a TMR_TYPE_STOP. The
+   level is in pins[].level, not in this bit, see pin_is_on(). */
+uint8_t ds2408::pwm_mask() const
+{
+	auto lk = lock();
+	uint8_t m = 0;
+
+	for (uint8_t i = 0; i < 8; i++)
+		if (cfg[CFG_PIN_ID + i] == CFG_OUT_PWM)
+			m |= 1 << i;
+	return m;
+}
+
 uint8_t ds2408::pio_set(uint8_t pio)
 {
 	auto lk = lock();
 	uint8_t r, retry, err = 0;
 	bool ret;
 
+	pio |= pwm_mask();
 	logger.debug(std::format("Set {} {} PIO {:#x}", rom, name, pio));
 
 	{
@@ -993,6 +1011,44 @@ uint8_t ds2408::pio_set(uint8_t pio)
 		});
 	}
 	return r;
+}
+
+/* Clears the reset flags (0x80, 0x88) of the status register: Write
+   Conditional Search Register (0xCC) to 0x8D, as for the PORL bit of a
+   DS2408. Newer owSlave firmware keeps them through a latch reset until
+   then, so a reset right before one is not missed. */
+int ds2408::status_clear()
+{
+	auto lk = lock();
+	uint8_t stat = data[STAT] & ~STAT_WATCHDOG;
+
+	// coverity[sleep] - bus mutex must be held for the whole 1-Wire
+	// transaction
+	std::lock_guard<std::mutex> lock(ds->mtx);
+	// coverity[sleep]
+	if (!ds->selectChannel(bus) || !ds->reset())
+		return -EIO;
+	// coverity[sleep]
+	ds->select(addr);
+	// coverity[sleep]
+	ds->write(0xCC);
+	// coverity[sleep]
+	ds->write(0x8D);
+	// coverity[sleep]
+	ds->write(0x00);
+	// coverity[sleep]
+	ds->write(stat);
+	// no answer to it, back to idle
+	// coverity[sleep]
+	ds->reset();
+	if (ds->last_err != 0)
+		return -EIO;
+	data[STAT] = stat;
+#ifdef TESTING
+	// the simulated device takes it, as the newer firmware does
+	sim_stat &= ~STAT_WATCHDOG;
+#endif
+	return 0;
 }
 
 /* Register read for an alarm, called from the alarm handling. The read
@@ -1305,8 +1361,11 @@ uint8_t ds2408::level_set(uint8_t pio, uint8_t level)
 	auto lk = lock();
 	uint8_t pct = level > 100 ? 100 : level;
 	uint8_t raw = (uint8_t)(pct * 254 / 100);
-	/* if setting any level, a level 0 means stop */
-	uint8_t cmd = raw == 0 ? TMR_TYPE_STOP_DIM : TMR_TYPE_ON;
+	/* if setting any level, a level 0 means stop: dimming down from a
+	   level, at once when already off - it also frees a pin the device
+	   takes as on without a level, see pwm_mask() */
+	uint8_t cmd = raw != 0 ? TMR_TYPE_ON :
+		pins[pio].level == 0 ? TMR_TYPE_STOP : TMR_TYPE_STOP_DIM;
 
 	logger.debug("set PIO level=" + std::to_string(pct) + "% (" + std::to_string(raw) + ") for PIO " + std::to_string(pio));
 	// coverity[sleep] - device lock held for the whole command, see dev_mtx
@@ -1360,6 +1419,12 @@ int ds2408::get_threshold() const
 	return threshold;
 }
 
+uint8_t ds2408::get_last_latch() const
+{
+	auto lk = lock();
+	return last_latch;
+}
+
 bool ds2408::watchdog_pending() const
 {
 	auto lk = lock();
@@ -1375,6 +1440,10 @@ int ds2408::watchdog_restore()
 		return 0;
 	wdt_pending = false;
 	wdt_count++;
+	// first, so a reset flag seen after the restore is a new reset
+	// coverity[sleep] - bus mutex must be held
+	if (status_clear() != 0)
+		err++;
 	if (wdt_out_known) {
 		logger.info(rom + std::format(" watchdog: restoring PIO {:#x}", wdt_out));
 		// coverity[sleep] - bus mutex must be held
@@ -1404,6 +1473,8 @@ int ds2408::watchdog_restore()
 	   as the device has them */
 	if (wdt_pending) {
 		wdt_pending = false;
+		// coverity[sleep] - bus mutex must be held
+		status_clear();
 		logger.warn(rom + " reset again by the restore, outputs left as they are");
 		return -EAGAIN;
 	}
