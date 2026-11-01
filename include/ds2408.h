@@ -102,6 +102,7 @@ class ds2408 : public OwDev, public IDS2408 {
 		// taken before the simulated good read above
 		std::vector<std::array<uint8_t, 10>> sim_reads;
 		FRIEND_TEST(FsTest, Ds2408Watchdog);
+		FRIEND_TEST(PluginsTest, JsEngineDs2408Calls);
 		FRIEND_TEST(FsTest, Ds2408RegReadCrc);
 		FRIEND_TEST(FsTest, Ds2408WatchdogNoAlarm);
 #endif
@@ -139,9 +140,13 @@ class ds2408 : public OwDev, public IDS2408 {
 
 		// ds2408 functions
 		uint8_t pio_set(uint8_t pio);
+		// the bits of the PWM pins, written as 1 by pio_set()
+		uint8_t pwm_mask() const;
 		uint8_t reg_read(bool latch_reset);
 		uint8_t alarm_read(uint8_t& latch);
 		uint8_t latch_reset();
+		// clears the reset flags of the status, see STAT_WATCHDOG
+		int status_clear();
 		int cfg_read();
 		int cfg_write(const uint8_t* data, int len = DS2408_CFG_SIZE);
 		// owSlave custom command 0xC5 TYPE PIN VAL1 VAL2, bytes as is
@@ -174,6 +179,8 @@ class ds2408 : public OwDev, public IDS2408 {
 		int extport_set(uint8_t ddr, uint8_t port);
 		int get_brightness() const;
 		int get_threshold() const;
+		// the activity latches of the last register read, see last_latch
+		uint8_t get_last_latch() const;
 		// a register read saw the watchdog status, not yet restored
 		bool watchdog_pending() const;
 		// when SwitchHandler::dev_watchdog() last reported one

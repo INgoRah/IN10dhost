@@ -799,6 +799,17 @@ bool OwDevices::alarmHandler(uint8_t busNr, uint8_t target)
 			{"bus", busNr},
 			{"rom", rom}
 		};
+		// a ds2408 also hands what raised it: the latches of this
+		// alarm (one bit per PIO, gone on the device by now) and the
+		// sensed levels read with them
+		if (adr[0] == 0x29) {
+			auto* dev = dynamic_cast<ds2408*>(find(busNr, adr[1], 0x29));
+			if (dev) {
+				auto lk = dev->lock();
+				data["latch"] = dev->get_last_latch();
+				data["sensed"] = dev->data[PIO_LS];
+			}
+		}
 		plugins.action(ACT_ALARM_AFTER, busNr, &data);
 		cnt--;
 #ifdef USE_DEBUG

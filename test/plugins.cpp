@@ -216,7 +216,9 @@ static const char js_src[] = R"JS(
 					| (ow.threshold_set(data.rom, data.threshold) ? 2 : 0)
 					| (ow.pin_switch(data.rom, data.pin, ow.ON) ? 4 : 0)
 					| (ow.level_set(data.rom, data.pin, 10) ? 8 : 0)
-					| (ow.OFF === 0 && ow.ON === 2 && ow.TOGGLE === 3 ? 16 : 0);
+					| (ow.OFF === 0 && ow.ON === 2 && ow.TOGGLE === 3 ? 16 : 0)
+					| (ow.extport_set(data.rom, 0x08, 0xf7) ? 32 : 0)
+					| (ow.sleep(1) === undefined ? 64 : 0);
 			}
 			return 0;
 		}
@@ -385,7 +387,9 @@ TEST_F(PluginsTest, JsEngineDs2408Calls)
 	logger.set_level(LogLevel::NONE);
 	int ret = plugins.action(ACT_PERIODIC_SECOND, 0, &data);
 	logger.set_level(lvl);
-	EXPECT_EQ(ret - base, 31);
+	EXPECT_EQ(ret - base, 127);
+	EXPECT_EQ(dev->ext_ddr, 0x08);
+	EXPECT_EQ(dev->ext_port, 0xf7);
 
 	json j = dev->to_json();
 	EXPECT_EQ(j["brightness"], 120);
@@ -398,7 +402,7 @@ TEST_F(PluginsTest, JsEngineDs2408Calls)
 	logger.set_level(LogLevel::NONE);
 	ret = plugins.action(ACT_PERIODIC_SECOND, 0, &data);
 	logger.set_level(lvl);
-	EXPECT_EQ(ret - base, 16);
+	EXPECT_EQ(ret - base, 16 + 64);
 
 	// out of range values throw in the script, so nothing is changed
 	data["rom"] = "29.0701F8FE6677F4";
