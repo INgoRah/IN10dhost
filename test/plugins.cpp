@@ -38,7 +38,15 @@ std::filesystem::path exec_path()
 class PluginsTest : public ::testing::Test {
 protected:
 	void SetUp() override { plugins.cleanup(); }
-	void TearDown() override { plugins.cleanup(); }
+	void TearDown() override
+	{
+		plugins.cleanup();
+		// the scripts the tests write, also when one ended early; the
+		// engine is unloaded by now
+		for (const char* f : { "test_engine.js", "test_engine_a.js", "test_engine_b.js",
+				       "test_engine_late.js", "test_astro.js" })
+			std::filesystem::remove(std::filesystem::current_path() / f);
+	}
 };
 
 TEST_F(PluginsTest, LoadPlugin)

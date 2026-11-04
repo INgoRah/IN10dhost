@@ -134,6 +134,7 @@ class ds2408 : public OwDev, public IDS2408 {
 		FRIEND_TEST(FsTest, Ds2408WatchdogNoAlarm);
 		FRIEND_TEST(FsTest, Ds2408Firmware);
 		FRIEND_TEST(FsTest, Ds2408WriteErrors);
+		FRIEND_TEST(FsTest, Ds2408UncachedRead);
 		// fw_enter() calls
 		int sim_bl_enters = 0;
 #endif

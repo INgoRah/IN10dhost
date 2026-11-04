@@ -258,8 +258,15 @@ TEST_F(SwTest, FsSwitches)
 
 TEST_F(SwTest, SwitchesConfig)
 {
-	ow.save("test_switches.json");
-	ow.load("test_switches.json");
+	namespace fsys = std::filesystem;
+	fsys::path file = fsys::temp_directory_path() / std::format("in10dfs-switches-{}.json", getpid());
+	// load() makes it the file save() writes to as well
+	std::string old_path = ow.get_data_path();
+
+	ASSERT_EQ(ow.save(file.string()), 0);
+	ow.load(file.string());
+	ow.set_data_path(old_path);
+	fsys::remove(file);
 	logger.set_level(LogLevel::ERROR);
 }
 

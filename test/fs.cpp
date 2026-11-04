@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <algorithm>
+#include <array>
 #include <vector>
 #include <fstream>
 #include <filesystem>
@@ -1844,6 +1845,62 @@ TEST_F(FsTest, Ds2408WatchdogNoAlarm) {
 	logger.set_level(lvl);
 	ow.set_log_dir(old_dir);
 	fs::remove_all(dir);
+}
+
+/* An uncached PIO or sensed read goes to the device, as BYTE does: the
+   device may have switched by itself (its own timer) */
+TEST_F(FsTest, Ds2408UncachedRead) {
+	char buf[32] = {};
+	std::string rom = OwDev::canonical_rom("29.1C00FDFF6677");
+	auto rd = [&](const std::string& path) {
+		std::memset(buf, 0, sizeof(buf));
+		fs_ops.read(path.c_str(), buf, sizeof(buf), 0, nullptr);
+		return std::string(buf);
+	};
+	// what the device answers to F0 88 00: 8 registers and their CRC16
+	auto answer = [](uint8_t ls, uint8_t out, uint8_t latch) {
+		const uint8_t cmd[3] = { 0xF0, 0x88, 0x00 };
+		std::array<uint8_t, 10> a = { ls, out, latch, 0xff, 0x00, 0x00, 0xff, 0xff, 0, 0 };
+		uint16_t crc = ~DS2482::crc16(a.data(), 8, DS2482::crc16(cmd, 3, 0));
+		a[8] = crc & 0xff;
+		a[9] = crc >> 8;
+		return a;
+	};
+	ow.update_device(1, rom);
+	ow.update_data();
+	ow.begin();
+	ds2408* dev = (ds2408*)ow.find(rom);
+	ASSERT_NE(dev, nullptr);
+	LogLevel lvl = logger.get_level();
+	logger.set_level(LogLevel::NONE);
+
+	// PIO.3 on (active low)
+	EXPECT_EQ(dev->pio_set(0xF7), 0xAA);
+	EXPECT_EQ(rd("/" + rom + "/PIO.3"), "1");
+
+	// the device switched it off by itself: only an uncached read sees it
+	dev->sim_reads = { answer(0xFF, 0xFF, 0x00) };
+	EXPECT_EQ(rd("/" + rom + "/PIO.3"), "1");
+	EXPECT_EQ(dev->sim_reads.size(), 1u);
+	EXPECT_EQ(rd("/uncached/" + rom + "/PIO.3"), "0");
+	EXPECT_TRUE(dev->sim_reads.empty());
+	EXPECT_EQ(rd("/" + rom + "/PIO.3"), "0");
+	// and the aggregates: PIO.0 switched on by the device
+	dev->sim_reads = { answer(0xFE, 0xFE, 0x00) };
+	EXPECT_EQ(rd("/uncached/" + rom + "/PIO.BYTE"), "1");
+	EXPECT_TRUE(dev->sim_reads.empty());
+
+	// sensed: the logic state as read now
+	dev->sim_reads = { answer(0xF7, 0xFF, 0x00) };
+	EXPECT_EQ(rd("/" + rom + "/sensed.3"), "1");
+	EXPECT_EQ(rd("/uncached/" + rom + "/sensed.3"), "0");
+	EXPECT_TRUE(dev->sim_reads.empty());
+	dev->sim_reads = { answer(0x5A, 0xFF, 0x00) };
+	EXPECT_EQ(rd("/uncached/" + rom + "/sensed.BYTE"), "90");
+	EXPECT_TRUE(dev->sim_reads.empty());
+	EXPECT_EQ(rd("/" + rom + "/sensed.BYTE"), "90");
+
+	logger.set_level(lvl);
 }
 
 /* A register read failing its CRC, as a slave slipping a time slot

@@ -256,9 +256,13 @@ void ds2408::pio_mask_set(uint8_t on)
 	pio_set(tmp);
 }
 
-int ds2408::r_pio(char* buf, size_t, bool, int idx)
+// uncached: the registers are read first, as for BYTE; a PWM level is
+// only known here, the device does not report it
+int ds2408::r_pio(char* buf, size_t, bool uncached, int idx)
 {
 	auto lk = lock();
+	if (uncached)
+		reg_read(false);
 	if (idx >= IDX_ALL)
 		return fmt_bits(buf, idx, pio_mask());
 	if (cfg[CFG_PIN_ID + idx] == CFG_OUT_PWM)
@@ -295,9 +299,11 @@ int ds2408::w_pio(const char* buf, size_t size, int idx)
 	}
 }
 
-int ds2408::r_sensed(char* buf, size_t, bool, int idx)
+int ds2408::r_sensed(char* buf, size_t, bool uncached, int idx)
 {
 	auto lk = lock();
+	if (uncached)
+		reg_read(false);
 	/* sensed from register 0x88 */
 	return fmt_bits(buf, idx, data[PIO_LS]);
 }
