@@ -1672,10 +1672,12 @@ public:
 
 std::function<std::unique_ptr<FwLink>(ds2408&)> ds2408::fw_link =
 	[](ds2408& dev) -> std::unique_ptr<FwLink> {
-		// begin() sets them under the device lock, this runs in fw_thread
+		// begin() sets them under the device lock, this runs in fw_thread.
+		// ds is read under the device lock, not ds->mtx: that one is the
+		// bus's (the link takes it for every transfer), it does not
+		// guard the pointer, which has to be read to get to it.
 		auto lk = dev.lock();
-		// coverity[missing_lock] - the bus mutex is in *ds itself, the
-		// pointer is only read here
+		// coverity[missing_lock] - see above, set once under the device lock
 		return std::make_unique<OwBlLink>(dev.ds, dev.bus, dev.addr);
 	};
 
@@ -1786,8 +1788,9 @@ void ds2408::fw_run(std::vector<uint8_t> image)
 	if (link->info(info) < 0) {
 		if (fw_enter() < 0)
 			return fail("the device does not answer");
-		// coverity[sleep] - no lock held: fw_enter() releases the device
-		// lock on return (DevLock), fw_run() takes none here
+		// no lock held: fw_enter() releases the device lock on return
+		// (DevLock), fw_run() takes none here
+		// coverity[sleep] - see above
 		std::this_thread::sleep_for(std::chrono::milliseconds(FW_ENTER_MS));
 		if (link->info(info) < 0)
 			return fail("no bootloader answers");
@@ -1803,12 +1806,17 @@ void ds2408::fw_run(std::vector<uint8_t> image)
 	r = link->exit();
 	if (r < 0)
 		return fail(std::string("the application does not start: ") + strerror(-r));
+	// the link takes the bus mutex per transfer only, nothing is held
+	// coverity[sleep] - no lock held here, see above
 	std::this_thread::sleep_for(std::chrono::milliseconds(FW_START_MS));
 	{
 		auto lk = lock();
 		fw_busy = false;
 		/* started by a reset: the next read sees it and the outputs
-		   are restored as after a watchdog reset, see dev_poll() */
+		   are restored as after a watchdog reset, see dev_poll().
+		   data[] is the device's, so the device lock is held for the
+		   read (always taken before the bus mutex, see OwDev). */
+		// coverity[sleep] - device lock must be held, see above
 		reg_read(false);
 	}
 	logger.info(rom + std::format(" firmware update done, {} bytes", image.size()));
