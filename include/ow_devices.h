@@ -136,6 +136,14 @@ class OwDevices : public IDevices
 		// IDevices: the pins with a role across all buses
 		std::vector<PinInfo> pins(PinRole role = PinRole::none) override;
 		int role_switch(PinRole role, bool on) override;
+		void dark_set(bool dark, const std::string& room = "") override;
+		void dark_clear(const std::string& room) override;
+		bool is_dark(const std::string& room = "") override;
+		// the pins in a room, or with an empty room all that have one
+		std::vector<PinInfo> room_pins(const std::string& room = "");
+		// every room a pin is in or that has a dark flag of its own,
+		// sorted, see /rooms
+		std::vector<std::string> rooms();
 
 		int log_dump(char* buf, size_t size);
 		/* Writes the 1-Wire trace (status/1wire.vcd) to
@@ -150,6 +158,10 @@ class OwDevices : public IDevices
 		void set_log_dir(const std::string& dir) { log_dir = dir; }
 		const std::string& get_log_dir() const { return log_dir; }
 		bool alarmHandler(uint8_t busNr, uint8_t target = 0x29);
+		/* What ACT_ALARM_AFTER hands the plugins for the device at adr
+		   (its rom code) on busNr: {bus, rom}, for a ds2408 also
+		   {latch, sensed} of the alarm's register read */
+		json alarm_event(uint8_t busNr, const uint8_t adr[8]);
 #if 0
 		uint8_t getVersion(uint8_t bus, uint8_t id);
 		void versionUpdate(uint8_t bus, uint8_t id);

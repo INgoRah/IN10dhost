@@ -65,12 +65,19 @@ void to_json(json& j, const Pin& p)
 }
 
 // missing fields and an unknown role (a hand edited config) fall back
-// to the defaults; level is left as it is
+// to the defaults; level is left as it is. A room of an older config
+// is made a room name (see room_parse()): lower case, a space is '_';
+// one with any other character is dropped.
 void from_json(const json& j, Pin& p)
 {
 	p.name = j.value("name", "");
 	p.role = pin_role_parse(j.value("role", "")).value_or(PinRole::none);
-	p.room = j.value("room", "");
+	std::string room = j.value("room", "");
+	std::replace(room.begin(), room.end(), ' ', '_');
+	auto r = room_parse(room);
+	if (!r)
+		logger.warn(std::format("room \"{}\" dropped: only letters, digits, - and _", room));
+	p.room = r.value_or("");
 }
 
 ds2408::~ds2408()
@@ -418,20 +425,37 @@ std::string ds2408::room(int pio) const
 	return pins[pio].room;
 }
 
+PinInfo ds2408::pin_info(int i) const
+{
+	auto lk = lock();
+	PinInfo info;
+
+	static_cast<Pin&>(info) = pins[i];
+	info.name = pin_label(i);
+	info.rom = rom;
+	info.pin = i;
+	info.output = pin_is_output(i);
+	info.on = info.output ? pin_is_on(i) : (data[PIO_LS] & (1 << i)) != 0;
+	return info;
+}
+
 void ds2408::pins_get(std::vector<PinInfo>& out, PinRole r) const
 {
 	auto lk = lock();
 	for (int i = 0; i < 8; i++) {
 		if (pins[i].role == PinRole::none || (r != PinRole::none && pins[i].role != r))
 			continue;
-		PinInfo info;
-		static_cast<Pin&>(info) = pins[i];
-		info.name = pin_label(i);
-		info.rom = rom;
-		info.pin = i;
-		info.output = pin_is_output(i);
-		info.on = info.output ? pin_is_on(i) : (data[PIO_LS] & (1 << i)) != 0;
-		out.push_back(std::move(info));
+		out.push_back(pin_info(i));
+	}
+}
+
+void ds2408::room_pins_get(std::vector<PinInfo>& out, const std::string& room) const
+{
+	auto lk = lock();
+	for (int i = 0; i < 8; i++) {
+		if (pins[i].room.empty() || (!room.empty() && pins[i].room != room))
+			continue;
+		out.push_back(pin_info(i));
 	}
 }
 
@@ -492,15 +516,16 @@ int ds2408::r_pin_room(char* buf, size_t size, bool, int idx)
 	return std::strlen(buf);
 }
 
-// free text, an empty write clears it
+// a room name, see room_parse(): kept in lower case; an empty write
+// clears it
 int ds2408::w_pin_room(const char* buf, size_t size, int idx)
 {
 	auto lk = lock();
-	std::string s = pin_input(buf, size);
+	auto r = room_parse(pin_input(buf, size));
 
-	if (s.size() > PIN_NAME_MAX)
+	if (!r || r->size() > PIN_NAME_MAX)
 		return -EINVAL;
-	pins[idx].room = std::move(s);
+	pins[idx].room = std::move(*r);
 	return size;
 }
 

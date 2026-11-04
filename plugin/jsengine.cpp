@@ -42,6 +42,14 @@
  *                            room, output, on}, ...]
  *   ow.role_switch(role, on) switch every output with that role on or
  *                            off, true when all of them switched
+ *   ow.dark_set(dark[, room])
+ *                            the astro flag of the switches: true from
+ *                            sunset to sunrise (switches added "dark");
+ *                            with a room (lower case, see /rooms) that
+ *                            room's own flag
+ *   ow.dark_clear(room)      the room follows the astro flag again
+ *   ow.is_dark([room])       the flag in effect, for a room its own or
+ *                            else the astro flag
  *   ow.file_add(path, size)  add a file to the file system, e.g.
  *                            "status/my_stuff" (see IPluginFiles),
  *                            true when it could be added
@@ -408,6 +416,67 @@ private:
 		return JS_NewBool(ctx, self->devices->role_switch(role, on != 0) == 0);
 	}
 
+	// a room name, see room_parse(); "Kitchen" is "kitchen"
+	static bool arg_room(JSContext* ctx, JSValueConst v, std::string& out)
+	{
+		const char* s = JS_ToCString(ctx, v);
+
+		if (s == nullptr)
+			return false;
+		auto r = room_parse(s);
+		if (!r || r->empty())
+			JS_ThrowRangeError(ctx, "no room name '%s'", s);
+		JS_FreeCString(ctx, s);
+		if (!r || r->empty())
+			return false;
+		out = *r;
+		return true;
+	}
+
+	static JSValue js_dark_set(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv)
+	{
+		JsEngine* self = engine_of(ctx);
+		std::string room;
+
+		if (argc < 1 || self == nullptr || self->devices == nullptr)
+			return JS_UNDEFINED;
+		int dark = JS_ToBool(ctx, argv[0]);
+		if (dark < 0)
+			return JS_EXCEPTION;
+		if (argc > 1 && !JS_IsUndefined(argv[1]) && !arg_room(ctx, argv[1], room))
+			return JS_EXCEPTION;
+		self->devices->dark_set(dark != 0, room);
+
+		return JS_UNDEFINED;
+	}
+
+	static JSValue js_dark_clear(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv)
+	{
+		JsEngine* self = engine_of(ctx);
+		std::string room;
+
+		if (argc < 1 || self == nullptr || self->devices == nullptr)
+			return JS_UNDEFINED;
+		if (!arg_room(ctx, argv[0], room))
+			return JS_EXCEPTION;
+		self->devices->dark_clear(room);
+
+		return JS_UNDEFINED;
+	}
+
+	static JSValue js_is_dark(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv)
+	{
+		JsEngine* self = engine_of(ctx);
+		std::string room;
+
+		if (self == nullptr || self->devices == nullptr)
+			return JS_NULL;
+		if (argc > 0 && !JS_IsUndefined(argv[0]) && !arg_room(ctx, argv[0], room))
+			return JS_EXCEPTION;
+
+		return JS_NewBool(ctx, self->devices->is_dark(room));
+	}
+
 	static JSValue js_file_add(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv)
 	{
 		JsEngine* self = engine_of(ctx);
@@ -532,6 +601,12 @@ private:
 			JS_NewCFunction(ctx, js_pins, "pins", 1));
 		JS_SetPropertyStr(ctx, owobj, "role_switch",
 			JS_NewCFunction(ctx, js_role_switch, "role_switch", 2));
+		JS_SetPropertyStr(ctx, owobj, "dark_set",
+			JS_NewCFunction(ctx, js_dark_set, "dark_set", 1));
+		JS_SetPropertyStr(ctx, owobj, "dark_clear",
+			JS_NewCFunction(ctx, js_dark_clear, "dark_clear", 1));
+		JS_SetPropertyStr(ctx, owobj, "is_dark",
+			JS_NewCFunction(ctx, js_is_dark, "is_dark", 1));
 		JS_SetPropertyStr(ctx, owobj, "file_add",
 			JS_NewCFunction(ctx, js_file_add, "file_add", 2));
 		JS_SetPropertyStr(ctx, owobj, "file_remove",

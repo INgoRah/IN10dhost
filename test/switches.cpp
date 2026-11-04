@@ -3,6 +3,8 @@
 #include <stdint.h>
 #include <fuse3/fuse.h>
 
+#include <fstream>
+#include <filesystem>
 #include <gtest/gtest.h>
 #include <gmock/gmock.h>
 
@@ -18,6 +20,7 @@ extern SwitchHandler swHdl;
 // defined in src/switch_handler.cpp
 extern void to_json(json& j, const _sw_tbl& b);
 extern void from_json(const json& j, _sw_tbl& b);
+extern void from_json(const json& j, Config& c);
 
 extern void fs_init(fuse_operations* fs_ops);
 static struct fuse_operations fs_ops = {};
@@ -583,5 +586,352 @@ TEST_F(SwTest, AllLightsOff)
 	EXPECT_EQ(fs_ops.write("/switches/del", del, strlen(del) + 1, 0, nullptr), (int)strlen(del) + 1);
 	for (int i = 0; i < 3; i++)
 		fs_ops.write(("/29.0202ABBD6677D4/pin." + std::to_string(i) + "/role").c_str(), "", 0, 0, nullptr);
+	dst->pin_switch(2, OFF);
+}
+
+// Masked switches: their presses are ignored, one or all of them
+TEST_F(SwTest, DisableSwitches)
+{
+	char buf[2048];
+	uint8_t adr[] = { 0x29, 0x02, 0x01, 0xab, 0xbd, 0x66, 0x77, 0x9a };
+	ds2408* src = (ds2408*)ow.find(0x290201ABBD66779A);
+	ds2408* dst = (ds2408*)ow.find(0x290202ABBD6677D4);
+	ASSERT_NE(src, nullptr);
+	ASSERT_NE(dst, nullptr);
+	for (int i = 0; i < 4; i++)
+		dst->cfg[CFG_PIN_ID + i] = CFG_OUT_LOW;
+	dst->pin_switch(1, OFF);
+	dst->pin_switch(2, OFF);
+	auto press = [&](int latch) {
+		src->data[STAT] = 0;
+		src->data[PIO_TIME] = 0xff;
+		src->data[PIO_LATCH] = 1 << (latch - 1);
+		swHdl.dev_alarm(1, adr);
+	};
+	auto list = [&]() {
+		int n = fs_ops.read("/switches/list", buf, sizeof(buf), 0, nullptr);
+		return std::string(buf, n > 0 ? n : 0);
+	};
+
+	const char* add = "1.2.4 2.2.1\n1.2.5 2.2.2";
+	fs_ops.write("/switches/add", add, strlen(add) + 1, 0, nullptr);
+
+	// one of them: its presses do nothing, the other still switches
+	const char* one = "1.2.4 -> 2.2.1\n";
+	EXPECT_EQ(fs_ops.write("/switches/disable", one, strlen(one), 0, nullptr), (int)strlen(one));
+	EXPECT_NE(list().find("1.2.4 -> 2.2.1: 29.0201ABBD66779A, PIO.3 (latch 4) -> 29.0202ABBD6677D4, PIO.1, disabled\n"),
+		std::string::npos) << buf;
+	press(4);
+	EXPECT_FALSE(dst->pin_is_on(1));
+	press(5);
+	EXPECT_TRUE(dst->pin_is_on(2));
+	// adding it again keeps it masked
+	fs_ops.write("/switches/add", "1.2.4 2.2.1", 12, 0, nullptr);
+	press(4);
+	EXPECT_FALSE(dst->pin_is_on(1));
+	// saved with the switch and taken back from the config
+	auto find = [&](int latch) -> const _sw_tbl* {
+		for (const auto& sw : cache.switches)
+			if (sw.src.sa.bus == 1 && sw.src.sa.adr == 2 && sw.src.sa.latch == latch &&
+			    sw.src.sa.press == 0)
+				return &sw;
+		return nullptr;
+	};
+	ASSERT_NE(find(4), nullptr);
+	ASSERT_NE(find(5), nullptr);
+	json j = *find(4);
+	EXPECT_EQ(j["disabled"], true);
+	EXPECT_EQ(json(*find(5))["disabled"], false);
+	_sw_tbl back;
+	from_json(j, back);
+	EXPECT_TRUE(back.disabled);
+	// older configs: enabled
+	j.erase("disabled");
+	_sw_tbl old;
+	from_json(j, old);
+	EXPECT_FALSE(old.disabled);
+	EXPECT_EQ(fs_ops.write("/switches/enable", one, strlen(one), 0, nullptr), (int)strlen(one));
+	EXPECT_EQ(list().find("disabled"), std::string::npos) << buf;
+	press(4);
+	EXPECT_TRUE(dst->pin_is_on(1));
+
+	// all of them
+	EXPECT_EQ(fs_ops.write("/switches/disable", "all\n", 4, 0, nullptr), 4);
+	EXPECT_NE(list().find("switches, dark, all disabled\n"), std::string::npos) << buf;
+	press(4);
+	press(5);
+	EXPECT_TRUE(dst->pin_is_on(1));
+	EXPECT_TRUE(dst->pin_is_on(2));
+	// saved with the config, restored when it is loaded
+	{
+		namespace fsys = std::filesystem;
+		fsys::path file = fsys::temp_directory_path() / "in10dfs_disable_test.json";
+		ASSERT_EQ(ow.save(file.string()), 0);
+		std::ifstream in(file);
+		json cfg = json::parse(in);
+		fsys::remove(file);
+		EXPECT_EQ(cfg["switches_disabled"], true);
+		swHdl.all_disabled_set(false);
+		Config loaded;
+		from_json(cfg, loaded);
+		EXPECT_TRUE(swHdl.all_disabled());
+		// older configs: enabled
+		cfg.erase("switches_disabled");
+		from_json(cfg, loaded);
+		EXPECT_FALSE(swHdl.all_disabled());
+		swHdl.all_disabled_set(true);
+	}
+	EXPECT_EQ(fs_ops.write("/switches/enable", "all", 3, 0, nullptr), 3);
+	press(5);
+	EXPECT_FALSE(dst->pin_is_on(2));
+
+	// not in the table, not a switch line
+	LogLevel lvl = logger.get_level();
+	logger.set_level(LogLevel::NONE);
+	EXPECT_EQ(fs_ops.write("/switches/disable", "1.2.6 -> 2.2.3", 14, 0, nullptr), -ENOENT);
+	EXPECT_EQ(fs_ops.write("/switches/disable", "everything", 10, 0, nullptr), -EINVAL);
+	logger.set_level(lvl);
+
+	const char* del = "1.2.4 2.2.1\n1.2.5 2.2.2";
+	fs_ops.write("/switches/del", del, strlen(del) + 1, 0, nullptr);
+	dst->pin_switch(1, OFF);
+}
+
+// What ACT_ALARM_AFTER hands the plugins: for a ds2408 the latches of
+// the alarm's register read and the sensed levels, see scary-door.js
+TEST_F(SwTest, AlarmEvent)
+{
+	uint8_t adr[] = { 0x29, 0x02, 0x01, 0xab, 0xbd, 0x66, 0x77, 0x9a };
+	ds2408* src = (ds2408*)ow.find(0x290201ABBD66779A);
+	ASSERT_NE(src, nullptr);
+
+	// latch 6 (PIO 5) pressed, PIO 5 and 0 read high
+	src->data[STAT] = 0;
+	src->data[PIO_TIME] = 0xff;
+	src->data[PIO_LATCH] = 1 << 5;
+	src->data[PIO_LS] = (1 << 5) | 1;
+	swHdl.dev_alarm(1, adr);
+	EXPECT_EQ(src->get_last_latch(), 1 << 5);
+
+	json data = ow.alarm_event(1, adr);
+	EXPECT_EQ(data["bus"], 1);
+	EXPECT_EQ(data["rom"], "29.0201ABBD66779A");
+	EXPECT_EQ(data["latch"], 1 << 5);
+	EXPECT_EQ(data["sensed"], src->data[PIO_LS]);
+
+	// not a ds2408 on that bus and address: only bus and rom
+	adr[1] = 0x3f;
+	data = ow.alarm_event(1, adr);
+	EXPECT_EQ(data["rom"], "29.3F01ABBD66779A");
+	EXPECT_FALSE(data.contains("latch"));
+	EXPECT_FALSE(data.contains("sensed"));
+	uint8_t temp[] = { 0x28, 0x05, 0x01, 0xfa, 0xfe, 0x66, 0x77, 0xa0 };
+	data = ow.alarm_event(1, temp);
+	EXPECT_EQ(data["rom"], "28.0501FAFE6677A0");
+	EXPECT_FALSE(data.contains("latch"));
+	src->data[PIO_LS] = 0;
+}
+
+// switchHandle() takes one latch bit per call, as dev_alarm() loops
+// while there is one; called with none left it warns and does nothing
+// (bitnumber() finds no bit)
+TEST_F(SwTest, SwitchHandleNoLatch)
+{
+	uint8_t adr[] = { 0x29, 0x02, 0x01, 0xab, 0xbd, 0x66, 0x77, 0x9a };
+	ds2408* src = (ds2408*)ow.find(0x290201ABBD66779A);
+	ds2408* dst = (ds2408*)ow.find(0x290202ABBD6677D4);
+	ASSERT_NE(src, nullptr);
+	ASSERT_NE(dst, nullptr);
+	dst->cfg[CFG_PIN_ID + 1] = CFG_OUT_LOW;
+	dst->pin_switch(1, OFF);
+	fs_ops.write("/switches/add", "1.2.4 2.2.1", 12, 0, nullptr);
+
+	// an alarm uses up all its latches
+	src->data[STAT] = 0;
+	src->data[PIO_TIME] = 0xff;
+	src->data[PIO_LATCH] = 1 << 3;
+	swHdl.dev_alarm(1, adr);
+	EXPECT_TRUE(dst->pin_is_on(1));
+
+	uint64_t warned = logger.warnings().count;
+	LogLevel lvl = logger.get_level();
+	logger.set_level(LogLevel::NONE);
+	EXPECT_FALSE(swHdl.switchHandle(1, 2));
+	logger.set_level(lvl);
+	EXPECT_EQ(logger.warnings().count, warned + 1);
+	EXPECT_NE(logger.warnings().last.find("invalid latch data 1.2"), std::string::npos)
+		<< logger.warnings().last;
+	EXPECT_TRUE(dst->pin_is_on(1));
+
+	fs_ops.write("/switches/del", "1.2.4 2.2.1", 12, 0, nullptr);
+	dst->pin_switch(1, OFF);
+}
+
+static union pio dst_pio(int bus, int adr, int pio)
+{
+	union pio p = {};
+
+	p.da.bus = bus;
+	p.da.adr = adr;
+	p.da.pio = pio;
+	return p;
+}
+
+// "dark": switches the target on only while the astro flag says dark,
+// off always
+TEST_F(SwTest, DarkSwitches)
+{
+	char buf[2048];
+	uint8_t adr[] = { 0x29, 0x02, 0x01, 0xab, 0xbd, 0x66, 0x77, 0x9a };
+	ds2408* src = (ds2408*)ow.find(0x290201ABBD66779A);
+	ds2408* dst = (ds2408*)ow.find(0x290202ABBD6677D4);
+	ASSERT_NE(src, nullptr);
+	ASSERT_NE(dst, nullptr);
+	for (int i = 0; i < 4; i++)
+		dst->cfg[CFG_PIN_ID + i] = CFG_OUT_LOW;
+	dst->pin_switch(1, OFF);
+	dst->pin_switch(2, OFF);
+	auto press = [&](int latch) {
+		src->data[STAT] = 0;
+		src->data[PIO_TIME] = 0xff;
+		src->data[PIO_LATCH] = 1 << (latch - 1);
+		swHdl.dev_alarm(1, adr);
+	};
+	auto list = [&]() {
+		int n = fs_ops.read("/switches/list", buf, sizeof(buf), 0, nullptr);
+		return std::string(buf, n > 0 ? n : 0);
+	};
+	auto dark = [&]() {
+		int n = fs_ops.read("/switches/dark", buf, sizeof(buf), 0, nullptr);
+		return std::string(buf, n > 0 ? n : 0);
+	};
+
+	// dark until told otherwise
+	EXPECT_EQ(dark(), "1\n");
+	const char* add = "1.2.4 2.2.1 dark\n1.2.5 -> 2.2.2 30 1 dark\n1.2.6 0.0.0 dark";
+	fs_ops.write("/switches/add", add, strlen(add) + 1, 0, nullptr);
+	std::string all = list();
+	EXPECT_NE(all.find("switches, dark\n"), std::string::npos) << all;
+	EXPECT_NE(all.find("1.2.4 -> 2.2.1 dark: 29.0201ABBD66779A, PIO.3 (latch 4) -> 29.0202ABBD6677D4, PIO.1, only when dark\n"),
+		std::string::npos) << all;
+	EXPECT_NE(all.find("1.2.5 -> 2.2.2 30 1 dark: "), std::string::npos) << all;
+	// all lights off takes no condition
+	EXPECT_NE(all.find("1.2.6 -> 0.0.0: "), std::string::npos) << all;
+	// saved with the switch, taken back from the config
+	auto find = [&](int latch, int pio) -> const _sw_tbl* {
+		for (const auto& sw : cache.switches)
+			if (sw.src.sa.bus == 1 && sw.src.sa.adr == 2 && sw.src.sa.latch == latch &&
+			    sw.src.sa.press == 0 && sw.dst.da.pio == pio)
+				return &sw;
+		return nullptr;
+	};
+	ASSERT_NE(find(4, 1), nullptr);
+	ASSERT_NE(find(6, 0), nullptr);
+	json j = *find(6, 0);
+	EXPECT_EQ(j["cond"], SW_COND_NONE);
+	j = *find(4, 1);
+	_sw_tbl back;
+	from_json(j, back);
+	EXPECT_EQ(back.cond, SW_COND_DARK);
+
+	press(4);
+	EXPECT_TRUE(dst->pin_is_on(1));
+
+	// day: not switched on, but still off
+	EXPECT_EQ(fs_ops.write("/switches/dark", "0\n", 2, 0, nullptr), 2);
+	EXPECT_EQ(dark(), "0\n");
+	EXPECT_FALSE(swHdl.is_dark());
+	EXPECT_NE(list().find("switches, day\n"), std::string::npos) << buf;
+	press(5);
+	EXPECT_FALSE(dst->pin_is_on(2));
+	EXPECT_FALSE(swHdl.timer_running(dst_pio(2, 2, 2)));
+	press(4);
+	EXPECT_FALSE(dst->pin_is_on(1));
+	press(4);
+	EXPECT_FALSE(dst->pin_is_on(1));
+	// added again without "dark": always
+	fs_ops.write("/switches/add", "1.2.4 2.2.1", 12, 0, nullptr);
+	press(4);
+	EXPECT_TRUE(dst->pin_is_on(1));
+
+	// from the devices interface, as the jsengine sets it
+	ow.dark_set(true);
+	EXPECT_TRUE(ow.is_dark());
+	press(5);
+	EXPECT_TRUE(dst->pin_is_on(2));
+	EXPECT_TRUE(swHdl.timer_running(dst_pio(2, 2, 2)));
+
+	EXPECT_EQ(fs_ops.write("/switches/dark", "2", 1, 0, nullptr), -EINVAL);
+	EXPECT_EQ(fs_ops.write("/switches/dark", "night", 5, 0, nullptr), -EINVAL);
+	EXPECT_TRUE(swHdl.is_dark());
+
+	const char* del = "1.2.4 2.2.1\n1.2.5 2.2.2\n1.2.6 0.0.0";
+	fs_ops.write("/switches/del", del, strlen(del) + 1, 0, nullptr);
+	swHdl.timer_poll(HrClock::now() + std::chrono::seconds(60));
+	dst->pin_switch(1, OFF);
+}
+
+// a dark switch goes by the dark flag of its target's room, while that
+// room has one of its own
+TEST_F(SwTest, RoomDarkSwitches)
+{
+	char buf[2048];
+	uint8_t adr[] = { 0x29, 0x02, 0x01, 0xab, 0xbd, 0x66, 0x77, 0x9a };
+	ds2408* src = (ds2408*)ow.find(0x290201ABBD66779A);
+	ds2408* dst = (ds2408*)ow.find(0x290202ABBD6677D4);
+	ASSERT_NE(src, nullptr);
+	ASSERT_NE(dst, nullptr);
+	for (int i = 0; i < 4; i++)
+		dst->cfg[CFG_PIN_ID + i] = CFG_OUT_LOW;
+	dst->pin_switch(1, OFF);
+	dst->pin_switch(2, OFF);
+	auto press = [&](int latch) {
+		src->data[STAT] = 0;
+		src->data[PIO_TIME] = 0xff;
+		src->data[PIO_LATCH] = 1 << (latch - 1);
+		swHdl.dev_alarm(1, adr);
+	};
+	auto list = [&]() {
+		int n = fs_ops.read("/switches/list", buf, sizeof(buf), 0, nullptr);
+		return std::string(buf, n > 0 ? n : 0);
+	};
+
+	fs_ops.write("/29.0202ABBD6677D4/pin.1/room", "Kitchen", 7, 0, nullptr);
+	const char* add = "1.2.4 2.2.1 dark\n1.2.5 2.2.2 dark";
+	fs_ops.write("/switches/add", add, strlen(add) + 1, 0, nullptr);
+
+	// day outside, but the kitchen is dark: only 2.2.1 is in the kitchen
+	ow.dark_set(false);
+	ow.dark_set(true, "kitchen");
+	EXPECT_NE(list().find("1.2.4 -> 2.2.1 dark: 29.0201ABBD66779A, PIO.3 (latch 4) -> 29.0202ABBD6677D4, PIO.1, only when dark (kitchen dark)\n"),
+		std::string::npos) << buf;
+	EXPECT_NE(list().find("PIO.2, only when dark\n"), std::string::npos) << buf;
+	press(4);
+	EXPECT_TRUE(dst->pin_is_on(1));
+	press(5);
+	EXPECT_FALSE(dst->pin_is_on(2));
+	press(4);
+	EXPECT_FALSE(dst->pin_is_on(1));
+
+	// the other way round, through the file system
+	ow.dark_set(true);
+	EXPECT_EQ(fs_ops.write("/rooms/kitchen/dark", "0", 1, 0, nullptr), 1);
+	EXPECT_FALSE(ow.is_dark("kitchen"));
+	press(4);
+	EXPECT_FALSE(dst->pin_is_on(1));
+	press(5);
+	EXPECT_TRUE(dst->pin_is_on(2));
+
+	// following the astro flag again
+	ow.dark_clear("kitchen");
+	EXPECT_TRUE(ow.is_dark("kitchen"));
+	press(4);
+	EXPECT_TRUE(dst->pin_is_on(1));
+	EXPECT_NE(list().find("PIO.1, only when dark\n"), std::string::npos) << buf;
+
+	const char* del = "1.2.4 2.2.1\n1.2.5 2.2.2";
+	fs_ops.write("/switches/del", del, strlen(del) + 1, 0, nullptr);
+	fs_ops.write("/29.0202ABBD6677D4/pin.1/room", "", 0, 0, nullptr);
+	dst->pin_switch(1, OFF);
 	dst->pin_switch(2, OFF);
 }

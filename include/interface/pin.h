@@ -53,6 +53,21 @@ inline std::optional<PinRole> pin_role_parse(std::string s)
 	return std::nullopt;
 }
 
+// A room name is also a path element (/rooms/<room>): letters, digits,
+// '-' and '_', kept in lower case, so "Kitchen" is "kitchen". Returns
+// it lower-cased, nothing for any other character; an empty string is
+// no room.
+inline std::optional<std::string> room_parse(std::string s)
+{
+	for (auto& c : s) {
+		unsigned char u = c;
+		if (!std::isalnum(u) && c != '-' && c != '_')
+			return std::nullopt;
+		c = std::tolower(u);
+	}
+	return s;
+}
+
 // What the host knows about a pin of a device, besides the device's own
 // config and registers (which stay with the device: they are read and
 // written a byte or a block at a time, for all pins together).

@@ -70,10 +70,3 @@ foreach(SOURCE_FILE ${PLUGIN_SOURCES})
     endif()
 
 endforeach()
-
-if(QJS_FOUND)
-    # so the path the example script documents for itself actually exists
-    install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/example.js
-        DESTINATION /opt/lib/in10dfs/
-    )
-endif()

@@ -15,6 +15,7 @@
 #include "ow_devices.h"
 #include "ds2408.h"
 #include "ds2450.h"
+#include "ard_i2c.h"
 
 extern OwDevices ow;
 extern DS2482 ds;
@@ -230,10 +231,9 @@ TEST_F(DevTest, AlarmPoll)
 
 TEST_F(DevTest, BasePollPassthrough)
 {
-	// ds2408 has nothing to actively refresh on a timer and doesn't
-	// override poll(); the timing itself is decided by poll_check()
-	// alone (poll() is only ever called once poll_check() has just
-	// returned 1, so the base poll() has nothing left to check).
+	// the timing is decided by poll_check() alone (poll() is only ever
+	// called once poll_check() has just returned 1, so the base poll()
+	// has nothing left to check)
 	ow.update_device(0, "29.0300FDFF6677F9");
 	ow.update_data();
 	ow.begin();
@@ -252,7 +252,10 @@ TEST_F(DevTest, BasePollPassthrough)
 	// last_poll defaults to the clock epoch, so the very first check
 	// after setting a nonzero interval is immediately due
 	EXPECT_EQ(dev->poll_check(), 1);
-	EXPECT_EQ(dev->poll(), 1); // base poll(): nothing to actively do
+	// a type with nothing to refresh on a timer keeps the base poll(),
+	// which does nothing (ds2408 has its own, a register read)
+	Ard_i2c ard;
+	EXPECT_EQ(static_cast<OwDev&>(ard).poll(), 1);
 	EXPECT_EQ(dev->poll_check(), 0); // timer was reset by the check above
 	usleep(1100 * 1000);
 	EXPECT_EQ(dev->poll_check(), 1); // due again

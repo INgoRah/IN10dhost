@@ -5,6 +5,9 @@
 #include <chrono>
 #include <mutex>
 #include <string>
+#ifdef TESTING
+#include <gtest/gtest_prod.h>
+#endif
 
 enum class LogLevel {
     VERBOSE = 8,
@@ -53,6 +56,11 @@ private:
     LogLevel _level = LogLevel::INFO;
     STATIC std::string levelToString(LogLevel level);
 	mutable std::mutex recent_mtx;
+#ifdef TESTING
+	// the labels are only written to a terminal, which a test run's
+	// output need not be
+	FRIEND_TEST(main, Logging);
+#endif
 	Recent recent_warn, recent_err;
 };
 
