@@ -118,6 +118,7 @@ add_executable(in10dfs
     src/fs.cpp
     src/fs_leaf.cpp
     src/fs_role.cpp
+    src/fs_room.cpp
     src/ard_i2c.cpp
     src/ds2482.cpp
     src/ow_dev.cpp

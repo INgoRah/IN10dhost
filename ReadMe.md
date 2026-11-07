@@ -154,10 +154,11 @@ writing to `/switches/add`, remove it by writing the same line to
 `/switches/del`, `/switches/list` shows all:
 
 ```sh
-# [bus].[adr].[latch] [bus].[adr].[pio] [secs] [on_press]
+# [bus].[adr].[latch] [bus].[adr].[pio] [secs] [on_press] [dark]
 echo "1.2.3 2.2.0" > /mnt/1wire/switches/add          # toggles 2.2.0
 echo "1.2.5 2.2.1 30" > /mnt/1wire/switches/add       # on for 30s
 echo "1.2.6 2.2.1 30 1" > /mnt/1wire/switches/add     # on for 30s, press again: off
+echo "1.2.7 2.2.3 60 dark" > /mnt/1wire/switches/add  # on for 60s, only when dark
 ```
 
 Latch 11..18 is a long press, 21..28 the start of a long press.
@@ -177,7 +178,7 @@ see `name` and `pin.<n>/name` of a device) and, for a timed switch, its
 timing and when its running timer switches off:
 
 ```
-3 switches
+3 switches, dark
 1.2.3 -> 2.2.0: Hallway, PIO.2 (latch 3) -> Light board, Ceiling
 1.2.5 -> 2.2.1 30 0: Hallway, Stairs button (latch 5) -> Light board, Stairs, timed 30s, press restarts, off in 12s
 1.2.16 -> 2.2.1 30 1: Hallway, Stairs button (latch 6, long) -> Light board, Stairs, timed 30s, press off
@@ -205,6 +206,42 @@ that switches on for a while.
 The timer belongs to the output, so all timed switches of one output
 share it. Adding a switch that exists already sets its timing anew.
 
+With `dark` at the end a switch switches its output on only while it
+is dark; switching it off works at any time. Whether it is dark is the
+astro flag `/switches/dark`, `1` from sunset to sunrise, `0` during the
+day. in10dfs does not work it out itself: an external script sets it,
+through the file or from the jsengine (`ow.dark_set(true)`), e.g.
+`plugin/astro.js`, which calculates sunrise and sunset for a place. It is
+`1` until set, so without a script the switches work as without
+`dark`. It is not saved either, the script sets it after a restart.
+
+```sh
+echo 0 > /mnt/1wire/switches/dark                     # sunrise
+echo 1 > /mnt/1wire/switches/dark                     # sunset
+```
+
+A room can have a dark flag of its own, e.g. an inner room without
+windows or one with its own brightness sensor: `/rooms/<room>/dark`
+(see rooms below). A `dark` switch then goes by the flag of the room
+its output pin is in, the others keep following `/switches/dark`.
+`/switches/list` shows the room's flag after `only when dark`, e.g.
+`, only when dark (kitchen day)`.
+
+Switches can be masked for a while: writing a switch's line to
+`/switches/disable` makes its presses do nothing, `all` masks every
+switch. `/switches/enable` takes the same and undoes it. Timers already
+running still switch off. The mask is saved with the config (a
+switch's `disabled`, and `switches_disabled` for `all`), so it holds
+across a restart once the config was saved (see saving the config
+above). `/switches/list` marks a masked switch with
+`, disabled`, and its first line with `, all disabled`:
+
+```sh
+echo "1.2.3 2.2.0" > /mnt/1wire/switches/disable      # this one
+echo all > /mnt/1wire/switches/disable                # every switch
+echo all > /mnt/1wire/switches/enable
+```
+
 ## roles and rooms
 
 Every ds2408 pin can be told what is connected to it and where, besides
@@ -213,12 +250,16 @@ never written to the device:
 
 ```sh
 echo light   > /mnt/1wire/29.0701F8FE6677F4/pin.2/role
-echo Kitchen > /mnt/1wire/29.0701F8FE6677F4/pin.2/room
+echo kitchen > /mnt/1wire/29.0701F8FE6677F4/pin.2/room
 ```
 
 The roles are `light`, `socket`, `fan`, `heating`, `blind` (outputs),
 `button`, `contact`, `motion` (inputs) and `none`, the default. An empty
 write resets the role to `none` and clears the room.
+
+A room is a name of letters, digits, `-` and `_`, no spaces, kept in
+lower case: `Kitchen` is written as `kitchen`. A room of an older
+config is converted when loaded (`Living Room` becomes `living_room`).
 
 `/role/<role>/` collects the pins of one role across all devices:
 
@@ -231,7 +272,25 @@ echo 1 > /mnt/1wire/role/light/29.0701F8FE6677F4.2
 ```
 
 Only outputs are switched; an input with a role is listed with its
-sensed level. Scripts get the same through `ow.pins()` and
+sensed level.
+
+`/rooms/<room>/` collects the pins of one room, whatever their role.
+`/rooms` lists every room a pin is in; the names are matched
+case-insensitively, `rooms/Kitchen` is `rooms/kitchen`:
+
+```sh
+cat /mnt/1wire/rooms/kitchen/list    # <rom>.<pin>  role  on|off  name
+cat /mnt/1wire/rooms/kitchen/dark    # 1 dark, 0 day, as its switches see it
+echo 1 > /mnt/1wire/rooms/kitchen/dark      # its own flag, whatever the astro flag says
+echo auto > /mnt/1wire/rooms/kitchen/dark   # follow /switches/dark again
+```
+
+`dark` reads the flag in effect: the room's own while it has one,
+otherwise `/switches/dark`. A flag can be set for a room no pin is in
+yet; such a room is listed as well until its flag is set back to
+`auto` (or an empty write). Like the astro flag the room flags are not
+saved. From the jsengine: `ow.dark_set(dark, room)`,
+`ow.dark_clear(room)` and `ow.is_dark(room)`. Scripts get the same through `ow.pins()` and
 `ow.role_switch()`, and a ds2408's change event names the role and room
 of every output that changed (see `plugin/README.md`).
 

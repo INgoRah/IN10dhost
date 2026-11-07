@@ -72,8 +72,8 @@ class Plugin;
    files themselves reach the plugin (Plugin::fs_read()/fs_write()).
 
    The root, settings/ and status/ can be shared with the daemon, its
-   own files there cannot be taken; switches/, role/, alarm/, bus.<n>/
-   and the devices are the daemon's alone. The files of a plugin go
+   own files there cannot be taken; switches/, role/, rooms/, alarm/,
+   bus.<n>/ and the devices are the daemon's alone. The files of a plugin go
    away with it when it is unloaded or reloaded. */
 class IPluginFiles {
 public:

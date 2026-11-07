@@ -11,6 +11,7 @@
 #include "fs_table.h"
 #include "fs_leaf.h"
 #include "fs_role.h"
+#include "fs_room.h"
 #include "ow_devices.h"
 #include "plugins.h"
 #include "switch_handler.h"
@@ -33,7 +34,35 @@ static struct filetype root_dir[] = {
 	{ "switches", 0 },
 	/* the pins by role, see fs_role.h */
 	{ "role", 0 },
+	/* the pins by room, see fs_room.h */
+	{ "rooms", 0 },
 };
+
+/* The pins by role and by room: /role and /rooms, see fs_role.h and
+   fs_room.h; NOT_FOUND for a path in neither */
+static int pins_attr(const string& path)
+{
+	int r = fs_role::attr(path);
+	return r != fs_table::NOT_FOUND ? r : fs_room::attr(path);
+}
+
+static int pins_dir(const string& path, std::vector<string>& names)
+{
+	int r = fs_role::dir(path, names);
+	return r != fs_table::NOT_FOUND ? r : fs_room::dir(path, names);
+}
+
+static int pins_read(const string& path, char* buf, size_t size, off_t offset)
+{
+	int r = fs_role::read(path, buf, size, offset);
+	return r != fs_table::NOT_FOUND ? r : fs_room::read(path, buf, size, offset);
+}
+
+static int pins_write(const string& path, const char* buf, size_t size)
+{
+	int r = fs_role::write(path, buf, size);
+	return r != fs_table::NOT_FOUND ? r : fs_room::write(path, buf, size);
+}
 
 static struct filetype settings[] = {
 	{ ".", 0 },
@@ -306,7 +335,7 @@ static int fs_getattr(const char* path_in, struct stat* st, struct fuse_file_inf
 		st->st_nlink = 2;
 		return 0;
 	}
-	attr = fs_role::attr(spath);
+	attr = pins_attr(spath);
 	if (attr != fs_table::NOT_FOUND) {
 		if (attr < 0)
 			return attr;
@@ -386,7 +415,7 @@ static int readdir_builtin(const char* path_in, void* buf, fuse_fill_dir_t fille
 
 	{
 		std::vector<string> names;
-		int res = fs_role::dir(spath, names);
+		int res = pins_dir(spath, names);
 		if (res != fs_table::NOT_FOUND) {
 			for (const auto& n : names)
 				filler(buf, n.c_str(), nullptr, 0, static_cast<fuse_fill_dir_flags>(0));
@@ -541,7 +570,7 @@ static int fs_open(const char* path_in, struct fuse_file_info*)
 	if (fsLeaf.open(spath) == 0)
 		return 0;
 	{
-		int attr = fs_role::attr(spath);
+		int attr = pins_attr(spath);
 		if (attr != fs_table::NOT_FOUND)
 			return attr > 0 ? 0 : (attr == 0 ? -EISDIR : attr);
 	}
@@ -578,7 +607,7 @@ static int fs_read(const char* path_in, char* buf, size_t size, off_t offset,
 	if (plugins.file_attr(spath) > 0)
 		return offset > 0 ? 0 : plugins.file_read(spath, buf, size);
 	{
-		int res = fs_role::read(spath, buf, size, offset);
+		int res = pins_read(spath, buf, size, offset);
 		if (res != fs_table::NOT_FOUND)
 			return res;
 	}
@@ -636,7 +665,7 @@ static int fs_write(const char* path_in, const char* buf, size_t size,
 			return res;
 	}
 	{
-		int res = fs_role::write(spath, buf, size);
+		int res = pins_write(spath, buf, size);
 		if (res != fs_table::NOT_FOUND)
 			return res;
 	}

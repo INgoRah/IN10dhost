@@ -5,6 +5,7 @@
 #include <gtest/gtest.h>
 #include <gmock/gmock.h>
 #include <cstdlib> // Required for std::system
+#include <fstream>
 #include <thread>
 #include <future>
 #include <atomic>
@@ -13,10 +14,12 @@
 #include "ow_devices.h"
 #include "plugins.h"
 #include "ds2408.h"
+#include "switch_handler.h"
 
 extern OwDevices ow;
 extern DS2482 ds;
 extern Plugins plugins;
+extern SwitchHandler swHdl;
 
 std::filesystem::path exec_path()
 {
@@ -35,7 +38,15 @@ std::filesystem::path exec_path()
 class PluginsTest : public ::testing::Test {
 protected:
 	void SetUp() override { plugins.cleanup(); }
-	void TearDown() override { plugins.cleanup(); }
+	void TearDown() override
+	{
+		plugins.cleanup();
+		// the scripts the tests write, also when one ended early; the
+		// engine is unloaded by now
+		for (const char* f : { "test_engine.js", "test_engine_a.js", "test_engine_b.js",
+				       "test_engine_late.js", "test_astro.js" })
+			std::filesystem::remove(std::filesystem::current_path() / f);
+	}
 };
 
 TEST_F(PluginsTest, LoadPlugin)
@@ -196,13 +207,13 @@ static const char js_src[] = R"JS(
 					return -1;
 				var c = last.changed[0];
 				return c.pin + (c.on ? 10 : 0) + (c.role == "light" ? 100 : 0)
-					+ (c.room == "Kitchen" ? 1000 : 0);
+					+ (c.room == "kitchen" ? 1000 : 0);
 			case 9:                     /* ACT_DEV_WATCHDOG: role calls */
 				if (!data || !data.role)
 					return 0;
 				var p = ow.pins(data.role);
 				return p.length + 10 * ow.pins().length
-					+ (p.length && p[0].room == "Kitchen" && p[0].output ? 100 : 0)
+					+ (p.length && p[0].room == "kitchen" && p[0].output ? 100 : 0)
 					+ (ow.role_switch(data.role, data.on) ? 1000 : 0);
 			case 6:                     /* ACT_ALARM_BEFORE: throws */
 				throw new Error("boom");
@@ -218,7 +229,17 @@ static const char js_src[] = R"JS(
 					| (ow.level_set(data.rom, data.pin, 10) ? 8 : 0)
 					| (ow.OFF === 0 && ow.ON === 2 && ow.TOGGLE === 3 ? 16 : 0)
 					| (ow.extport_set(data.rom, 0x08, 0xf7) ? 32 : 0)
-					| (ow.sleep(1) === undefined ? 64 : 0);
+					| (ow.sleep(1) === undefined ? 64 : 0)
+					| (ow.dark_set(false) === undefined && ow.is_dark() === false
+					   && (ow.dark_set(true), ow.is_dark())
+					   /* a room's own flag, case-insensitive */
+					   && (ow.dark_set(false, "Hall"), !ow.is_dark("hall"))
+					   && ow.is_dark()
+					   && (ow.dark_clear("HALL"), ow.is_dark("hall"))
+					   && (function() {
+						try { ow.dark_set(true, "living room"); }
+						catch (e) { return e instanceof RangeError; }
+						return false; })() ? 128 : 0);
 			}
 			return 0;
 		}
@@ -387,7 +408,7 @@ TEST_F(PluginsTest, JsEngineDs2408Calls)
 	logger.set_level(LogLevel::NONE);
 	int ret = plugins.action(ACT_PERIODIC_SECOND, 0, &data);
 	logger.set_level(lvl);
-	EXPECT_EQ(ret - base, 127);
+	EXPECT_EQ(ret - base, 255);
 	EXPECT_EQ(dev->ext_ddr, 0x08);
 	EXPECT_EQ(dev->ext_port, 0xf7);
 
@@ -402,7 +423,7 @@ TEST_F(PluginsTest, JsEngineDs2408Calls)
 	logger.set_level(LogLevel::NONE);
 	ret = plugins.action(ACT_PERIODIC_SECOND, 0, &data);
 	logger.set_level(lvl);
-	EXPECT_EQ(ret - base, 16 + 64);
+	EXPECT_EQ(ret - base, 16 + 64 + 128);
 
 	// out of range values throw in the script, so nothing is changed
 	data["rom"] = "29.0701F8FE6677F4";
@@ -532,6 +553,53 @@ TEST_F(PluginsTest, JsEngineFiles)
 	plugins.action(ACT_READY);
 	EXPECT_EQ(plugins.file_attr("js/other"), -ENOENT);
 	EXPECT_EQ(plugins.file_attr("js/value"), 16);
+}
+
+// plugin/astro.js: loads, sets the dark flags and shows them in
+// status/astro; the times themselves depend on when the test runs
+TEST_F(PluginsTest, JsEngineAstroScript)
+{
+	if (!jsengine_available())
+		GTEST_SKIP() << "built without quickjs";
+
+	std::ifstream in("plugin/astro.js");
+	ASSERT_TRUE(in.good()) << "run from the source directory";
+	std::string src((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+	// a room with times of its own
+	std::string rooms = "const ROOMS = {};";
+	size_t at = src.find(rooms);
+	ASSERT_NE(at, std::string::npos);
+	src.replace(at, rooms.size(), "const ROOMS = { \"hall\": { dark: -30, day: 30 } };");
+	std::string path = (std::filesystem::current_path() / "test_astro.js").string();
+	write_js(src, path);
+	plugins.load(json{ { "jsengine", { { "script", path } } } });
+	ow.dark_set(false);
+
+	plugins.action(ACT_INITIALIZED);
+	plugins.action(ACT_READY);
+	char buf[128] = {};
+	int res = plugins.file_read("status/astro", buf, sizeof(buf));
+	ASSERT_GT(res, 0);
+	std::string text(buf, res);
+	EXPECT_TRUE(text.starts_with("sunrise ") || text.starts_with("polar ")) << text;
+	bool dark = text.find("\ndark 1") != std::string::npos;
+	EXPECT_TRUE(dark || text.find("\ndark 0") != std::string::npos) << text;
+	EXPECT_EQ(ow.is_dark(), dark) << text;
+	EXPECT_TRUE(swHdl.has_dark("hall"));
+
+	// set by hand: holds until the script's own day or night changes
+	ow.dark_set(!dark);
+	for (int i = 0; i < 61; i++)
+		plugins.action(ACT_PERIODIC_SECOND);
+	EXPECT_EQ(ow.is_dark(), !dark);
+	// a restart sets it again
+	plugins.action(ACT_READY);
+	EXPECT_EQ(ow.is_dark(), dark);
+
+	ow.dark_clear("hall");
+	ow.dark_set(true);
+	std::filesystem::remove(path);
+	load_js();
 }
 
 // Several scripts, each in a context of its own

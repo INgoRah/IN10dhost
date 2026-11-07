@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <algorithm>
+#include <array>
 #include <vector>
 #include <fstream>
 #include <filesystem>
@@ -1846,6 +1847,62 @@ TEST_F(FsTest, Ds2408WatchdogNoAlarm) {
 	fs::remove_all(dir);
 }
 
+/* An uncached PIO or sensed read goes to the device, as BYTE does: the
+   device may have switched by itself (its own timer) */
+TEST_F(FsTest, Ds2408UncachedRead) {
+	char buf[32] = {};
+	std::string rom = OwDev::canonical_rom("29.1C00FDFF6677");
+	auto rd = [&](const std::string& path) {
+		std::memset(buf, 0, sizeof(buf));
+		fs_ops.read(path.c_str(), buf, sizeof(buf), 0, nullptr);
+		return std::string(buf);
+	};
+	// what the device answers to F0 88 00: 8 registers and their CRC16
+	auto answer = [](uint8_t ls, uint8_t out, uint8_t latch) {
+		const uint8_t cmd[3] = { 0xF0, 0x88, 0x00 };
+		std::array<uint8_t, 10> a = { ls, out, latch, 0xff, 0x00, 0x00, 0xff, 0xff, 0, 0 };
+		uint16_t crc = ~DS2482::crc16(a.data(), 8, DS2482::crc16(cmd, 3, 0));
+		a[8] = crc & 0xff;
+		a[9] = crc >> 8;
+		return a;
+	};
+	ow.update_device(1, rom);
+	ow.update_data();
+	ow.begin();
+	ds2408* dev = (ds2408*)ow.find(rom);
+	ASSERT_NE(dev, nullptr);
+	LogLevel lvl = logger.get_level();
+	logger.set_level(LogLevel::NONE);
+
+	// PIO.3 on (active low)
+	EXPECT_EQ(dev->pio_set(0xF7), 0xAA);
+	EXPECT_EQ(rd("/" + rom + "/PIO.3"), "1");
+
+	// the device switched it off by itself: only an uncached read sees it
+	dev->sim_reads = { answer(0xFF, 0xFF, 0x00) };
+	EXPECT_EQ(rd("/" + rom + "/PIO.3"), "1");
+	EXPECT_EQ(dev->sim_reads.size(), 1u);
+	EXPECT_EQ(rd("/uncached/" + rom + "/PIO.3"), "0");
+	EXPECT_TRUE(dev->sim_reads.empty());
+	EXPECT_EQ(rd("/" + rom + "/PIO.3"), "0");
+	// and the aggregates: PIO.0 switched on by the device
+	dev->sim_reads = { answer(0xFE, 0xFE, 0x00) };
+	EXPECT_EQ(rd("/uncached/" + rom + "/PIO.BYTE"), "1");
+	EXPECT_TRUE(dev->sim_reads.empty());
+
+	// sensed: the logic state as read now
+	dev->sim_reads = { answer(0xF7, 0xFF, 0x00) };
+	EXPECT_EQ(rd("/" + rom + "/sensed.3"), "1");
+	EXPECT_EQ(rd("/uncached/" + rom + "/sensed.3"), "0");
+	EXPECT_TRUE(dev->sim_reads.empty());
+	dev->sim_reads = { answer(0x5A, 0xFF, 0x00) };
+	EXPECT_EQ(rd("/uncached/" + rom + "/sensed.BYTE"), "90");
+	EXPECT_TRUE(dev->sim_reads.empty());
+	EXPECT_EQ(rd("/" + rom + "/sensed.BYTE"), "90");
+
+	logger.set_level(lvl);
+}
+
 /* A register read failing its CRC, as a slave slipping a time slot
    makes it up: read again, never taken as is, in particular not for a
    watchdog. */
@@ -2332,40 +2389,58 @@ TEST_F(FsTest, Ds2408PinRoleRoom) {
 		EXPECT_STREQ(buf, name);
 	}
 
+	// a room name is kept in lower case
 	res = fs_ops.write("/29.0701F8FE6677F4/pin.2/room", "Kitchen\n", 8, 0, nullptr);
 	EXPECT_EQ(res, 8);
 	res = fs_ops.read("/29.0701F8FE6677F4/pin.2/room", buf, sizeof(buf), 0, nullptr);
 	EXPECT_EQ(res, 7);
-	EXPECT_STREQ(buf, "Kitchen");
-	EXPECT_EQ(dev->room(2), "Kitchen");
+	EXPECT_STREQ(buf, "kitchen");
+	EXPECT_EQ(dev->room(2), "kitchen");
 	EXPECT_EQ(dev->room(3), "");
 	std::string too_long(PIN_NAME_MAX + 1, 'y');
 	res = fs_ops.write("/29.0701F8FE6677F4/pin.2/room", too_long.c_str(), too_long.size(), 0, nullptr);
 	EXPECT_EQ(res, -EINVAL);
-	EXPECT_EQ(dev->room(2), "Kitchen");
+	// only letters, digits, - and _: it is a path element of /rooms
+	for (const char* bad : { "living room", "a/b", "k\xc3\xbc" "che", "a.b" }) {
+		res = fs_ops.write("/29.0701F8FE6677F4/pin.2/room", bad, std::strlen(bad), 0, nullptr);
+		EXPECT_EQ(res, -EINVAL) << bad;
+	}
+	EXPECT_EQ(dev->room(2), "kitchen");
+	res = fs_ops.write("/29.0701F8FE6677F4/pin.4/room", "Living_Room-2", 13, 0, nullptr);
+	EXPECT_EQ(res, 13);
+	EXPECT_EQ(dev->room(4), "living_room-2");
 
 	// stored with the device config and restored from it
 	json j = dev->to_json();
 	EXPECT_EQ(j["pins"][2]["role"], "light");
-	EXPECT_EQ(j["pins"][2]["room"], "Kitchen");
+	EXPECT_EQ(j["pins"][2]["room"], "kitchen");
 	EXPECT_EQ(j["pins"][3]["role"], "none");
 	ds2408 restored;
 	restored.from_json(j);
 	EXPECT_EQ(restored.role(2), PinRole::light);
-	EXPECT_EQ(restored.room(2), "Kitchen");
+	EXPECT_EQ(restored.room(2), "kitchen");
+	// an older config's free text room is made a room name
+	json old = j;
+	old["pins"][2]["room"] = "Living Room";
+	old["pins"][4]["room"] = "a/b";
+	ds2408 older;
+	older.from_json(old);
+	EXPECT_EQ(older.room(2), "living_room");
+	EXPECT_EQ(older.room(4), "");
 	// a hand-edited config with an unknown role or missing fields loads
 	j["pins"][2]["role"] = "lamp";
 	j["pins"][3].erase("room");
 	ds2408 edited;
 	EXPECT_NO_THROW(edited.from_json(j));
 	EXPECT_EQ(edited.role(2), PinRole::none);
-	EXPECT_EQ(edited.room(2), "Kitchen");
+	EXPECT_EQ(edited.room(2), "kitchen");
 	EXPECT_EQ(edited.room(3), "");
 
 	// empty writes reset both
 	fs_ops.write("/29.0701F8FE6677F4/pin.2/role", "\n", 1, 0, nullptr);
 	fs_ops.write("/29.0701F8FE6677F4/pin.2/room", "\n", 1, 0, nullptr);
 	fs_ops.write("/29.0701F8FE6677F4/pin.4/role", "", 0, 0, nullptr);
+	fs_ops.write("/29.0701F8FE6677F4/pin.4/room", "", 0, 0, nullptr);
 	EXPECT_EQ(dev->role(2), PinRole::none);
 	EXPECT_EQ(dev->room(2), "");
 }
@@ -2458,7 +2533,7 @@ TEST_F(FsTest, RoleDirs) {
 	fs_ops.read("/role/light/all", buf, sizeof(buf), 0, nullptr);
 	EXPECT_STREQ(buf, "2");
 
-	std::string line2 = rom + ".2\ton\tKitchen\tCeiling\n";
+	std::string line2 = rom + ".2\ton\tkitchen\tCeiling\n";
 	std::string line3 = rom + ".3\ton\t\tPIO.3\n";
 	memset(buf, 0, sizeof(buf));
 	res = fs_ops.read("/role/light/list", buf, sizeof(buf), 0, nullptr);
@@ -2497,6 +2572,108 @@ TEST_F(FsTest, RoleDirs) {
 	EXPECT_EQ(fs_ops.write("/role/light", "1", 1, 0, nullptr), -EISDIR);
 
 	for (int i = 2; i <= 5; i++) {
+		std::string pin = base + "/pin." + std::to_string(i);
+		fs_ops.write((pin + "/role").c_str(), "", 0, 0, nullptr);
+		fs_ops.write((pin + "/room").c_str(), "", 0, 0, nullptr);
+		fs_ops.write((pin + "/name").c_str(), "", 0, 0, nullptr);
+	}
+}
+
+// /rooms lists the pins by room and holds a dark flag per room
+TEST_F(FsTest, RoomDirs) {
+	std::vector<std::string> seen;
+	auto record = [](void* buf, const char* name, const struct stat*,
+					 off_t, enum fuse_fill_dir_flags) {
+		static_cast<std::vector<std::string>*>(buf)->push_back(name);
+		return 0;
+	};
+	auto has = [&](const char* n) {
+		return std::find(seen.begin(), seen.end(), n) != seen.end();
+	};
+	auto rd = [&](const char* path) {
+		char b[256] = {};
+		int n = fs_ops.read(path, b, sizeof(b), 0, nullptr);
+		return n < 0 ? std::to_string(n) : std::string(b, n);
+	};
+	const std::string rom = "29.0701F8FE6677F4";
+	const std::string base = "/" + rom;
+	struct stat st;
+
+	ow.update_device(1, rom);
+	ow.update_data();
+	ds2408* dev = (ds2408*)ow.find(0x290701F8FE6677F4);
+	ASSERT_NE(dev, nullptr);
+	dev->cfg[CFG_PIN_ID + 2] = CFG_OUT_LOW;
+	dev->cfg[CFG_PIN_ID + 5] = CFG_PASS;
+	dev->data[PIO_OUT] = 0xff;
+	// a room without a role counts as well
+	fs_ops.write((base + "/pin.2/role").c_str(), "light", 5, 0, nullptr);
+	fs_ops.write((base + "/pin.2/room").c_str(), "Kitchen", 7, 0, nullptr);
+	fs_ops.write((base + "/pin.2/name").c_str(), "Ceiling", 7, 0, nullptr);
+	fs_ops.write((base + "/pin.5/room").c_str(), "kitchen", 7, 0, nullptr);
+	fs_ops.write((base + "/pin.6/room").c_str(), "hall", 4, 0, nullptr);
+
+	fs_ops.readdir("/", &seen, record, 0, nullptr, (enum fuse_readdir_flags)0);
+	EXPECT_TRUE(has("rooms"));
+	seen.clear();
+	EXPECT_EQ(fs_ops.getattr("/rooms", &st, nullptr), 0);
+	EXPECT_TRUE(S_ISDIR(st.st_mode));
+	fs_ops.readdir("/rooms", &seen, record, 0, nullptr, (enum fuse_readdir_flags)0);
+	EXPECT_TRUE(has("kitchen"));
+	EXPECT_TRUE(has("hall"));
+	EXPECT_FALSE(has("Kitchen"));
+	EXPECT_FALSE(has("garden"));
+	seen.clear();
+	// matched case-insensitively; any room name can be looked up
+	EXPECT_EQ(fs_ops.getattr("/rooms/Kitchen", &st, nullptr), 0);
+	EXPECT_TRUE(S_ISDIR(st.st_mode));
+	EXPECT_EQ(fs_ops.getattr("/rooms/garden", &st, nullptr), 0);
+	EXPECT_EQ(fs_ops.getattr("/rooms/living room", &st, nullptr), -ENOENT);
+	EXPECT_EQ(fs_ops.getattr("/rooms/kitchen/brightness", &st, nullptr), -ENOENT);
+	fs_ops.readdir("/rooms/kitchen", &seen, record, 0, nullptr, (enum fuse_readdir_flags)0);
+	EXPECT_TRUE(has("dark"));
+	EXPECT_TRUE(has("list"));
+	seen.clear();
+
+	std::string list = rom + ".2\tlight\toff\tCeiling\n" + rom + ".5\tnone\t";
+	EXPECT_EQ(rd("/rooms/Kitchen/list").substr(0, list.size()), list);
+	EXPECT_EQ(rd("/rooms/hall/list").substr(0, rom.size() + 2), rom + ".6");
+	EXPECT_EQ(rd("/rooms/garden/list"), "");
+	EXPECT_EQ(fs_ops.getattr("/rooms/garden/list", &st, nullptr), 0);
+	EXPECT_TRUE(S_ISREG(st.st_mode));
+	EXPECT_EQ(fs_ops.write("/rooms/kitchen/list", "1", 1, 0, nullptr), -EPERM);
+	EXPECT_EQ(fs_ops.write("/rooms/kitchen", "1", 1, 0, nullptr), -EISDIR);
+
+	// the dark flag follows the astro flag until the room has its own
+	swHdl.dark_set(true);
+	EXPECT_EQ(rd("/rooms/kitchen/dark"), "1\n");
+	EXPECT_EQ(fs_ops.write("/rooms/Kitchen/dark", "0\n", 2, 0, nullptr), 2);
+	EXPECT_EQ(rd("/rooms/kitchen/dark"), "0\n");
+	EXPECT_FALSE(swHdl.is_dark("kitchen"));
+	EXPECT_TRUE(swHdl.is_dark("hall"));
+	EXPECT_TRUE(swHdl.is_dark());
+	swHdl.dark_set(false);
+	EXPECT_EQ(fs_ops.write("/rooms/kitchen/dark", "1", 1, 0, nullptr), 1);
+	EXPECT_EQ(rd("/rooms/kitchen/dark"), "1\n");
+	EXPECT_EQ(rd("/rooms/hall/dark"), "0\n");
+	EXPECT_EQ(fs_ops.write("/rooms/kitchen/dark", "2", 1, 0, nullptr), -EINVAL);
+	EXPECT_EQ(fs_ops.write("/rooms/kitchen/dark", "night", 5, 0, nullptr), -EINVAL);
+	// a flag for a room no pin is in yet makes it listed
+	EXPECT_EQ(fs_ops.write("/rooms/Garden/dark", "1", 1, 0, nullptr), 1);
+	fs_ops.readdir("/rooms", &seen, record, 0, nullptr, (enum fuse_readdir_flags)0);
+	EXPECT_TRUE(has("garden"));
+	seen.clear();
+	// back to the astro flag: "auto" or an empty write
+	EXPECT_EQ(fs_ops.write("/rooms/kitchen/dark", "auto\n", 5, 0, nullptr), 5);
+	EXPECT_EQ(rd("/rooms/kitchen/dark"), "0\n");
+	EXPECT_EQ(fs_ops.write("/rooms/garden/dark", "\n", 1, 0, nullptr), 1);
+	EXPECT_FALSE(swHdl.has_dark("garden"));
+	fs_ops.readdir("/rooms", &seen, record, 0, nullptr, (enum fuse_readdir_flags)0);
+	EXPECT_FALSE(has("garden"));
+	seen.clear();
+	swHdl.dark_set(true);
+
+	for (int i : { 2, 5, 6 }) {
 		std::string pin = base + "/pin." + std::to_string(i);
 		fs_ops.write((pin + "/role").c_str(), "", 0, 0, nullptr);
 		fs_ops.write((pin + "/room").c_str(), "", 0, 0, nullptr);

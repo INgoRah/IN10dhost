@@ -225,7 +225,7 @@ void Ard_i2c::set_mode(int mode)
 #ifdef USE_I2C
 	int fd = open("/dev/i2c-0", O_RDWR);
 	if (fd < 0) {
-		printf("error opening arduino\n");
+		logger.error("error opening arduino");
 		return;
 	}
 	uint8_t buf[] = { 0x69, (uint8_t)(mode & 0xff) };
@@ -273,7 +273,6 @@ int Ard_i2c::interrupt() {
 			logger.warn(std::format("Arduino status read failed ({})", ret));
 			return -1;
 		}
-		logger.verbose(std::format("Arduino interrupt AD Stat={:#x}", status));
 		// bit 0..3: one bit per bus with an alarm
 		uint8_t buses = status & 0x0f;
 		for (int bus = 0; bus < MAX_BUS; bus++) {
@@ -313,7 +312,6 @@ int Ard_i2c::interrupt() {
 			*/
 			power = (int)(1000 * (3600 / diff) / 500);
 			alarm = true;
-			logger.verbose(std::format("Estimated usage: {} Watt", power));
 		}
 		// 0x40: more queued (one power impulse per read)
 		return (status & 0x40) ? 1 : 0;

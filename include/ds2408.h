@@ -134,6 +134,7 @@ class ds2408 : public OwDev, public IDS2408 {
 		FRIEND_TEST(FsTest, Ds2408WatchdogNoAlarm);
 		FRIEND_TEST(FsTest, Ds2408Firmware);
 		FRIEND_TEST(FsTest, Ds2408WriteErrors);
+		FRIEND_TEST(FsTest, Ds2408UncachedRead);
 		// fw_enter() calls
 		int sim_bl_enters = 0;
 #endif
@@ -203,11 +204,16 @@ class ds2408 : public OwDev, public IDS2408 {
 		// appends the pins that have a role, all of them for
 		// PinRole::none; see IDevices::pins()
 		void pins_get(std::vector<PinInfo>& out, PinRole role) const;
+		// appends the pins in that room, whatever their role, or with
+		// an empty room every pin that has one
+		void room_pins_get(std::vector<PinInfo>& out, const std::string& room) const;
 		// switches the output pins with that role, see
 		// IDevices::role_switch(); returns how many failed
 		int role_switch(PinRole role, bool on);
 		// the room given to a pin, empty while it has none
 		std::string room(int pio) const;
+		// a copy of pin i with its state, for pins_get()
+		PinInfo pin_info(int i) const;
 		int brightness_set(uint8_t brightness);
 		int threshold_set(uint8_t threshold);
 		// a FEAT_xxx bit cleared in the config, see FEAT_xxx_MIN_VERSION

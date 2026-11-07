@@ -106,6 +106,14 @@ TEST(main, Logging)
 	logger.verbose("test verbose message");
 	logger.log(LogLevel::NONE, "test unkown meesage");
 	logger.set_level(lvl);
+#ifndef NO_TERM
+	EXPECT_EQ(logger.levelToString(LogLevel::DEBUG), "DEBUG");
+	EXPECT_EQ(logger.levelToString(LogLevel::VERBOSE), "VERBOSE");
+	EXPECT_EQ(logger.levelToString(LogLevel::INFO), "INFO");
+	EXPECT_EQ(logger.levelToString(LogLevel::WARN), "WARN");
+	EXPECT_EQ(logger.levelToString(LogLevel::ERROR), "ERROR");
+	EXPECT_EQ(logger.levelToString(LogLevel::NONE), "UNKNOWN");
+#endif
 }
 
 int main(int argc, char* argv[])

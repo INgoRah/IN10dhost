@@ -8,6 +8,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <iostream>
+#include <set>
 #include <string>
 #include <system_error> // for std::system_error in alarmHandler()
 #include <algorithm> // for std::max,min...
@@ -65,7 +66,8 @@ void to_json(json& j, const Config& c) {
 		{"save_interval", c.save_interval},
 		{"bus_count", c.bus_count},
 		{"busses", c.busses},
-		{"switches", c.switches}
+		{"switches", c.switches},
+		{"switches_disabled", swHdl.all_disabled()}
 	};
 	j["devices"] = json::array();
 	for (const auto& dev : c.devices) {
@@ -104,6 +106,9 @@ void from_json(const json& j, Config& c) {
 	j.at("busses").get_to(c.busses);
 	if (j.contains("switches"))
 		j.at("switches").get_to(c.switches);
+	// the switches' own mask goes with them, the global one is the
+	// switch handler's
+	swHdl.all_disabled_set(j.value("switches_disabled", false));
 	c.devices.clear();
 
 	for (const auto& jdev : j.at("devices")) {
@@ -560,6 +565,45 @@ std::vector<PinInfo> OwDevices::pins(PinRole role)
 	return out;
 }
 
+std::vector<PinInfo> OwDevices::room_pins(const std::string& room)
+{
+	std::vector<PinInfo> out;
+
+	for (int bus = 0; bus < bus_count(); bus++) {
+		for (OwDev* dev : list_devices(bus)) {
+			if (auto* d = dynamic_cast<ds2408*>(dev))
+				d->room_pins_get(out, room);
+		}
+	}
+	return out;
+}
+
+std::vector<std::string> OwDevices::rooms()
+{
+	std::set<std::string> all;
+
+	for (const auto& p : room_pins())
+		all.insert(p.room);
+	for (auto& r : swHdl.dark_rooms())
+		all.insert(std::move(r));
+	return std::vector<std::string>(all.begin(), all.end());
+}
+
+void OwDevices::dark_set(bool dark, const std::string& room)
+{
+	swHdl.dark_set(dark, room);
+}
+
+void OwDevices::dark_clear(const std::string& room)
+{
+	swHdl.dark_clear(room);
+}
+
+bool OwDevices::is_dark(const std::string& room)
+{
+	return swHdl.is_dark(room);
+}
+
 int OwDevices::role_switch(PinRole role, bool on)
 {
 	int failed = 0;
@@ -742,6 +786,34 @@ int OwDevices::alarm_poll()
 	return cnt;
 }
 
+json OwDevices::alarm_event(uint8_t busNr, const uint8_t adr[8])
+{
+	// hand the plugins the full device address; the bus number
+	// stays in val to match the documented ACT_ALARM_* contract
+	string rom = std::format("{:02X}.", adr[0]);
+	for (int i = 1; i < 8; i++) {
+		// same packing OwDev::rom_code uses, so a plugin can feed
+		// this straight into IDevices::get_dev()
+		rom += std::format("{:02X}", adr[i]);
+	}
+	json data = {
+		{"bus", busNr},
+		{"rom", rom}
+	};
+	// a ds2408 also hands what raised it: the latches of this
+	// alarm (one bit per PIO, gone on the device by now) and the
+	// sensed levels read with them
+	if (adr[0] == 0x29) {
+		auto* dev = dynamic_cast<ds2408*>(find(busNr, adr[1], 0x29));
+		if (dev) {
+			auto lk = dev->lock();
+			data["latch"] = dev->get_last_latch();
+			data["sensed"] = dev->data[PIO_LS];
+		}
+	}
+	return data;
+}
+
 // Conditional (alarm) search of one bus: every 0x29 device currently
 // pulling alarm is handed to SwitchHandler::dev_alarm() in turn.
 // Returns true when at least one alarming device was handled.
@@ -786,30 +858,7 @@ bool OwDevices::alarmHandler(uint8_t busNr, uint8_t target)
 			std::cerr << "Caught system error: " << e.what() << '\n';
 			std::cerr << "Error code: " << e.code() << '\n';
 		}
-		// hand the plugins the full device address; the bus number
-		// stays in val to match the documented ACT_ALARM_* contract
-		string rom = std::format("{:02X}.", adr[0]);
-		for (int i = 0; i < 8; i++) {
-			// same packing OwDev::rom_code uses, so a plugin can feed
-			// this straight into IDevices::get_dev()
-			if (i > 0)
-				rom += std::format("{:02X}", adr[i]);
-		}
-		json data = {
-			{"bus", busNr},
-			{"rom", rom}
-		};
-		// a ds2408 also hands what raised it: the latches of this
-		// alarm (one bit per PIO, gone on the device by now) and the
-		// sensed levels read with them
-		if (adr[0] == 0x29) {
-			auto* dev = dynamic_cast<ds2408*>(find(busNr, adr[1], 0x29));
-			if (dev) {
-				auto lk = dev->lock();
-				data["latch"] = dev->get_last_latch();
-				data["sensed"] = dev->data[PIO_LS];
-			}
-		}
+		json data = alarm_event(busNr, adr);
 		plugins.action(ACT_ALARM_AFTER, busNr, &data);
 		cnt--;
 #ifdef USE_DEBUG

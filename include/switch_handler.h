@@ -3,6 +3,7 @@
 #ifdef TESTING
 #include <gtest/gtest_prod.h>
 #endif
+#include <atomic>
 #include <map>
 #include <mutex>
 #include "ds2482.h"
@@ -36,6 +37,9 @@ using std::string;
 /* modes */
 #define MODE_ALRAM_POLLING 0x2
 #define MODE_ALRAM_HANDLING 0x4
+/* the switch table is applied; cleared by writing "all" to
+   /switches/disable, all presses are ignored then. Saved with the
+   config, see SwitchHandler::all_disabled() */
 #define MODE_AUTO_SWITCH 0x8
 
 union s_adr {
@@ -84,6 +88,14 @@ union pio {
 /** Switch the target off and stop the timer */
 #define SW_ON_PRESS_OFF 1
 
+/* When a switch may switch its target on (_sw_tbl::cond); switching it
+ * off is always done */
+/** Always */
+#define SW_COND_NONE 0
+/** Only while it is dark, by the astro flag (/switches/dark), which an
+ * external script sets at sunset and sunrise */
+#define SW_COND_DARK 1
+
 /* Target 0.0.0 of a switch: every light off (pins with role "light",
  * see /role), instead of one pin */
 inline bool is_all_off(union pio dst)
@@ -99,6 +111,11 @@ struct _sw_tbl {
 	uint16_t secs = 0;
 	/** Timed switch: SW_ON_PRESS_* */
 	uint8_t on_press = SW_ON_PRESS_RETRIGGER;
+	/** SW_COND_*: when a press may switch the target on */
+	uint8_t cond = SW_COND_NONE;
+	/** Masked by /switches/disable: its presses are ignored until it
+	 * is enabled again. Saved with the switch. */
+	bool disabled = false;
 };
 
 enum tim_type {
@@ -181,6 +198,23 @@ class SwitchHandler : IFs {
 		std::string dst_label(union pio dst) const;
 		int w_add(const char* buf, size_t size, int idx);
 		int w_del(const char* buf, size_t size, int idx);
+		int r_dark(char* buf, size_t size, bool uncached, int idx);
+		int w_dark(const char* buf, size_t size, int idx);
+		// the astro flag, see SW_COND_DARK; dark until a script says
+		// otherwise, so without one the switches work as before
+		std::atomic<bool> dark{true};
+		// rooms with a dark flag of their own (/rooms/<room>/dark), by
+		// room name (see room_parse()); the others follow the astro flag
+		std::map<std::string, bool> room_dark;
+		mutable std::mutex dark_mtx;
+		// the room of a switch's target pin, empty while it has none
+		std::string dst_room(union pio dst) const;
+		// whether sw may switch its target on now
+		bool cond_met(const struct _sw_tbl& sw) const;
+		int w_disable(const char* buf, size_t size, int idx);
+		int w_enable(const char* buf, size_t size, int idx);
+		// "all" or switch lines as for add/del
+		int mask(const char* buf, size_t size, bool disable);
 		static const FsEntry<SwitchHandler> table[];
 		static const size_t n_table;
 #ifdef TESTING
@@ -216,6 +250,21 @@ class SwitchHandler : IFs {
 		// from the poll loop. Returns how many it switched off.
 		int timer_poll(HrClock::time_point now = HrClock::now());
 		bool initialStates();
+		// every switch masked ("all" to /switches/disable), saved with
+		// the config as "switches_disabled"
+		bool all_disabled() const;
+		void all_disabled_set(bool disabled);
+		// the astro flag: set by a script at sunset (true) and sunrise.
+		// With a room, that room's own flag instead, see room_dark.
+		void dark_set(bool dark, const std::string& room = "");
+		// the room follows the astro flag again
+		void dark_clear(const std::string& room);
+		// the flag in effect: the room's own, else the astro flag
+		bool is_dark(const std::string& room = "") const;
+		// whether the room has a flag of its own
+		bool has_dark(const std::string& room) const;
+		// the rooms with a flag of their own
+		std::vector<std::string> dark_rooms() const;
 		// FS entries
 		std::vector<string> fs_dir(string& path) const override;
 		int fs_attr(string& path) const override;

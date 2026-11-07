@@ -14,19 +14,25 @@
 #include "ds2408.h"
 #include "ds1820.h"
 #include "plugins.h"
+#include "parse.h"
 
 extern Plugins plugins;
+
+static int latch_code(union s_adr src);
 
 struct _sw_tbl sw_tbl[MAX_SWITCHES];
 
 // out-of-line definition of the private static members declared in
 // switch_handler.h; this counts as class scope for access control, so
 // it can take the address of the private handlers below directly.
-// "add"/"del" are write-only (no read handler); fs_table::open() still
+// "add"/"del"/"disable"/"enable" are write-only (no read handler); fs_table::open() still
 // opens them, since they otherwise could never be written to at all.
 const FsEntry<SwitchHandler> SwitchHandler::table[] = {
 	{ "add", 32, 0, false, nullptr, nullptr, nullptr, &SwitchHandler::w_add },
 	{ "del", 32, 0, false, nullptr, nullptr, nullptr, &SwitchHandler::w_del },
+	{ "dark", 2, 0, false, nullptr, nullptr, &SwitchHandler::r_dark, &SwitchHandler::w_dark },
+	{ "disable", 32, 0, false, nullptr, nullptr, nullptr, &SwitchHandler::w_disable },
+	{ "enable", 32, 0, false, nullptr, nullptr, nullptr, &SwitchHandler::w_enable },
 	{ "list", 0, 0, false, nullptr, &SwitchHandler::list_size, &SwitchHandler::r_list, nullptr },
 };
 const size_t SwitchHandler::n_table = sizeof(SwitchHandler::table) / sizeof(SwitchHandler::table[0]);
@@ -42,7 +48,9 @@ void to_json(json& j, const _sw_tbl& b) {
 		{"dst_pio", b.dst.da.pio},
 		{"dst_type", b.dst.da.type},
 		{"secs", b.secs},
-		{"on_press", b.on_press}
+		{"on_press", b.on_press},
+		{"cond", b.cond},
+		{"disabled", b.disabled}
 	};
 }
 
@@ -74,6 +82,10 @@ void from_json(const json& j, _sw_tbl& b) {
 		j.at("secs").get_to(b.secs);
 	if (j.contains("on_press"))
 		j.at("on_press").get_to(b.on_press);
+	if (j.contains("cond"))
+		j.at("cond").get_to(b.cond);
+	if (j.contains("disabled"))
+		j.at("disabled").get_to(b.disabled);
 }
 
 bool parse_buf(std::string_view buf, struct _sw_tbl& sw)
@@ -155,10 +167,15 @@ bool parse_buf(std::string_view buf, struct _sw_tbl& sw)
 	}
 	sw.secs = (uint16_t)opt[0];
 	sw.on_press = (uint8_t)opt[1];
-	if (is_all_off(sw.dst) && sw.secs) {
-		logger.warn(std::format("all lights off takes no timing, ignored: {}", buf));
+	// optional, last: "dark", switches on only while it is dark
+	while (ptr < end && std::isspace(*ptr)) ptr++;
+	if (std::string_view(ptr, end - ptr).starts_with("dark"))
+		sw.cond = SW_COND_DARK;
+	if (is_all_off(sw.dst) && (sw.secs || sw.cond != SW_COND_NONE)) {
+		logger.warn(std::format("all lights off takes no timing or condition, ignored: {}", buf));
 		sw.secs = 0;
 		sw.on_press = SW_ON_PRESS_RETRIGGER;
+		sw.cond = SW_COND_NONE;
 	}
 
 	return true;
@@ -235,7 +252,8 @@ uint16_t SwitchHandler::srcData(uint8_t busNr, uint8_t adr1)
 		else
 			src.sa.press = 0;
 	}
-	logger.verbose(std::format("src {}.{}.{}.{}", (int)src.sa.bus, (int)src.sa.adr, (int)src.sa.latch, (int)src.sa.press));
+	// as /switches/add takes it: 1..8, 11..18 long, 21..28 long started
+	logger.verbose(std::format("src {}.{}.{}", (int)src.sa.bus, (int)src.sa.adr, latch_code(src)));
 
 	return src.data;
 }
@@ -268,21 +286,49 @@ bool SwitchHandler::switchHandle(uint8_t busNr, uint8_t adr1)
 	union s_adr src;
 	size_t i;
 
+	// also takes the latch bit off cur_latch, so dev_alarm() gets to
+	// the next one when the switches are masked as well
 	src.data = srcData(busNr, adr1);
+	// no latch left (srcData() warned): no source to look up
+	if (src.data == 0)
+		return false;
 #if 0
 	for (i = 0; i < MAX_TIMED_SWITCH; i++) {
 	}
 #endif
+	if (!(mode & MODE_AUTO_SWITCH)) {
+		logger.debug(std::format("switches disabled, {}.{}.{} ignored",
+			(int)src.sa.bus, (int)src.sa.adr, latch_code(src)));
+		return false;
+	}
 	for (i = 0; i < cache.switches.size(); i++) {
 		if (src.data == cache.switches[i].src.data) {
+			if (cache.switches[i].disabled) {
+				logger.debug(std::format("sw {}.{}.{} -> {}.{}.{} disabled",
+					(int)src.sa.bus, (int)src.sa.adr, latch_code(src),
+					(int)cache.switches[i].dst.da.bus,
+					(int)cache.switches[i].dst.da.adr,
+					(int)cache.switches[i].dst.da.pio));
+				continue;
+			}
 			logger.debug(std::format("sw {}.{}.{} -> {}.{}.{}",
 				(int)cache.switches[i].src.sa.bus,
 				(int)cache.switches[i].src.sa.adr,
-				(int)(cache.switches[i].src.sa.latch + cache.switches[i].src.sa.press * 20),
+				latch_code(cache.switches[i].src),
 				(int)cache.switches[i].dst.da.bus,
 				(int)cache.switches[i].dst.da.adr,
 				(int)cache.switches[i].dst.da.pio
 			));
+			// on only when its condition allows, off always
+			if (!cond_met(cache.switches[i]) && !is_all_off(cache.switches[i].dst) &&
+			    !output_on(cache.switches[i].dst)) {
+				logger.debug(std::format("sw {}.{}.{} -> {}.{}.{}: not dark, stays off",
+					(int)src.sa.bus, (int)src.sa.adr, latch_code(src),
+					(int)cache.switches[i].dst.da.bus,
+					(int)cache.switches[i].dst.da.adr,
+					(int)cache.switches[i].dst.da.pio));
+				continue;
+			}
 			if (is_all_off(cache.switches[i].dst)) {
 				all_off();
 			} else if (cache.switches[i].secs) {
@@ -297,6 +343,86 @@ bool SwitchHandler::switchHandle(uint8_t busNr, uint8_t adr1)
 		}
 	}
 	return false;
+}
+
+bool SwitchHandler::all_disabled() const
+{
+	return !(mode & MODE_AUTO_SWITCH);
+}
+
+void SwitchHandler::all_disabled_set(bool disabled)
+{
+	if (disabled)
+		mode &= ~MODE_AUTO_SWITCH;
+	else
+		mode |= MODE_AUTO_SWITCH;
+}
+
+std::string SwitchHandler::dst_room(union pio dst) const
+{
+	if (is_all_off(dst))
+		return std::string();
+	ds2408* dev = (ds2408*)ow->find(dst.da.bus, dst.da.adr, 0x29);
+
+	return dev ? dev->room(dst.da.pio) : std::string();
+}
+
+bool SwitchHandler::cond_met(const struct _sw_tbl& sw) const
+{
+	switch (sw.cond) {
+		case SW_COND_DARK:
+			return is_dark(dst_room(sw.dst));
+		default:
+			return true;
+	}
+}
+
+void SwitchHandler::dark_set(bool dark, const std::string& room)
+{
+	if (room.empty()) {
+		if (this->dark.exchange(dark) != dark)
+			logger.info(std::format("astro: {}", dark ? "dark" : "day"));
+		return;
+	}
+	std::lock_guard<std::mutex> lk(dark_mtx);
+	auto it = room_dark.find(room);
+	if (it == room_dark.end() || it->second != dark)
+		logger.info(std::format("{}: {}", room, dark ? "dark" : "day"));
+	room_dark[room] = dark;
+}
+
+void SwitchHandler::dark_clear(const std::string& room)
+{
+	std::lock_guard<std::mutex> lk(dark_mtx);
+	if (room_dark.erase(room))
+		logger.info(std::format("{}: follows astro", room));
+}
+
+bool SwitchHandler::is_dark(const std::string& room) const
+{
+	if (!room.empty()) {
+		std::lock_guard<std::mutex> lk(dark_mtx);
+		auto it = room_dark.find(room);
+		if (it != room_dark.end())
+			return it->second;
+	}
+	return dark;
+}
+
+bool SwitchHandler::has_dark(const std::string& room) const
+{
+	std::lock_guard<std::mutex> lk(dark_mtx);
+	return room_dark.contains(room);
+}
+
+std::vector<std::string> SwitchHandler::dark_rooms() const
+{
+	std::lock_guard<std::mutex> lk(dark_mtx);
+	std::vector<std::string> rooms;
+
+	for (const auto& r : room_dark)
+		rooms.push_back(r.first);
+	return rooms;
 }
 
 /* Every light off, as writing 0 to /role/light/all does. Their off
@@ -599,7 +725,8 @@ std::string SwitchHandler::dst_label(union pio dst) const
 */
 std::string SwitchHandler::list_text() const
 {
-	std::string list = std::format("{} switches\n", cache.switches.size());
+	std::string list = std::format("{} switches, {}{}\n", cache.switches.size(),
+		dark ? "dark" : "day", all_disabled() ? ", all disabled" : "");
 
 	for (const auto& sw : cache.switches) {
 		list += std::format("{}.{}.{} -> {}.{}.{}",
@@ -607,6 +734,8 @@ std::string SwitchHandler::list_text() const
 			(int)sw.dst.da.bus, (int)sw.dst.da.adr, (int)sw.dst.da.pio);
 		if (sw.secs)
 			list += std::format(" {} {}", sw.secs, sw.on_press);
+		if (sw.cond == SW_COND_DARK)
+			list += " dark";
 		list += ": " + src_label(sw.src) + " -> " + dst_label(sw.dst);
 		if (sw.secs) {
 			list += std::format(", timed {}s, press {}", sw.secs,
@@ -615,6 +744,15 @@ std::string SwitchHandler::list_text() const
 			if (left >= 0)
 				list += std::format(", off in {}s", left);
 		}
+		if (sw.cond == SW_COND_DARK) {
+			list += ", only when dark";
+			// a room's own flag, the header shows the astro flag
+			std::string room = dst_room(sw.dst);
+			if (!room.empty() && has_dark(room))
+				list += std::format(" ({} {})", room, is_dark(room) ? "dark" : "day");
+		}
+		if (sw.disabled)
+			list += ", disabled";
 		list += "\n";
 	}
 	return list;
@@ -654,23 +792,25 @@ int SwitchHandler::w_add(const char* buf, size_t size, int)
 				for (auto& sw_i : cache.switches) {
 					if (sw.src.data == sw_i.src.data &&
 						sw.dst.data == sw_i.dst.data) {
-						// adding it again sets its timing anew
+						// adding it again sets its timing and
+						// condition anew
 						sw_i.secs = sw.secs;
 						sw_i.on_press = sw.on_press;
+						sw_i.cond = sw.cond;
 						exists = true;
 						break;
 					}
 				}
 				if (exists) {
-					logger.info(std::format("switch {}.{}.{} -> {}.{}.{} already exists, timing updated",
-						(int)sw.src.sa.bus, (int)sw.src.sa.adr, (int)sw.src.sa.latch,
+					logger.info(std::format("switch {}.{}.{} -> {}.{}.{} already exists, timing and condition updated",
+						(int)sw.src.sa.bus, (int)sw.src.sa.adr, latch_code(sw.src),
 						(int)sw.dst.da.bus, (int)sw.dst.da.adr, (int)sw.dst.da.pio));
 					continue;
 				}
 				cache.switches.push_back(sw);
 				logger.verbose(std::format("added switch {}.{}.{} -> {}.{}.{}",
 					(int)sw.src.sa.bus, (int)sw.src.sa.adr,
-					(int)(sw.src.sa.latch + sw.src.sa.press * 20),
+					latch_code(sw.src),
 					(int)sw.dst.da.bus, (int)sw.dst.da.adr, (int)sw.dst.da.pio));
 			}
 		}
@@ -699,7 +839,7 @@ int SwitchHandler::w_del(const char* buf, size_t size, int)
 						it = cache.switches.erase(it);
 						logger.verbose(std::format("deleted switch {}.{}.{} -> {}.{}.{}",
 							(int)sw.src.sa.bus, (int)sw.src.sa.adr,
-							(int)(sw.src.sa.latch + sw.src.sa.press * 20),
+							latch_code(sw.src),
 							(int)sw.dst.da.bus, (int)sw.dst.da.adr, (int)sw.dst.da.pio));
 						found = true;
 					} else
@@ -713,6 +853,78 @@ int SwitchHandler::w_del(const char* buf, size_t size, int)
 		return 0;
 	}
 	return size;
+}
+
+/* The astro flag, 1 dark, 0 day */
+int SwitchHandler::r_dark(char* buf, size_t, bool, int)
+{
+	return std::sprintf(buf, "%d\n", dark ? 1 : 0);
+}
+
+int SwitchHandler::w_dark(const char* buf, size_t size, int)
+{
+	int v;
+
+	try {
+		v = parse_num(buf, size);
+	} catch (const std::exception&) {
+		return -EINVAL;
+	}
+	if (v != 0 && v != 1)
+		return -EINVAL;
+	dark_set(v == 1);
+	return size;
+}
+
+/* Masks switches, or all of them ("all"): the line of a switch as for
+   add/del, one per line. A switch not in the table fails the write,
+   the ones before it are done. */
+int SwitchHandler::mask(const char* buf, size_t size, bool disable)
+{
+	std::string_view all(buf, size);
+
+	while (!all.empty() && (std::isspace((unsigned char)all.back()) || all.back() == '\0'))
+		all.remove_suffix(1);
+	if (all == "all") {
+		all_disabled_set(disable);
+		logger.info(std::format("all switches {}", disable ? "disabled" : "enabled"));
+		return size;
+	}
+	size_t start = 0;
+	for (size_t i = 0; i <= all.size(); i++) {
+		if (i < all.size() && all[i] != '\n')
+			continue;
+		std::string_view line = all.substr(start, i - start);
+		start = i + 1;
+		struct _sw_tbl sw;
+		if (line.empty())
+			continue;
+		if (!parse_buf(line, sw))
+			return -EINVAL;
+		bool found = false;
+		for (auto& sw_i : cache.switches) {
+			if (sw.src.data == sw_i.src.data && sw.dst.data == sw_i.dst.data) {
+				sw_i.disabled = disable;
+				found = true;
+			}
+		}
+		if (!found) {
+			logger.warn(std::format("switch entry not found: {}", line));
+			return -ENOENT;
+		}
+		logger.info(std::format("switch {} {}", line, disable ? "disabled" : "enabled"));
+	}
+	return size;
+}
+
+int SwitchHandler::w_disable(const char* buf, size_t size, int)
+{
+	return mask(buf, size, true);
+}
+
+int SwitchHandler::w_enable(const char* buf, size_t size, int)
+{
+	return mask(buf, size, false);
 }
 
 int SwitchHandler::fs_write(string& path, const char* buf, size_t size)

@@ -96,6 +96,9 @@ Available to scripts:
 | `ow.volt(rom, channel)` | read a cached ds2450 voltage |
 | `ow.pins([role])` | the pins with that role (`"light"`, ...), or with any role, as `[{rom, pin, name, role, room, output, on}, ...]` |
 | `ow.role_switch(role, on)` | switch every output with that role on (`true`/`ow.ON`) or off, true when all of them switched |
+| `ow.dark_set(dark[, room])` | set the astro flag of the switches: `true` from sunset to sunrise, see `/switches/dark`; with a room (e.g. `"kitchen"`, case does not matter) that room's own flag, see `/rooms/<room>/dark` |
+| `ow.dark_clear(room)` | the room follows the astro flag again |
+| `ow.is_dark([room])` | the flag in effect: the astro flag, or for a room its own while it has one |
 | `ow.file_add(path, size)` | add a file to the file system, e.g. `"status/my_stuff"`, true when it could be added (see [Files](#files)) |
 | `ow.file_remove(path)` | remove one of the script's files again |
 
@@ -164,6 +167,16 @@ runaway loop cannot hang the daemon. And events that arrive *while* a
 callback is running are dropped rather than nested — otherwise a script
 that sets a PIO from its `ACT_DEV_CHANGE` handler would trigger itself
 forever.
+
+### Scripts that come with in10dfs
+
+- [example.js](example.js): the events and calls, to start from
+- [astro.js](astro.js): sunrise and sunset for a place (latitude and
+  longitude at the top of the script), sets `/switches/dark` from them,
+  optionally per room with times of their own; `status/astro` shows
+  today's times. Calculated, no network needed.
+- [scary-door.js](scary-door.js): a pulse on an owSlave's extended port
+  when a door contact opens
 
 Running scripts needs `libqjs0` installed on the target (it is in
 `trixie-backports` for Debian 13). Without quickjs at build time the

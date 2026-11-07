@@ -65,12 +65,19 @@ void to_json(json& j, const Pin& p)
 }
 
 // missing fields and an unknown role (a hand edited config) fall back
-// to the defaults; level is left as it is
+// to the defaults; level is left as it is. A room of an older config
+// is made a room name (see room_parse()): lower case, a space is '_';
+// one with any other character is dropped.
 void from_json(const json& j, Pin& p)
 {
 	p.name = j.value("name", "");
 	p.role = pin_role_parse(j.value("role", "")).value_or(PinRole::none);
-	p.room = j.value("room", "");
+	std::string room = j.value("room", "");
+	std::replace(room.begin(), room.end(), ' ', '_');
+	auto r = room_parse(room);
+	if (!r)
+		logger.warn(std::format("room \"{}\" dropped: only letters, digits, - and _", room));
+	p.room = r.value_or("");
 }
 
 ds2408::~ds2408()
@@ -249,9 +256,13 @@ void ds2408::pio_mask_set(uint8_t on)
 	pio_set(tmp);
 }
 
-int ds2408::r_pio(char* buf, size_t, bool, int idx)
+// uncached: the registers are read first, as for BYTE; a PWM level is
+// only known here, the device does not report it
+int ds2408::r_pio(char* buf, size_t, bool uncached, int idx)
 {
 	auto lk = lock();
+	if (uncached)
+		reg_read(false);
 	if (idx >= IDX_ALL)
 		return fmt_bits(buf, idx, pio_mask());
 	if (cfg[CFG_PIN_ID + idx] == CFG_OUT_PWM)
@@ -288,9 +299,11 @@ int ds2408::w_pio(const char* buf, size_t size, int idx)
 	}
 }
 
-int ds2408::r_sensed(char* buf, size_t, bool, int idx)
+int ds2408::r_sensed(char* buf, size_t, bool uncached, int idx)
 {
 	auto lk = lock();
+	if (uncached)
+		reg_read(false);
 	/* sensed from register 0x88 */
 	return fmt_bits(buf, idx, data[PIO_LS]);
 }
@@ -418,20 +431,37 @@ std::string ds2408::room(int pio) const
 	return pins[pio].room;
 }
 
+PinInfo ds2408::pin_info(int i) const
+{
+	auto lk = lock();
+	PinInfo info;
+
+	static_cast<Pin&>(info) = pins[i];
+	info.name = pin_label(i);
+	info.rom = rom;
+	info.pin = i;
+	info.output = pin_is_output(i);
+	info.on = info.output ? pin_is_on(i) : (data[PIO_LS] & (1 << i)) != 0;
+	return info;
+}
+
 void ds2408::pins_get(std::vector<PinInfo>& out, PinRole r) const
 {
 	auto lk = lock();
 	for (int i = 0; i < 8; i++) {
 		if (pins[i].role == PinRole::none || (r != PinRole::none && pins[i].role != r))
 			continue;
-		PinInfo info;
-		static_cast<Pin&>(info) = pins[i];
-		info.name = pin_label(i);
-		info.rom = rom;
-		info.pin = i;
-		info.output = pin_is_output(i);
-		info.on = info.output ? pin_is_on(i) : (data[PIO_LS] & (1 << i)) != 0;
-		out.push_back(std::move(info));
+		out.push_back(pin_info(i));
+	}
+}
+
+void ds2408::room_pins_get(std::vector<PinInfo>& out, const std::string& room) const
+{
+	auto lk = lock();
+	for (int i = 0; i < 8; i++) {
+		if (pins[i].room.empty() || (!room.empty() && pins[i].room != room))
+			continue;
+		out.push_back(pin_info(i));
 	}
 }
 
@@ -492,15 +522,16 @@ int ds2408::r_pin_room(char* buf, size_t size, bool, int idx)
 	return std::strlen(buf);
 }
 
-// free text, an empty write clears it
+// a room name, see room_parse(): kept in lower case; an empty write
+// clears it
 int ds2408::w_pin_room(const char* buf, size_t size, int idx)
 {
 	auto lk = lock();
-	std::string s = pin_input(buf, size);
+	auto r = room_parse(pin_input(buf, size));
 
-	if (s.size() > PIN_NAME_MAX)
+	if (!r || r->size() > PIN_NAME_MAX)
 		return -EINVAL;
-	pins[idx].room = std::move(s);
+	pins[idx].room = std::move(*r);
 	return size;
 }
 
@@ -1647,10 +1678,12 @@ public:
 
 std::function<std::unique_ptr<FwLink>(ds2408&)> ds2408::fw_link =
 	[](ds2408& dev) -> std::unique_ptr<FwLink> {
-		// begin() sets them under the device lock, this runs in fw_thread
+		// begin() sets them under the device lock, this runs in fw_thread.
+		// ds is read under the device lock, not ds->mtx: that one is the
+		// bus's (the link takes it for every transfer), it does not
+		// guard the pointer, which has to be read to get to it.
 		auto lk = dev.lock();
-		// coverity[missing_lock] - the bus mutex is in *ds itself, the
-		// pointer is only read here
+		// coverity[missing_lock] - see above, set once under the device lock
 		return std::make_unique<OwBlLink>(dev.ds, dev.bus, dev.addr);
 	};
 
@@ -1761,8 +1794,9 @@ void ds2408::fw_run(std::vector<uint8_t> image)
 	if (link->info(info) < 0) {
 		if (fw_enter() < 0)
 			return fail("the device does not answer");
-		// coverity[sleep] - no lock held: fw_enter() releases the device
-		// lock on return (DevLock), fw_run() takes none here
+		// no lock held: fw_enter() releases the device lock on return
+		// (DevLock), fw_run() takes none here
+		// coverity[sleep] - see above
 		std::this_thread::sleep_for(std::chrono::milliseconds(FW_ENTER_MS));
 		if (link->info(info) < 0)
 			return fail("no bootloader answers");
@@ -1778,12 +1812,17 @@ void ds2408::fw_run(std::vector<uint8_t> image)
 	r = link->exit();
 	if (r < 0)
 		return fail(std::string("the application does not start: ") + strerror(-r));
+	// the link takes the bus mutex per transfer only, nothing is held
+	// coverity[sleep] - no lock held here, see above
 	std::this_thread::sleep_for(std::chrono::milliseconds(FW_START_MS));
 	{
 		auto lk = lock();
 		fw_busy = false;
 		/* started by a reset: the next read sees it and the outputs
-		   are restored as after a watchdog reset, see dev_poll() */
+		   are restored as after a watchdog reset, see dev_poll().
+		   data[] is the device's, so the device lock is held for the
+		   read (always taken before the bus mutex, see OwDev). */
+		// coverity[sleep] - device lock must be held, see above
 		reg_read(false);
 	}
 	logger.info(rom + std::format(" firmware update done, {} bytes", image.size()));

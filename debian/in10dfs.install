@@ -1,1 +1,3 @@
 debian/in10dfs.service usr/lib/systemd/system/
+plugin/astro.js usr/share/doc/in10dfs/scripts/
+plugin/example.js usr/share/doc/in10dfs/scripts/
