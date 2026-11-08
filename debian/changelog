@@ -1,3 +1,21 @@
+in10dfs (0.6.2) trixie; urgency=medium
+
+  * Adaptive temperature polling on DS1820
+
+ -- INgo Rah <INgo.Rah@gmx.net>  Wed, 04 Nov 2026 09:30:00 +0000
+
+in10dfs (0.6.1) trixie; urgency=medium
+
+  * Add uncached reads to PIO.x and sensed.x
+
+ -- INgo Rah <INgo.Rah@gmx.net>  Wed, 04 Nov 2026 09:30:00 +0000
+
+in10dfs (0.6.0) trixie; urgency=medium
+
+  * Experimental FW update over 1Wire, working on shorter lines
+
+ -- INgo Rah <INgo.Rah@gmx.net>  Wed, 02 Nov 2026 09:30:00 +0000
+
 in10dfs (0.5.2) trixie; urgency=medium
 
   * Experimental extended port (special ATMEGA fw)

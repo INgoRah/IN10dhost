@@ -586,6 +586,8 @@ void SwitchHandler::dev_watchdog(ds2408* dev)
 	ow->log_save(false);
 	if (!dev->watchdog_pending())
 		return;
+	// coverity[sleep] - the device lock is held for the 1-Wire writes
+	// of the restore, as in every device access
 	dev->watchdog_restore();
 	json data;
 	{
@@ -656,7 +658,7 @@ bool SwitchHandler::dev_alarm(uint8_t bus, uint8_t adr[8])
 	if (!dev)
 		return false;
 	dev->alarm = true;
-	dev->poll();
+	dev->alarm_poll();
 
 	return true;
 }

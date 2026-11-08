@@ -14,11 +14,16 @@
 #include "ds2482.h"
 #include "ow_devices.h"
 #include "ds2408.h"
+#include "ds1820.h"
 #include "ds2450.h"
 #include "ard_i2c.h"
+#include "switch_handler.h"
 
 extern OwDevices ow;
 extern DS2482 ds;
+extern SwitchHandler swHdl;
+// ow_devices.cpp, the config loading
+std::unique_ptr<OwDev> make_device_from_json(const json& j);
 extern SwitchHandler swHdl;
 
 #if 0
@@ -259,6 +264,261 @@ TEST_F(DevTest, BasePollPassthrough)
 	EXPECT_EQ(dev->poll_check(), 0); // timer was reset by the check above
 	usleep(1100 * 1000);
 	EXPECT_EQ(dev->poll_check(), 1); // due again
+}
+
+// The adaptive polling of the ds1820 by the readings alone (the test
+// build reads a fixed temperature from the bus)
+TEST_F(DevTest, Ds1820FastPolling)
+{
+	ds1820 dev("28.0501FAFE6677A0");
+
+	dev.poll_interval = 60;
+	EXPECT_EQ(dev.interval_ms(), 60000);
+	// the first reading has nothing to compare with
+	dev.poll_adapt(21.0f);
+	EXPECT_FALSE(dev.fast);
+	// within DS1820_FAST_DELTA (0.2 K) of the one before
+	dev.poll_adapt(21.1f);
+	EXPECT_FALSE(dev.fast);
+	dev.poll_adapt(21.25f);
+	EXPECT_FALSE(dev.fast);
+	// window open: 0.3 K off the reading before, 60 s / 5
+	dev.poll_adapt(20.95f);
+	EXPECT_TRUE(dev.fast);
+	EXPECT_EQ(dev.interval_ms(), 12000);
+	// still falling: the settling starts over each time
+	dev.poll_adapt(20.6f);
+	dev.poll_adapt(20.3f);
+	EXPECT_TRUE(dev.fast);
+	EXPECT_EQ(dev.settled, 0);
+	// DS1820_FAST_SETTLED (3) readings within 0.2 K of 20.3
+	dev.poll_adapt(20.2f);
+	dev.poll_adapt(20.45f);
+	EXPECT_TRUE(dev.fast);
+	EXPECT_EQ(dev.settled, 2);
+	dev.poll_adapt(20.3f);
+	EXPECT_FALSE(dev.fast);
+	EXPECT_EQ(dev.interval_ms(), 60000);
+	// and again from there on
+	dev.poll_adapt(19.0f);
+	EXPECT_TRUE(dev.fast);
+
+	// never below the 1 s of the poll loop, too short for two steps
+	dev.poll_interval = 3;
+	EXPECT_EQ(dev.interval_ms(), 1000);
+	EXPECT_EQ(dev.poll_ms(), 1000);
+	dev.poll_interval = 60;
+
+	// a factor of 1 or a delta of 0: no fast polling
+	dev.fast_factor = 1;
+	dev.poll_adapt(19.0f);
+	EXPECT_FALSE(dev.fast);
+	dev.poll_adapt(25.0f);
+	EXPECT_FALSE(dev.fast);
+	EXPECT_EQ(dev.interval_ms(), 60000);
+	dev.fast_factor = 4;
+	dev.fast_delta = 0;
+	dev.poll_adapt(15.0f);
+	EXPECT_FALSE(dev.fast);
+	// configured: 1 K, 60 s / 4
+	dev.fast_delta = 1.0f;
+	dev.poll_adapt(15.9f);
+	EXPECT_FALSE(dev.fast);
+	dev.poll_adapt(17.0f);
+	EXPECT_TRUE(dev.fast);
+	EXPECT_EQ(dev.interval_ms(), 15000);
+}
+
+TEST_F(DevTest, Ds1820FastPollingJson)
+{
+	ds1820 dev("28.0501FAFE6677A0");
+
+	// the defaults are saved
+	json j = dev.to_json();
+	EXPECT_FLOAT_EQ(j.at("fast_delta").get<float>(), DS1820_FAST_DELTA);
+	EXPECT_EQ(j.at("fast_factor").get<int>(), DS1820_FAST_FACTOR);
+
+	// and loaded, an older config without them keeps the defaults
+	j["fast_delta"] = 0.5;
+	j["fast_factor"] = 3;
+	j["poll"] = 30;
+	auto loaded = make_device_from_json(j);
+	json back = loaded->to_json();
+	EXPECT_FLOAT_EQ(back.at("fast_delta").get<float>(), 0.5f);
+	EXPECT_EQ(back.at("fast_factor").get<int>(), 3);
+	EXPECT_EQ(back.at("poll").get<int>(), 30);
+	j.erase("fast_delta");
+	j.erase("fast_factor");
+	back = make_device_from_json(j)->to_json();
+	EXPECT_FLOAT_EQ(back.at("fast_delta").get<float>(), DS1820_FAST_DELTA);
+	EXPECT_EQ(back.at("fast_factor").get<int>(), DS1820_FAST_FACTOR);
+}
+
+// poll() in two steps: the conversion is started when the interval is
+// due and read DS1820_CONV_MS later, one reading per interval
+TEST_F(DevTest, Ds1820PollConvertThenRead)
+{
+	ow.update_device(0, "28.0501FAFE6677A0");
+	ow.update_data();
+	ow.begin();
+	ds1820* dev = (ds1820*)ow.find(0, 5, 0x28);
+	ASSERT_NE(dev, nullptr);
+	dev->poll_interval = 60;
+
+	EXPECT_FALSE(dev->converting);
+	EXPECT_EQ(dev->poll_ms(), 59000);
+	// convert, nothing read yet
+	dev->poll();
+	EXPECT_TRUE(dev->converting);
+	EXPECT_FALSE(dev->temp_ok);
+	EXPECT_FALSE(dev->last_temp.has_value());
+	EXPECT_EQ(dev->poll_ms(), DS1820_CONV_MS);
+	// read
+	dev->poll();
+	EXPECT_FALSE(dev->converting);
+	EXPECT_TRUE(dev->temp_ok);
+	ASSERT_TRUE(dev->last_temp.has_value());
+	EXPECT_FLOAT_EQ(*dev->last_temp, dev->temp);
+	EXPECT_EQ(dev->poll_ms(), 59000);
+	// fast: 12 s per reading
+	dev->fast = true;
+	EXPECT_EQ(dev->poll_ms(), 11000);
+	dev->poll();
+	EXPECT_EQ(dev->poll_ms(), DS1820_CONV_MS);
+	dev->fast = false;
+	dev->poll();
+	EXPECT_EQ(dev->poll_ms(), 59000);
+
+	// too short for two steps: converted and read at once
+	dev->poll_interval = 1;
+	dev->temp_ok = false;
+	dev->poll();
+	EXPECT_FALSE(dev->converting);
+	EXPECT_TRUE(dev->temp_ok);
+	EXPECT_EQ(dev->poll_ms(), 1000);
+
+	// through the poll loop: due, convert, read 1 s later
+	dev->poll_interval = 2;
+	dev->last_poll = {};
+	EXPECT_EQ(dev->poll_check(), 1);
+	dev->poll();
+	EXPECT_TRUE(dev->converting);
+	EXPECT_EQ(dev->poll_check(), 0);
+	EXPECT_GT(dev->poll_next(), 900);
+	usleep(1100 * 1000);
+	EXPECT_EQ(dev->poll_check(), 1);
+	dev->poll();
+	EXPECT_FALSE(dev->converting);
+}
+
+/* An alarm reads the last conversion and starts none: a conversion
+   started by it would change the value, raise the next alarm and poll
+   the device outside its interval. */
+TEST_F(DevTest, Ds1820AlarmReadsOnly)
+{
+	ow.update_device(0, "28.0601F9FE6677D5");
+	ow.update_data();
+	ow.begin();
+	ds1820* dev = (ds1820*)ow.find(0, 6, 0x28);
+	ASSERT_NE(dev, nullptr);
+	dev->poll_interval = 60;
+	dev->last_poll = HrClock::now();
+
+	// idle: read, nothing converting, the interval untouched
+	EXPECT_EQ(dev->alarm_poll(), 1);
+	EXPECT_FALSE(dev->converting);
+	EXPECT_TRUE(dev->temp_ok);
+	ASSERT_TRUE(dev->last_temp.has_value());
+	EXPECT_EQ(dev->poll_check(), 0);
+	EXPECT_GT(dev->poll_next(), 58000);
+	// again and again: still no conversion
+	dev->alarm_poll();
+	dev->alarm_poll();
+	EXPECT_FALSE(dev->converting);
+	EXPECT_EQ(dev->poll_check(), 0);
+
+	// while converting: read, the interval's read still comes
+	dev->poll();
+	EXPECT_TRUE(dev->converting);
+	dev->alarm_poll();
+	EXPECT_TRUE(dev->converting);
+	dev->poll();
+	EXPECT_FALSE(dev->converting);
+
+	// through the alarm handling of the bus
+	swHdl.begin(&ds);
+	dev->temp_ok = false;
+	EXPECT_TRUE(swHdl.dev_alarm(0, dev->addr));
+	EXPECT_TRUE(dev->temp_ok);
+	EXPECT_FALSE(dev->converting);
+}
+
+/* A scratchpad with a wrong CRC is dropped (the value and the adaptive
+   polling untouched), a new cycle follows 1 s later, DS1820_RETRIES
+   times at most, then the interval again. */
+TEST_F(DevTest, Ds1820CrcRetry)
+{
+	ow.update_device(0, "28.0801F7FE6677E3");
+	ow.update_data();
+	ow.begin();
+	ds1820* dev = (ds1820*)ow.find(0, 8, 0x28);
+	ASSERT_NE(dev, nullptr);
+	dev->poll_interval = 60;
+	LogLevel lvl = logger.get_level();
+	logger.set_level(LogLevel::NONE);
+
+	// a good cycle first
+	dev->poll();
+	dev->poll();
+	ASSERT_TRUE(dev->temp_ok);
+	float good = dev->temp;
+	EXPECT_EQ(dev->poll_ms(), 59000);
+
+	// read with a bit error: dropped, the next cycle in 1 s
+	dev->temp = 99.0f;
+	dev->sim_crc_fail = 1;
+	dev->poll();
+	dev->poll();
+	EXPECT_FALSE(dev->temp_ok);
+	EXPECT_FLOAT_EQ(dev->temp, 99.0f);
+	EXPECT_EQ(dev->retries, 1);
+	EXPECT_EQ(dev->poll_ms(), DS1820_RETRY_MS);
+	EXPECT_TRUE(logger.warnings().last.find("scratchpad CRC wrong") != std::string::npos)
+		<< logger.warnings().last;
+	// the retry: convert, read 1 s later, good: the interval again
+	dev->poll();
+	EXPECT_TRUE(dev->converting);
+	EXPECT_EQ(dev->poll_ms(), DS1820_CONV_MS);
+	dev->poll();
+	EXPECT_TRUE(dev->temp_ok);
+	EXPECT_FLOAT_EQ(dev->temp, good);
+	EXPECT_EQ(dev->retries, 0);
+	EXPECT_EQ(dev->poll_ms(), 59000);
+
+	// failing on: DS1820_RETRIES cycles 1 s apart, then the interval
+	dev->sim_crc_fail = 1 + DS1820_RETRIES;
+	for (int i = 0; i < DS1820_RETRIES; i++) {
+		dev->poll();
+		dev->poll();
+		EXPECT_EQ(dev->poll_ms(), DS1820_RETRY_MS) << i;
+	}
+	dev->poll();
+	dev->poll();
+	EXPECT_FALSE(dev->temp_ok);
+	EXPECT_EQ(dev->retries, 0);
+	EXPECT_EQ(dev->poll_ms(), 59000);
+	// a bad reading does not count for the adaptive polling
+	EXPECT_FALSE(dev->fast);
+
+	// interval below 2 s: convert and read at once, the retry as well
+	dev->poll_interval = 1;
+	dev->sim_crc_fail = 1;
+	dev->poll();
+	EXPECT_EQ(dev->retries, 1);
+	EXPECT_EQ(dev->poll_ms(), 1000);
+	dev->poll();
+	EXPECT_EQ(dev->retries, 0);
+	logger.set_level(lvl);
 }
 
 TEST_F(DevTest, Ds2408SoftBeginSkipsRegisterRead)

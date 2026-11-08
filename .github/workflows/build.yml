@@ -94,9 +94,15 @@ jobs:
       with:
         email: ${{ secrets.COVERITY_SCAN_EMAIL }}
         token: ${{ secrets.COVERITY_TOKEN }}
+        # The action prepends "cov-build --dir cov-int" to the command,
+        # so its first line must be a command, no comment.
+        # skip_file: the system headers (libstdc++'s <format>, <chrono>)
+        # are not analyzed, their if constexpr branches give false
+        # positives (UNINIT, MISSING_RETURN, DEADCODE, ...). A
+        # --tu-pattern does not help, it matches the translation unit
+        # (src/*.cpp), not the headers in it.
         command: |
-          cov-configure --compiler g++ --comptype gcc
-          cov-configure --compiler c++ --comptype gcc
+          cov-configure --compiler g++ --comptype gcc --xml-option=skip_file:^/usr/
+          cov-configure --compiler c++ --comptype gcc --xml-option=skip_file:^/usr/
           cmake --build build-cov --target clean || true
           cov-build --dir cov-int cmake --build build-cov
-          cov-manage-emit --dir cov-int --tu-pattern "file('/usr/')" delete || true
