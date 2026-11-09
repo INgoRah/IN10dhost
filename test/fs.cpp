@@ -1687,12 +1687,12 @@ TEST_F(FsTest, Ds2408Watchdog) {
 	EXPECT_EQ(plugins.config_of("faulty")["watchdogs"], 2);
 
 	// the device does not take the restore: reported, still counted,
-	// the plugins hear about it all the same (without DS2408_WDT_RESTORE
-	// there is only the status to clear, the simulation takes that)
+	// the plugins hear about it all the same (the brightness is written
+	// back with or without DS2408_WDT_RESTORE, it fails here)
 	dev->sim_stat = STAT_WATCHDOG;
 	dev->sim_fail = true;
 	dev->reg_read(true);
-	EXPECT_EQ(dev->watchdog_restore(), DS2408_WDT_RESTORE ? -EAGAIN : 0);
+	EXPECT_EQ(dev->watchdog_restore(), -EAGAIN);
 	EXPECT_EQ(watchdog(rom), "3");
 	dev->sim_stat = STAT_WATCHDOG;
 	EXPECT_TRUE(swHdl.dev_alarm(2, dev->addr));

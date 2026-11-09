@@ -1524,11 +1524,11 @@ int ds2408::watchdog_restore()
 #else
 	logger.verbose(rom + " watchdog: outputs not restored (DS2408_WDT_RESTORE off)");
 #endif
+	if (brightness != 0 && brightness_set((uint8_t)brightness) != 0)
+		err++;
 #if 0
 	// 0 is the device's default as well
 	if (threshold != 0 && threshold_set((uint8_t)threshold) != 0)
-		err++;
-	if (brightness != 0 && brightness_set((uint8_t)brightness) != 0)
 		err++;
 	if (ext_known && extport_set(ext_ddr, ext_port) != 0)
 		err++;
