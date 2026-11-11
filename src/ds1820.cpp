@@ -1,3 +1,4 @@
+#include <cmath>
 #include <fstream>
 #include <iostream>
 #include <string>
@@ -214,6 +215,9 @@ float ds1820::temp_read(const uint8_t flag)
 	auto lk = lock();
 	bool ret;
 
+	if (flag == 1)
+		temp_ok = false;
+
 	// coverity[sleep] - bus mutex must be held for the whole 1-Wire
 	// transaction
 	std::lock_guard<std::mutex> m(ds->mtx);
@@ -256,6 +260,19 @@ float ds1820::temp_read(const uint8_t flag)
 		scratchPad[i] = ds->read();
 	if (scratchPad[1] == 0xff)
 		return -2;
+#ifdef TESTING
+	if (sim_crc_fail > 0) {
+		sim_crc_fail--;
+		scratchPad[8] ^= 0x5a;
+	}
+#endif
+	// a bit error (1024.12 degrees seen): the reading is dropped
+	if (crc8(scratchPad, 8) != scratchPad[8]) {
+		logger.warn(std::format("{} scratchpad CRC wrong: {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X}",
+			rom, scratchPad[0], scratchPad[1], scratchPad[2], scratchPad[3], scratchPad[4],
+			scratchPad[5], scratchPad[6], scratchPad[7], scratchPad[8]));
+		return -3;
+	}
 #ifndef USE_I2C
 	// dummy data for testing
 	scratchPad[0] = 0x50; // LSB
@@ -274,19 +291,139 @@ float ds1820::temp_read(const uint8_t flag)
 	// to be done by caller if needed
 	hum = scratchPad[5];
 	temp = (float)raw / 16.0;
+	temp_ok = true;
 
 	return temp;
 }
 
 // Only ever called once poll_check() has just returned 1.
+// Two steps, the bus is never held waiting for the conversion: the
+// poll due by the interval starts it, the next one DS1820_CONV_MS
+// later reads it (see poll_ms()). Intervals too short for that convert
+// and read at once, the reading may then still be the one before.
 int ds1820::poll()
 {
 	auto lk = lock();
+
+	if (interval_ms() < 2 * DS1820_CONV_MS) {
+		converting = false;
+		temp_read(0);
+	} else if (!converting) {
+		// failed: tried again by the interval
+		converting = temp_read(0) == 0;
+		return 1;
+	} else {
+		converting = false;
+	}
+	reading();
+	// failed: the next cycle soon, see poll_ms()
+	if (temp_ok || retries >= DS1820_RETRIES)
+		retries = 0;
+	else
+		retries++;
+	return 1;
+}
+
+void ds1820::reading()
+{
+	auto lk = lock();
 	float old = temp;
-	temp_read(0);
-	//logger.info ("#1 reading %s/%s %d ...\n", rom.c_str(), path.c_str(), ret);
+
 	temp_read(1);
+	if (temp_ok)
+		poll_adapt(temp);
 	if (temp != old)
 		logger.info (std::format("{} temp={} °, hum={} %", rom, temp, hum));
+}
+
+// An alarm: TH/TL, on an owSlave also each change of the value (its
+// config_info2[4] bit 0). Only the last conversion is read, none is
+// started: one started here changes the value again, raises the next
+// alarm, and the device is polled by its alarms instead of its
+// interval. The two steps of poll() go on as they are.
+int ds1820::alarm_poll()
+{
+	reading();
 	return 1;
+}
+
+// Takes a new reading t: more than fast_delta off the one before
+// switches to fast polling, see DS1820_FAST_DELTA. While fast, the
+// readings count as settled as long as they stay within fast_delta of
+// the first one counted.
+void ds1820::poll_adapt(float t)
+{
+	auto lk = lock();
+	bool on = fast_delta > 0 && fast_factor > 1;
+
+	if (!on) {
+		fast = false;
+	} else if (!fast) {
+		if (last_temp && std::fabs(t - *last_temp) > fast_delta) {
+			fast = true;
+			settle_ref = t;
+			settled = 0;
+			logger.info(std::format("{}: {:.2f} -> {:.2f} °C, polling every {:.1f} s",
+				display_name(), *last_temp, t, interval_ms() / 1000.0));
+		}
+	} else if (std::fabs(t - settle_ref) <= fast_delta) {
+		if (++settled >= DS1820_FAST_SETTLED) {
+			fast = false;
+			logger.info(std::format("{}: settled at {:.2f} °C, polling every {} s",
+				display_name(), t, poll_interval));
+		}
+	} else {
+		settle_ref = t;
+		settled = 0;
+	}
+	last_temp = t;
+}
+
+// 1 s at least, the resolution of the poll loop
+long ds1820::interval_ms() const
+{
+	auto lk = lock();
+	long ms = OwDev::poll_ms();
+
+	if (fast && fast_factor > 1)
+		ms = std::max(ms / fast_factor, 1000L);
+	return ms;
+}
+
+// The conversion is read DS1820_CONV_MS after it was started, the next
+// one starts that much earlier: one reading per interval_ms(). After a
+// failed reading the next cycle DS1820_RETRY_MS later.
+long ds1820::poll_ms() const
+{
+	auto lk = lock();
+	long ms = interval_ms();
+
+	if (converting)
+		return DS1820_CONV_MS;
+	if (retries > 0)
+		return std::min(ms, DS1820_RETRY_MS);
+	if (ms < 2 * DS1820_CONV_MS)
+		return ms;
+	return ms - DS1820_CONV_MS;
+}
+
+json ds1820::to_json() const
+{
+	auto lk = lock();
+	json j = OwDev::to_json();
+
+	j["fast_delta"] = fast_delta;
+	j["fast_factor"] = fast_factor;
+	return j;
+}
+
+void ds1820::from_json(const json& j)
+{
+	auto lk = lock();
+
+	OwDev::from_json(j);
+	if (j.contains("fast_delta"))
+		j.at("fast_delta").get_to(fast_delta);
+	if (j.contains("fast_factor"))
+		j.at("fast_factor").get_to(fast_factor);
 }

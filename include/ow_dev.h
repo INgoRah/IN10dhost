@@ -54,6 +54,10 @@ class OwDev : IFs, public IDev {
 		HrClock::time_point last_poll;
 		// polling interval in seconds, 0 means no polling, default is 0
 		uint16_t poll_interval = 0;
+		// the interval poll_check() and poll_next() go by, in ms:
+		// poll_interval, a device type may poll faster for a while
+		// (ds1820). Called with the device lock held.
+		virtual long poll_ms() const { return 1000L * poll_interval; }
 	public:
 		// pure, no device state: static so canonical_rom() can use it
 		static uint8_t crc8(const uint8_t *addr, uint8_t len);
@@ -120,6 +124,9 @@ class OwDev : IFs, public IDev {
 		// the device calls is responsible to check the time and decide if it
 		// needs to do something and then perform the action(s)
 		virtual int poll();
+		// the device raised an alarm (found by the alarm search): by
+		// default polled at once, outside its interval
+		virtual int alarm_poll() { return poll(); }
 		virtual int poll_next();
 		// IDev functions
 		// the name given to the device, or its rom while it has none

@@ -1687,7 +1687,8 @@ TEST_F(FsTest, Ds2408Watchdog) {
 	EXPECT_EQ(plugins.config_of("faulty")["watchdogs"], 2);
 
 	// the device does not take the restore: reported, still counted,
-	// the plugins hear about it all the same
+	// the plugins hear about it all the same (the brightness is written
+	// back with or without DS2408_WDT_RESTORE, it fails here)
 	dev->sim_stat = STAT_WATCHDOG;
 	dev->sim_fail = true;
 	dev->reg_read(true);
@@ -2056,6 +2057,19 @@ TEST_F(FsTest, Ds2408Firmware) {
 	EXPECT_EQ(dev->sim_bl_enters, 2);
 	EXPECT_EQ(status(), "error: no bootloader answers\n");
 
+	// the bootloader answers the second time it is asked after the
+	// enter (the first info() is the one before it): FW_INFO_TRIES
+	bl.answers = true;
+	bl.info_fails = 2;
+	EXPECT_EQ(update(), (int)path.size());
+	EXPECT_TRUE(wait_done());
+	EXPECT_EQ(status().rfind("done", 0), 0u) << status();
+	// not the third time: the error
+	bl.info_fails = 1 + FW_INFO_TRIES;
+	EXPECT_EQ(update(), (int)path.size());
+	EXPECT_TRUE(wait_done());
+	EXPECT_EQ(status(), "error: no bootloader answers\n");
+
 	ds2408::fw_link = old_link;
 	fs::remove_all(dir);
 	logger.set_level(lvl);
@@ -2079,6 +2093,8 @@ TEST_F(FsTest, Ds2408FwBusLink) {
 	BlInfo info;
 	uint8_t page[16] = { 1, 2, 3 };
 	EXPECT_EQ(link->info(info), -EIO);
+	// why, for the log: the bytes as read
+	EXPECT_EQ(link->why, "INFO CRC wrong: 00 00 00 00 00 00 00 00 00 00 00 00 00") << link->why;
 	EXPECT_EQ(link->write_page(0x80, page, sizeof(page)), -EIO);
 	EXPECT_EQ(link->read_page(0x80, page, sizeof(page)), -EIO);
 	EXPECT_EQ(link->exit(), -EIO);

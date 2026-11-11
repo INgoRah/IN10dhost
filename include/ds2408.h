@@ -21,6 +21,12 @@
 class FwLink;
 /** longest pin name, same as the size its fs entry reports */
 #define PIN_NAME_MAX 20
+/* 1: after a watchdog reset the outputs (PIO and PWM levels) as before
+   the reset are written back to the device; 0: the reset is reported
+   and counted, the outputs stay as the device starts up */
+#ifndef DS2408_WDT_RESTORE
+#define DS2408_WDT_RESTORE 0
+#endif
 
 class ds2408 : public OwDev, public IDS2408 {
 	private:
@@ -228,9 +234,10 @@ class ds2408 : public OwDev, public IDS2408 {
 		bool watchdog_pending() const;
 		// when SwitchHandler::dev_watchdog() last reported one
 		std::chrono::steady_clock::time_point wdt_seen{};
-		/* After a watchdog reset: writes the cached state back - the
-		   outputs as before the reset, the PWM levels, threshold and
-		   brightness. Returns 0, or -EAGAIN if a part failed. */
+		/* After a watchdog reset: clears the reset flags and, with
+		   DS2408_WDT_RESTORE, writes the outputs as before the reset
+		   and the PWM levels back. Returns 0, or -EAGAIN if a part
+		   failed. */
 		int watchdog_restore();
 };
 #endif

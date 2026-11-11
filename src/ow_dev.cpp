@@ -192,7 +192,7 @@ int OwDev::poll_check()
 	if (poll_interval == 0)
 		// no polling
 		return -1;
-	if (HrClock::now() - last_poll >= std::chrono::milliseconds(1000 * poll_interval)) {
+	if (HrClock::now() - last_poll >= std::chrono::milliseconds(poll_ms())) {
 		last_poll = HrClock::now();
 		return 1;
 	}
@@ -221,7 +221,7 @@ int OwDev::poll_next()
 	auto now = HrClock::now();
 	auto diff = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_poll).count();
 
-	return std::max((int)0, (int)(poll_interval * 1000 - diff));
+	return std::max((int)0, (int)(poll_ms() - diff));
 }
 
 int OwDev::fs_attr(std::string& path) const

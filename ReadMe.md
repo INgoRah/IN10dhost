@@ -124,6 +124,33 @@ regularly, the latches are left alone:
 echo 60 > /mnt/1wire/29.0800F7FF66772C/poll    # every 60 s
 ```
 
+## temperature polling
+
+A ds1820 (or an owSlave with temperature support) is read every
+`<rom>/poll` seconds: the conversion is started and read 1 s later,
+without holding the bus in between. Intervals below 2 s convert and
+read at once, the value may then be the one before.
+
+```sh
+echo 60 > /mnt/1wire/28.0501FAFE6677A0/poll    # every 60 s
+```
+
+While the temperature changes, e.g. with a window open, it is polled
+faster: a reading more than `fast_delta` K off the one before polls
+every `poll / fast_factor` seconds (1 s at least), until 3 readings in a
+row stayed within `fast_delta` K. Both are set per device in the json
+config, defaults 0.2 K and 5 (60 s become 12 s); a `fast_factor` of 1
+or a `fast_delta` of 0 switches it off:
+
+```json
+{"type": "ds1820", "bus": 1, "rom": "28.0501FAFE6677A0", "id": 0,
+ "name": "living room", "poll": 60, "fast_delta": 0.2, "fast_factor": 5}
+```
+
+An alarm of the device (TH/TL; an owSlave also raises one on each
+change with config_info2[4] bit 0) reads its last conversion at once,
+but starts none: the interval stays what starts the conversions.
+
 ## firmware update
 
 An owSlave with the 1-Wire bootloader (ATmega168, ATtiny84 or

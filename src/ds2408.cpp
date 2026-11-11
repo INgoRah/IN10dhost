@@ -1505,6 +1505,7 @@ int ds2408::watchdog_restore()
 	// coverity[sleep] - bus mutex must be held
 	if (status_clear() != 0)
 		err++;
+#if DS2408_WDT_RESTORE
 	if (wdt_out_known) {
 		logger.info(rom + std::format(" watchdog: restoring PIO {:#x}", wdt_out));
 		// coverity[sleep] - bus mutex must be held
@@ -1520,16 +1521,19 @@ int ds2408::watchdog_restore()
 		if (level_set(pio, pins[pio].level) != 0xAA)
 			err++;
 	}
+#else
+	logger.verbose(rom + " watchdog: outputs not restored (DS2408_WDT_RESTORE off)");
+#endif
+	if (brightness != 0 && brightness_set((uint8_t)brightness) != 0)
+		err++;
 #if 0
 	// 0 is the device's default as well
 	if (threshold != 0 && threshold_set((uint8_t)threshold) != 0)
 		err++;
-	if (brightness != 0 && brightness_set((uint8_t)brightness) != 0)
-		err++;
 	if (ext_known && extport_set(ext_ddr, ext_port) != 0)
 		err++;
 #endif
-		/* reset again by the restore itself, as switching a load pulling
+	/* reset again by the restore itself, as switching a load pulling
 	   the supply does: do not go round in circles, leave the outputs
 	   as the device has them */
 	if (wdt_pending) {
@@ -1575,11 +1579,32 @@ class OwBlLink : public FwLink {
 	bool start()
 	{
 		// coverity[sleep] - bus mutex must be held
-		if (!ds->selectChannel(bus) || !ds->reset())
+		if (!ds->selectChannel(bus)) {
+			why = std::format("channel {} not selected, DS2482 error {}", bus, ds->last_err);
 			return false;
+		}
+		// coverity[sleep] - bus mutex must be held
+		if (!ds->reset()) {
+			why = ds->last_err ? std::format("reset failed, DS2482 error {}", ds->last_err)
+				: "no presence pulse";
+			return false;
+		}
 		// coverity[sleep] - bus mutex must be held
 		ds->select(addr);
-		return ds->last_err == 0;
+		if (ds->last_err != 0) {
+			why = std::format("Match ROM failed, DS2482 error {}", ds->last_err);
+			return false;
+		}
+		return true;
+	}
+
+	static std::string hex(const uint8_t* p, size_t n)
+	{
+		std::string s;
+
+		for (size_t i = 0; i < n; i++)
+			s += std::format("{}{:02X}", i ? " " : "", p[i]);
+		return s;
 	}
 public:
 	OwBlLink(DS2482* d, int b, const uint8_t* a) : ds(d), bus(b)
@@ -1600,9 +1625,16 @@ public:
 			// coverity[sleep] - bus mutex must be held
 			ds->read(raw, sizeof(raw));
 		}
-		if (!DS2482::check_crc16(raw, BL_INFO_SIZE, raw + BL_INFO_SIZE, DS2482::crc16(&cmd, 1, 0)))
+		if (!DS2482::check_crc16(raw, BL_INFO_SIZE, raw + BL_INFO_SIZE, DS2482::crc16(&cmd, 1, 0))) {
+			why = "INFO CRC wrong: " + hex(raw, sizeof(raw));
 			return -EIO;
-		return bl_info_parse(raw, info) ? 0 : -EPROTO;
+		}
+		if (!bl_info_parse(raw, info)) {
+			why = "INFO not understood: " + hex(raw, sizeof(raw));
+			return -EPROTO;
+		}
+		why.clear();
+		return 0;
 	}
 
 	int write_page(uint16_t at, const uint8_t* data, size_t len) override
@@ -1796,10 +1828,18 @@ void ds2408::fw_run(std::vector<uint8_t> image)
 			return fail("the device does not answer");
 		// no lock held: fw_enter() releases the device lock on return
 		// (DevLock), fw_run() takes none here
-		// coverity[sleep] - see above
-		std::this_thread::sleep_for(std::chrono::milliseconds(FW_ENTER_MS));
-		if (link->info(info) < 0)
-			return fail("no bootloader answers");
+		int tries = FW_INFO_TRIES;
+		do {
+			// coverity[sleep] - see above
+			std::this_thread::sleep_for(std::chrono::milliseconds(FW_ENTER_MS));
+			if (link->info(info) == 0)
+				break;
+			if (!link->why.empty())
+				logger.warn(rom + " firmware update: bootloader INFO: " + link->why);
+		} while (--tries > 0);
+		if (tries == 0)
+			return fail(link->why.empty() ? "no bootloader answers"
+				: "no bootloader answers (" + link->why + ")");
 	}
 	logger.info(rom + std::format(" bootloader {}: pages of {} bytes, {} bytes for the application",
 		info.version, info.page_size, info.app_size));

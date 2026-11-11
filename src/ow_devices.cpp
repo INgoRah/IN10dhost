@@ -703,7 +703,7 @@ int OwDevices::poll_time()
 	for (auto& dev : cache.devices) {
 		int next = dev->poll_next();
 		if (next == 0) {
-			logger.verbose(std::format("polling {:#x} ", dev->addr[0]));
+			logger.verbose(std::format("Device polling {:#x}.{:#x}..", dev->addr[0], dev->addr[1]));
 			return 0; // time to poll now
 		}
 		if (next > 0 && next < next_timeout)

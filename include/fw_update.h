@@ -22,6 +22,9 @@
 #define BL_ERR_NOAPP	0x03
 /* the size of the BL_CMD_INFO answer, without its CRC */
 #define BL_INFO_SIZE	11
+/* in10dfs: the bootloader is asked for its INFO this often after
+   entering it: one transfer disturbed does not end the update */
+#define FW_INFO_TRIES	3
 
 struct BlInfo {
 	uint8_t version = 0;
@@ -41,6 +44,8 @@ bool bl_info_parse(const uint8_t* raw, BlInfo& info);
 class FwLink {
 	public:
 		virtual ~FwLink() = default;
+		// why the last call failed, for the log; may stay empty
+		std::string why;
 		virtual int info(BlInfo& info) = 0;
 		// BL_OK, BL_ERR_* of the device, or a negative errno (no
 		// answer, the CRC of the transfer wrong)
