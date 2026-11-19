@@ -54,6 +54,16 @@ class Ard_i2c : public OwDev{
 		json to_json() const override;
 		virtual void from_json(const json& j);
 		void set_mode(int mode);
+		/* The Arduino starts in the mode of its EEPROM (its own alarm
+		   handling, as a second master on the DS2482) and does not
+		   report alarms the host way then: started or reset after
+		   in10dfs it is set to our mode again. False if it does not
+		   answer. */
+		bool mode_check();
+		/* At the start of in10dfs, before it uses the DS2482: sets the
+		   mode and, if the Arduino was not in it (it handled the buses
+		   itself), gives it the time to end what it is doing there. */
+		void takeover(int mode);
 		std::vector<string> fs_dir(string& path) const override;
 		int fs_attr(string& path) const override;
 		int fs_read(string& path, char* buf, size_t size, bool uncached = false) override;

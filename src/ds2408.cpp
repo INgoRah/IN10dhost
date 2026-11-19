@@ -1492,6 +1492,12 @@ bool ds2408::watchdog_pending() const
 	return wdt_pending;
 }
 
+bool ds2408::power_on() const
+{
+	auto lk = lock();
+	return data[STAT] != 0xff && (data[STAT] & STAT_WATCHDOG) == STAT_POWER_ON;
+}
+
 int ds2408::watchdog_restore()
 {
 	auto lk = lock();
