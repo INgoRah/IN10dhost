@@ -161,6 +161,25 @@ void OwDevices::begin(bool soft)
 	plugins.action(ACT_READY, 0);
 }
 
+/* Handles the resets the register reads found, see
+   SwitchHandler::dev_watchdog(). Returns how many there were, power_on
+   how many of them by power-on. */
+int OwDevices::resets_handle(int* power_on)
+{
+	int n = 0;
+
+	for (auto& dev : cache.devices) {
+		auto* d = dynamic_cast<ds2408*>(&*dev);
+		if (!d || !d->watchdog_pending())
+			continue;
+		n++;
+		if (power_on && d->power_on())
+			(*power_on)++;
+		swHdl.dev_watchdog(d);
+	}
+	return n;
+}
+
 void OwDevices::init_busses()
 {
 	cache.busses.clear();
@@ -743,11 +762,7 @@ int OwDevices::dev_poll()
 	/* a reset seen by any register read - the poll above, an uncached
 	   read from the file system - not only by the alarm handling: an
 	   older owSlave firmware raises no alarm after it */
-	for (auto& dev : cache.devices) {
-		auto* d = dynamic_cast<ds2408*>(&*dev);
-		if (d && d->watchdog_pending())
-			swHdl.dev_watchdog(d);
-	}
+	resets_handle();
 	if (cnt == 0)
 		return ret; // no device needs polling
 	return cnt;

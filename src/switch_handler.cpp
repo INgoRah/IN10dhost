@@ -567,8 +567,13 @@ void SwitchHandler::dev_watchdog(ds2408* dev)
 		dev->wdt_seen = now;
 	}
 	/* the firmware sets 0x88 after a watchdog reset, 0x80 after any
-	   other (power-on, brown-out, reset pin), both lose the outputs */
+	   other (power-on, brown-out, reset pin), both lose the outputs.
+	   A power-on is no fault: the devices were switched on (all of
+	   them, when in10dfs starts after a power-up). Restored like the
+	   others, but no warning and no trace kept. */
+	bool power_on = (stat & STAT_WATCHDOG) == STAT_POWER_ON;
 	string msg = std::format("{} on {}! (status {:#04x}",
+		power_on ? "Power-on" :
 		(stat & STAT_WATCHDOG) == STAT_WATCHDOG ? "Watchdog" : "Reset",
 		dev->rom, stat);
 	msg += prev == steady_clock::time_point{} ? ", first since start" :
@@ -582,8 +587,12 @@ void SwitchHandler::dev_watchdog(ds2408* dev)
 		msg += std::format(", {} last selected {}", twin->rom,
 			t == steady_clock::time_point{} ? "never" : ago(t));
 	}
-	logger.warn(msg + ")");
-	ow->log_save(false);
+	if (power_on) {
+		logger.info(msg + ")");
+	} else {
+		logger.warn(msg + ")");
+		ow->log_save(false);
+	}
 	if (!dev->watchdog_pending())
 		return;
 	// coverity[sleep] - the device lock is held for the 1-Wire writes
@@ -638,9 +647,12 @@ bool SwitchHandler::dev_alarm(uint8_t bus, uint8_t adr[8])
 				/* status in 5 signals a dimming down */
 			}
 			if (stat & STAT_WATCHDOG) {
-				// the latches of a reset device mean nothing
 				dev_watchdog(dev);
-				return true;
+				// the latches of a device reset by its watchdog mean
+				// nothing. After a power-on it raises no alarm for
+				// the reset: this one is a button, as any other
+				if ((stat & STAT_WATCHDOG) != STAT_POWER_ON)
+					return true;
 			}
 			if (cur_latch == 0xff) {
 				logger.warn(std::format("{}: invalid latch data", dev->rom));

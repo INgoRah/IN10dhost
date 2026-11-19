@@ -7,6 +7,8 @@
 #include <linux/i2c-dev.h>
 #include <linux/i2c.h>
 
+#include <cerrno>
+#include <cstring>
 #include <iostream>
 #include <cstdint>
 
@@ -229,12 +231,70 @@ void Ard_i2c::set_mode(int mode)
 		return;
 	}
 	uint8_t buf[] = { 0x69, (uint8_t)(mode & 0xff) };
-	i2c_write_data(fd, buf, 2);
+	int ret = i2c_write_data(fd, buf, 2);
 	buf[0] = 0xE1;
 	i2c_write_data(fd, buf, 1);
 	close(fd);
-	logger.verbose(std::format("set mode AD={:#x}", mode));
+	if (ret < 0)
+		// not up yet: mode_check() sets it once it answers
+		logger.warn(std::format("Arduino does not take mode {:#x}: {}", mode, strerror(errno)));
+	else
+		logger.verbose(std::format("set mode AD={:#x}", mode));
 #endif
+}
+
+/* the longest the Arduino is busy on a bus with one alarm (search,
+   switching with retries) */
+#define ARD_HANDOVER_MS 500
+
+void Ard_i2c::takeover(int mode)
+{
+#ifdef USE_I2C
+	uint8_t cur = 0xff;
+	int fd = open("/dev/i2c-0", O_RDWR);
+	int ret = -1;
+
+	if (fd >= 0) {
+		ret = i2c_read_reg(fd, 0x69, &cur);
+		close(fd);
+	}
+	set_mode(mode);
+	if (ret < 0) {
+		logger.warn("Arduino does not answer, mode set once it does");
+	} else if (cur == (uint8_t)mode) {
+		logger.info(std::format("Arduino already in mode {:#x}", mode));
+	} else {
+		logger.info(std::format("Arduino was in mode {:#x}, now {:#x}: waiting {} ms for it to leave the buses",
+			cur, mode, ARD_HANDOVER_MS));
+		usleep(ARD_HANDOVER_MS * 1000);
+	}
+#else
+	set_mode(mode);
+#endif
+}
+
+bool Ard_i2c::mode_check()
+{
+#ifdef USE_I2C
+	auto lk = lock();
+	uint8_t cur;
+	int fd = open("/dev/i2c-0", O_RDWR);
+
+	if (fd < 0)
+		return false;
+	int ret = i2c_read_reg(fd, 0x69, &cur);
+	// the read pointer back to the alarm status, as set_mode() leaves it
+	uint8_t ptr = 0xE1;
+	i2c_write_data(fd, &ptr, 1);
+	close(fd);
+	if (ret < 0)
+		return false;
+	if (cur != (uint8_t)mode) {
+		logger.warn(std::format("Arduino in mode {:#x}, not {:#x} (restarted?): set again", cur, mode));
+		set_mode(mode);
+	}
+#endif
+	return true;
 }
 
 #ifdef USE_I2C
@@ -272,6 +332,12 @@ int Ard_i2c::interrupt() {
 			// no answer, the line stays low and we get called again
 			logger.warn(std::format("Arduino status read failed ({})", ret));
 			return -1;
+		}
+		if (status & 0x20) {
+			// STAT_START: it is back in the mode of its EEPROM and
+			// waits for ours before it uses the buses itself
+			logger.info("Arduino started, mode set again");
+			set_mode(cur_mode);
 		}
 		// bit 0..3: one bit per bus with an alarm
 		uint8_t buses = status & 0x0f;

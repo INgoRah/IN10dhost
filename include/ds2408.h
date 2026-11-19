@@ -135,6 +135,7 @@ class ds2408 : public OwDev, public IDS2408 {
 		// taken before the simulated good read above
 		std::vector<std::array<uint8_t, 10>> sim_reads;
 		FRIEND_TEST(FsTest, Ds2408Watchdog);
+		FRIEND_TEST(FsTest, Ds2408PowerOn);
 		FRIEND_TEST(PluginsTest, JsEngineDs2408Calls);
 		FRIEND_TEST(FsTest, Ds2408RegReadCrc);
 		FRIEND_TEST(FsTest, Ds2408WatchdogNoAlarm);
@@ -232,6 +233,8 @@ class ds2408 : public OwDev, public IDS2408 {
 		uint8_t get_last_latch() const;
 		// a register read saw the watchdog status, not yet restored
 		bool watchdog_pending() const;
+		// the status read last tells a power-on reset, no watchdog
+		bool power_on() const;
 		// when SwitchHandler::dev_watchdog() last reported one
 		std::chrono::steady_clock::time_point wdt_seen{};
 		/* After a watchdog reset: clears the reset flags and, with

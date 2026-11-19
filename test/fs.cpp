@@ -1728,6 +1728,54 @@ TEST_F(FsTest, Ds2408Watchdog) {
 	fs::remove_all(dir);
 }
 
+/* A power-on reset (the devices switched on, in10dfs started later):
+   found and cleared at the start, counted apart from the watchdogs, no
+   warning and no trace for it. */
+TEST_F(FsTest, Ds2408PowerOn) {
+	namespace fs = std::filesystem;
+	fs::path dir = fs::temp_directory_path() / std::format("in10dfs-pon-{}", getpid());
+	std::string old_dir = ow.get_log_dir();
+	ow.set_log_dir(dir.string());
+
+	std::string rom = OwDev::canonical_rom("29.1B00FDFF6677");
+	std::string rom2 = OwDev::canonical_rom("29.1C00FDFF6677");
+	ow.update_device(2, rom);
+	ow.update_device(2, rom2);
+	ow.update_data();
+	ds2408* dev = (ds2408*)ow.find(rom);
+	ds2408* dev2 = (ds2408*)ow.find(rom2);
+	ASSERT_NE(dev, nullptr);
+	ASSERT_NE(dev2, nullptr);
+	dev->sim_stat = STAT_POWER_ON;
+	dev2->sim_stat = STAT_WATCHDOG;
+	ow.begin();
+	swHdl.begin(&ds);
+	uint32_t warned = logger.warnings().count;
+
+	EXPECT_TRUE(dev->power_on());
+	EXPECT_FALSE(dev2->power_on());
+	int power_on = 0;
+	EXPECT_EQ(ow.resets_handle(&power_on), 2);
+	EXPECT_EQ(power_on, 1);
+	EXPECT_FALSE(dev->watchdog_pending());
+	EXPECT_EQ(dev->sim_stat, 0);
+	// the watchdog warned about, the power-on not
+	EXPECT_EQ(logger.warnings().count, warned + 1);
+	EXPECT_TRUE(logger.warnings().last.starts_with("Watchdog on " + rom2));
+	// handled: nothing left
+	EXPECT_EQ(ow.resets_handle(&power_on), 0);
+
+	// seen by an alarm first: handled the same, the alarm goes on to
+	// the switch handling
+	dev->sim_stat = STAT_POWER_ON;
+	EXPECT_TRUE(swHdl.dev_alarm(2, dev->addr));
+	EXPECT_FALSE(dev->watchdog_pending());
+	EXPECT_EQ(logger.warnings().count, warned + 1);
+
+	ow.set_log_dir(old_dir);
+	fs::remove_all(dir);
+}
+
 /* The warning a reset leaves in the log: what kind it was, how long
    since the previous one, and when the other ROM of a dual-ROM chip
    (here a ds2450 with the same serial) was last selected. */
@@ -1773,8 +1821,16 @@ TEST_F(FsTest, Ds2408WatchdogLog) {
 	EXPECT_NE(ds.last_select(twin->addr), std::chrono::steady_clock::time_point{});
 	dev->data[STAT] = 0x80;
 	swHdl.dev_watchdog(dev);
+	// no fault: not warned about
 	std::string last = logger.warnings().last;
-	EXPECT_TRUE(last.starts_with(std::format("Reset on {}! (status 0x80, previous ", rom))) << last;
+	EXPECT_TRUE(dev->power_on());
+	EXPECT_TRUE(last.starts_with("Watchdog on ")) << last;
+	// a reset without the watchdog flags of 0x88 complete
+	dev->data[STAT] = 0x08;
+	EXPECT_FALSE(dev->power_on());
+	swHdl.dev_watchdog(dev);
+	last = logger.warnings().last;
+	EXPECT_TRUE(last.starts_with(std::format("Reset on {}! (status 0x08, previous ", rom))) << last;
 	EXPECT_NE(last.find(std::format("s ago, {} last selected ", twin_rom)), std::string::npos) << last;
 	EXPECT_TRUE(last.ends_with(" s ago)")) << last;
 
