@@ -101,5 +101,5 @@ class Plugins : public IPluginFiles {
 		/* hand a read or write to the plugin that added path; -ENOENT
 		   when none did */
 		int file_read(const string& path, char* buf, size_t size);
-		int file_write(const string& path, const char* buf, size_t size);
+		int file_write(const string& path, const char* buf, size_t size) override;
 };

@@ -33,6 +33,8 @@ class OwDev : IFs, public IDev {
 		mutable int lock_depth = 0;
 		// ACT_DEV_CHANGE payloads raised while locked, see notify_change()
 		mutable std::vector<json> pending;
+		// ACT_DEV_WARN payloads raised while locked, see notify_warn()
+		mutable std::vector<json> pending_warn;
 	protected:
 		/* Tells the plugins this device changed. While the device is
 		   locked the event is only queued, and sent by the outermost
@@ -40,6 +42,12 @@ class OwDev : IFs, public IDev {
 		   use the device from another thread (jsengine runs scripts under
 		   its own lock), which would deadlock against a held lock. */
 		void notify_change(json data) const;
+		/* Tells the plugins about a problem with this device
+		   (ACT_DEV_WARN): kind is "crc" or "crc_failed", msg what was
+		   logged. Delivered like notify_change(): after the outermost
+		   device lock is released. The caller logs it too, this only
+		   adds the event. */
+		void notify_warn(const char* kind, const std::string& msg) const;
 		// nullptr until begin() runs; a device method that dereferences
 		// it without begin() having run first is a bug in that caller,
 		// not something to paper over here, but the pointer itself must

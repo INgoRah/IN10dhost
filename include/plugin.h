@@ -46,7 +46,8 @@ enum action_code {
 	ACT_ALARM_BEFORE = 6,
 	ACT_ALARM_AFTER = 7,
 	ACT_DEV_CHANGE = 8,
-	ACT_DEV_WATCHDOG = 9
+	ACT_DEV_WATCHDOG = 9,
+	ACT_DEV_WARN = 10
 };
 
 /* Payload handed to Plugin::action().
@@ -85,6 +86,11 @@ public:
 	virtual bool file_add(Plugin* owner, const string& path, int size) = 0;
 	/* Removes a file of owner again, false if it has none at path */
 	virtual bool file_remove(Plugin* owner, const string& path) = 0;
+	/* Writes to a file of any plugin, as a write through the file
+	   system would: how one plugin hands another something to do (the
+	   scripts' ow.notify() writes to telegram/send). Returns what the
+	   owner's fs_write() does, -ENOENT when no plugin has the path. */
+	virtual int file_write(const string& path, const char* buf, size_t size) = 0;
 };
 
 class Plugin {
@@ -122,6 +128,13 @@ public:
 		    power-on or brown-out), brightness, threshold. Its cached
 		    outputs, levels, threshold and brightness are already
 		    restored; the place to hand it a current brightness.
+		10 - a device had a problem worth telling someone about, ev.val
+		    = bus number, ev.data: bus, type, rom, kind and msg. kind:
+		    "crc" - a bad CRC, the reading was dropped or retried;
+		    "crc_failed" - a ds2408 register read failed its CRC on
+		    every retry, the cached state is stale. Raised next to the
+		    log line that says the same, once the device is unlocked,
+		    like ACT_DEV_CHANGE.
 	*/
 	virtual int action(const ActionEvent& ev) = 0;
 

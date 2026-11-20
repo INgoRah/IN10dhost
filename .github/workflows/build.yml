@@ -24,7 +24,7 @@ jobs:
       run: ${{ matrix.setup }}
     - name: install dependencies on Linux
       if: runner.os == 'Linux'
-      run: sudo apt-get install -y fuse3 libfuse3-dev nlohmann-json3-dev libgtest-dev libgmock-dev lcov
+      run: sudo apt-get install -y fuse3 libfuse3-dev nlohmann-json3-dev libgtest-dev libgmock-dev lcov libcurl4-openssl-dev
 
     - name: Cache quickjs-ng
       id: qjs-cache

@@ -201,8 +201,11 @@ else()
         PRIVATE
             -static-libstdc++
             -static-libgcc
-            -static
     )
+    # Not -static: the daemon dlopen()s plugins, and a plugin with shared
+    # libraries of its own (libtelegram.so -> libcurl.so.4 and its TLS
+    # chain) needs the real dynamic loader. Inside a fully static
+    # executable that load crashes (SEGV in dlopen).
 endif()
 if(SANITIZE)
     target_link_options(in10dfs
