@@ -1213,6 +1213,7 @@ uint8_t ds2408::reg_read(bool latch_reset)
 				for (uint8_t b : rd)
 					raw += std::format(" {:02x}", b);
 				logger.warn(rom + " register read CRC mismatch:" + raw);
+				notify_warn("crc", "register read CRC mismatch:" + raw);
 			}
 			continue;
 		}
@@ -1230,6 +1231,7 @@ uint8_t ds2408::reg_read(bool latch_reset)
 	// nor reset the latches not read. The device keeps its alarm.
 	if (crc_bad) {
 		logger.warn(rom + " register read failed its CRC on every retry");
+		notify_warn("crc_failed", "register read failed its CRC on every retry");
 		return 0;
 	}
 	if (err) {
@@ -1404,6 +1406,7 @@ uint8_t ds2408::custom_cmd(uint8_t pio, uint8_t cmd, uint8_t val1, uint8_t val2)
 	if (crc == static_cast<uint16_t>(~crc16))
 		return 0xAA;
 	logger.warn(std::format("CRC mismatch {:#x} <> {:#x}", crc, ~crc16));
+	notify_warn("crc", std::format("command CRC mismatch {:#x} <> {:#x}", crc, ~crc16));
 
 	return 0xff;
 #endif

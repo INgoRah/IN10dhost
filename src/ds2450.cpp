@@ -156,8 +156,10 @@ int16_t ds2450::adc_read(uint8_t ch, uint8_t flag)
 		inv_crc[1] = ds->read();
 		// logged, not treated as fatal: the exact CRC byte range for
 		// this command isn't verified against real hardware here
-		if (!ds->check_crc16(cmd, sizeof(cmd), inv_crc, 0))
+		if (!ds->check_crc16(cmd, sizeof(cmd), inv_crc, 0)) {
 			logger.warn(rom + ": DS2450 convert command CRC mismatch");
+			notify_warn("crc", "convert command CRC mismatch");
+		}
 		// back to idle, see below
 		ds->reset();
 		return 0;
@@ -180,8 +182,10 @@ int16_t ds2450::adc_read(uint8_t ch, uint8_t flag)
 	uint8_t inv_crc[2];
 	inv_crc[0] = ds->read();
 	inv_crc[1] = ds->read();
-	if (!ds->check_crc16(crc_buf, sizeof(crc_buf), inv_crc, 0))
+	if (!ds->check_crc16(crc_buf, sizeof(crc_buf), inv_crc, 0)) {
 		logger.warn(rom + ": DS2450 read result CRC mismatch");
+		notify_warn("crc", "read result CRC mismatch");
+	}
 	/* A DS2450 waits for more read slots until the next reset. The
 	   owSlave emulation (dual-ROM with a ds2408) hangs into its
 	   watchdog if that reset takes too long (~9 s), so end here. */

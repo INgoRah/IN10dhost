@@ -8,7 +8,15 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(QJS qjs)
 
+# libcurl is optional too: without it only the telegram plugin is skipped
+find_package(CURL)
+
 file(GLOB PLUGIN_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/*.cpp")
+
+if(NOT CURL_FOUND)
+    message(STATUS "libcurl not found, skipping the telegram plugin")
+    list(REMOVE_ITEM PLUGIN_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/telegram.cpp")
+endif()
 
 # faulty.cpp exists only to drive the loader's error handling from the
 # tests; it must never end up on a target
@@ -54,6 +62,10 @@ foreach(SOURCE_FILE ${PLUGIN_SOURCES})
         target_include_directories(${PLUGIN_NAME} PRIVATE ${QJS_INCLUDE_DIRS})
         target_link_directories(${PLUGIN_NAME} PRIVATE ${QJS_LIBRARY_DIRS})
         target_link_libraries(${PLUGIN_NAME} PRIVATE ${QJS_LIBRARIES})
+    endif()
+
+    if(PLUGIN_NAME STREQUAL "telegram")
+        target_link_libraries(${PLUGIN_NAME} PRIVATE CURL::libcurl)
     endif()
 
     #  Direct the compilation output to build-native/bin/

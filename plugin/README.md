@@ -91,6 +91,7 @@ Available to scripts:
 | `ow.brightness_set(rom, value)` | hand a ds2408 the current brightness 0..255, for devices without their own light sensor |
 | `ow.threshold_set(rom, value)` | brightness 0..255 above which a ds2408's timed lights switch |
 | `ow.extport_set(rom, ddr, port)` | set a ds2408's extended port (experimental, owSlave PORTC/DDRC; PC0..PC5) |
+| `ow.notify(text)` | queue a message for the [telegram](#telegram) plugin, `false` if it is not loaded or not set up; returns at once, the sending happens in a thread of its own |
 | `ow.sleep(ms)` | wait 0..100 ms, e.g. for a pulse between two calls; counts towards the 200 ms limit |
 | `ow.temp(rom)` | read a ds1820 temperature, `null` if that rom is not one |
 | `ow.volt(rom, channel)` | read a cached ds2450 voltage |
@@ -257,6 +258,7 @@ it. See [example.cpp](example.cpp), which adds `status/example` and
 | `ACT_ALARM_AFTER` | 7 | alarm, after default handling | `val` = bus, `data` = `{bus, rom}` |
 | `ACT_DEV_CHANGE` | 8 | a device changed state | `data` = `{bus, rom, pio}` |
 | `ACT_DEV_WATCHDOG` | 9 | a ds2408 was reset by its watchdog, its cached outputs, levels, threshold and brightness are already restored | `val` = bus, `data` = `{bus, type, rom, status, brightness, threshold}`, `status` 0x88 for a watchdog, 0x80 for power-on or brown-out |
+| `ACT_DEV_WARN` | 10 | a device had a problem: a bad CRC. Raised next to the log line, after the device is unlocked | `val` = bus, `data` = `{bus, type, rom, kind, msg}`; `kind` is `"crc"` (reading dropped or retried) or `"crc_failed"` (a ds2408 register read failed its CRC on every retry, its cached state is stale) |
 
 A plugin loaded after the start (`touch settings/plugins/<name>`, a
 reload) gets `ACT_INITIALIZED` and `ACT_READY` as far as they were sent
@@ -309,3 +311,34 @@ command:
 g++ -std=c++20 -fPIC -I ./include/ -I /usr/include/ -shared \
     plugin/basic.cpp -o build-native/bin/libbasic.so
 ```
+
+## telegram
+
+Sends messages to a Telegram bot chat (libcurl). Create a bot with
+@BotFather, send it a message and read your `chat_id` from
+`https://api.telegram.org/bot<token>/getUpdates`.
+
+```json
+"plugins": {
+    "telegram": { "token": "123456:ABC...", "chat_id": "-100123456" }
+}
+```
+
+Optional: `min_interval_ms` (default 1100, Telegram allows about one
+message a second per chat) and `max_queue` (default 20, the oldest
+message is dropped when more are waiting).
+
+Anything written to `telegram/send` is queued and sent by a worker
+thread, so a slow or unreachable network never delays the bus:
+
+```sh
+echo "front door opened" > /mnt/1wire/telegram/send
+cat /mnt/1wire/telegram/send     # sent / failed / dropped / queued
+```
+
+From a script: `ow.notify("front door opened")`. A failed send is
+retried a few times and then dropped with a warning in the log.
+
+To get device problems in Telegram, load [warnings.js](warnings.js) with
+the jsengine: `crc_failed` goes out at once, the noisier `crc` at most
+once per device and ten minutes, with a count of the repeats.

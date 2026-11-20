@@ -29,10 +29,12 @@ OwDev::DevLock::DevLock(const OwDev& d) : dev(d)
 
 OwDev::DevLock::~DevLock()
 {
-	std::vector<json> out;
+	std::vector<json> out, warn;
 
-	if (--dev.lock_depth == 0)
+	if (--dev.lock_depth == 0) {
 		out.swap(dev.pending);
+		warn.swap(dev.pending_warn);
+	}
 	dev.dev_mtx.unlock();
 	// outside the lock, see notify_change(). A destructor must not throw
 	// (it would terminate the daemon): Plugins::action() already catches
@@ -50,6 +52,18 @@ OwDev::DevLock::~DevLock()
 			}
 		}
 	}
+	for (const auto& data : warn) {
+		try {
+			plugins.action(ACT_DEV_WARN, data.value("bus", 0), &data);
+		}
+		catch (...) {
+			try {
+				logger.error("device warning notification failed");
+			}
+			catch (...) {
+			}
+		}
+	}
 }
 
 void OwDev::notify_change(json data) const
@@ -57,6 +71,21 @@ void OwDev::notify_change(json data) const
 	{
 		auto lk = lock();
 		pending.push_back(std::move(data));
+	}
+	// sent right here unless an outer lock is still held, then by that
+}
+
+void OwDev::notify_warn(const char* kind, const std::string& msg) const
+{
+	{
+		auto lk = lock();
+		pending_warn.push_back(json{
+			{"bus", bus},
+			{"type", type},
+			{"rom", rom},
+			{"kind", kind},
+			{"msg", msg}
+		});
 	}
 	// sent right here unless an outer lock is still held, then by that
 }

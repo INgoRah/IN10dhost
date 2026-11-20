@@ -268,9 +268,11 @@ float ds1820::temp_read(const uint8_t flag)
 #endif
 	// a bit error (1024.12 degrees seen): the reading is dropped
 	if (crc8(scratchPad, 8) != scratchPad[8]) {
-		logger.warn(std::format("{} scratchpad CRC wrong: {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X}",
-			rom, scratchPad[0], scratchPad[1], scratchPad[2], scratchPad[3], scratchPad[4],
-			scratchPad[5], scratchPad[6], scratchPad[7], scratchPad[8]));
+		std::string msg = std::format("scratchpad CRC wrong: {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X}",
+			scratchPad[0], scratchPad[1], scratchPad[2], scratchPad[3], scratchPad[4],
+			scratchPad[5], scratchPad[6], scratchPad[7], scratchPad[8]);
+		logger.warn(rom + " " + msg);
+		notify_warn("crc", msg);
 		return -3;
 	}
 #ifndef USE_I2C
