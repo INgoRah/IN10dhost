@@ -11,6 +11,7 @@ Build-Depends:
  libgpiod-dev,
  nlohmann-json3-dev,
  libqjs-dev,
+ libcurl4-openssl-dev,
 Standards-Version: 4.6.2
 Rules-Requires-Root: no
 
@@ -22,6 +23,7 @@ Depends:
  libgpiod3,
  gpiod,
  libqjs0,
+ libcurl4t64 | libcurl4,
  ${shlibs:Depends},
  ${misc:Depends},
 Description: DS2482 1-Wire daemon with GPIO interrupt handling

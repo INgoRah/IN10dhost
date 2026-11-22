@@ -501,6 +501,24 @@ private:
 		return JS_NewBool(ctx, ok);
 	}
 
+	/* ow.notify(text): a message to the telegram plugin, by way of its
+	   telegram/send file. False when it is not loaded or not set up. */
+	static JSValue js_notify(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv)
+	{
+		JsEngine* self = engine_of(ctx);
+		size_t len;
+
+		if (argc < 1 || self == nullptr || self->files == nullptr)
+			return JS_FALSE;
+		const char* msg = JS_ToCStringLen(ctx, &len, argv[0]);
+		if (msg == nullptr)
+			return JS_EXCEPTION;
+		int rc = self->files->file_write("telegram/send", msg, len);
+		JS_FreeCString(ctx, msg);
+
+		return JS_NewBool(ctx, rc >= 0);
+	}
+
 	static JSValue js_file_remove(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv)
 	{
 		JsEngine* self = engine_of(ctx);
@@ -611,6 +629,8 @@ private:
 			JS_NewCFunction(ctx, js_file_add, "file_add", 2));
 		JS_SetPropertyStr(ctx, owobj, "file_remove",
 			JS_NewCFunction(ctx, js_file_remove, "file_remove", 1));
+		JS_SetPropertyStr(ctx, owobj, "notify",
+			JS_NewCFunction(ctx, js_notify, "notify", 1));
 		JS_SetPropertyStr(ctx, global, "ow", owobj);
 		JS_FreeValue(ctx, global);
 	}

@@ -11,6 +11,8 @@ apt install fuse3 libfuse3 libfuse3-dev nlohmann-json3-dev
 if using gpio:
 apt install libgpiod3 libgpiod-dev
 sudo apt install libgtest-dev libgmock-dev
+for the telegram plugin (optional, skipped when missing):
+apt install libcurl4-openssl-dev
 
 ## native build
 mkdir build-native
@@ -20,6 +22,8 @@ cmake --build build-native
 ## Cross build
 Requires
 apt install fuse3:armhf libfuse3-4:armhf libfuse3-dev:armhf libgpiod3:armhf libgpiod-dev:armhf nlohmann-json3-dev
+for the telegram plugin (optional, skipped when missing):
+apt install libcurl4-openssl-dev:armhf
 mkdir build-arm
 cmake -DUSE_I2C=ON -DUSE_GPIO=NO \
   -DCMAKE_TOOLCHAIN_FILE=toolchains/arm-linux-gnueabihf.cmake \
@@ -37,7 +41,7 @@ optional with -d for the data file
 
 ## Sbuild debian package
 
-sudo sbuild-apt trixie-armhf apt-get install gpiod libgpiod-dev fuse3 libfuse3-dev
+sudo sbuild-apt trixie-armhf apt-get install gpiod libgpiod-dev fuse3 libfuse3-dev libcurl4-openssl-dev
 
 '''
 sbuild --dist=trixie --arch=armhf --no-run-lintian --no-clean-source --extra-repository="deb http://deb.debian.org/debian trixie-backports main"
