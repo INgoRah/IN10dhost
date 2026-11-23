@@ -2,7 +2,9 @@
 #include "ow_devices.h"
 #include "interface/ds1820.h"
 #include "fs_table.h"
+#ifdef TESTING
 #include <gtest/gtest_prod.h>
+#endif
 
 #define DS1820_CFG_SIZE 8
 
@@ -59,11 +61,11 @@ class ds1820 : public OwDev, public IDS1820 {
 		int w_cfg(const char* buf, size_t size, int idx);
 		static const FsEntry<ds1820> table[];
 		static const size_t n_table;
+#ifdef TESTING
 		FRIEND_TEST(DevTest, Ds1820FastPolling);
 		FRIEND_TEST(DevTest, Ds1820PollConvertThenRead);
 		FRIEND_TEST(DevTest, Ds1820AlarmReadsOnly);
 		FRIEND_TEST(DevTest, Ds1820CrcRetry);
-#ifdef TESTING
 		// GTest: the next that many scratchpad reads get a wrong CRC
 		int sim_crc_fail = 0;
 #endif
