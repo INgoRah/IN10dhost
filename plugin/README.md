@@ -92,6 +92,7 @@ Available to scripts:
 | `ow.threshold_set(rom, value)` | brightness 0..255 above which a ds2408's timed lights switch |
 | `ow.extport_set(rom, ddr, port)` | set a ds2408's extended port (experimental, owSlave PORTC/DDRC; PC0..PC5) |
 | `ow.notify(text)` | queue a message for the [telegram](#telegram) plugin, `false` if it is not loaded or not set up; returns at once, the sending happens in a thread of its own |
+| `ow.notify_photo(url[, caption])` | the telegram plugin downloads the picture at `url` (e.g. a camera snapshot) and sends it with the optional caption; if the download fails the caption goes out as text. `false` if telegram is not loaded or set up |
 | `ow.sleep(ms)` | wait 0..100 ms, e.g. for a pulse between two calls; counts towards the 200 ms limit |
 | `ow.temp(rom)` | read a ds1820 temperature, `null` if that rom is not one |
 | `ow.volt(rom, channel)` | read a cached ds2450 voltage |
@@ -336,7 +337,20 @@ echo "front door opened" > /mnt/1wire/telegram/send
 cat /mnt/1wire/telegram/send     # sent / failed / dropped / queued
 ```
 
-From a script: `ow.notify("front door opened")`. A failed send is
+From a script: `ow.notify("front door opened")`.
+
+A picture goes through `telegram/photo`: the first line is the URL, an
+optional second line the caption; from a script `ow.notify_photo(url,
+caption)`. The plugin downloads it (http or https, redirects are not
+followed, at most 10 MB) and uploads it. `"photo_insecure": true` in
+the config skips the certificate check of that download only, for a
+camera with a self-signed certificate.
+
+```sh
+printf 'http://cam/snap.jpg\nDoorbell' > /mnt/1wire/telegram/photo
+```
+
+ A failed send is
 retried a few times and then dropped with a warning in the log.
 
 To get device problems in Telegram, load [warnings.js](warnings.js) with

@@ -501,22 +501,45 @@ private:
 		return JS_NewBool(ctx, ok);
 	}
 
-	/* ow.notify(text): a message to the telegram plugin, by way of its
-	   telegram/send file. False when it is not loaded or not set up. */
-	static JSValue js_notify(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv)
+	/* A write to a file of the telegram plugin. False when it is not
+	   loaded or not set up. */
+	static JSValue notify_file(JSContext* ctx, int argc, JSValueConst* argv, const char* file, bool second)
 	{
 		JsEngine* self = engine_of(ctx);
-		size_t len;
+		size_t len, len2 = 0;
 
 		if (argc < 1 || self == nullptr || self->files == nullptr)
 			return JS_FALSE;
 		const char* msg = JS_ToCStringLen(ctx, &len, argv[0]);
 		if (msg == nullptr)
 			return JS_EXCEPTION;
-		int rc = self->files->file_write("telegram/send", msg, len);
+		std::string data(msg, len);
 		JS_FreeCString(ctx, msg);
+		/* photo: "url\ncaption" */
+		if (second && argc > 1 && !JS_IsUndefined(argv[1])) {
+			const char* cap = JS_ToCStringLen(ctx, &len2, argv[1]);
+			if (cap == nullptr)
+				return JS_EXCEPTION;
+			data += "\n" + std::string(cap, len2);
+			JS_FreeCString(ctx, cap);
+		}
+		int rc = self->files->file_write(file, data.data(), data.size());
 
 		return JS_NewBool(ctx, rc >= 0);
+	}
+
+	/* ow.notify(text): a message to the telegram plugin, by way of its
+	   telegram/send file. */
+	static JSValue js_notify(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv)
+	{
+		return notify_file(ctx, argc, argv, "telegram/send", false);
+	}
+
+	/* ow.notify_photo(url[, caption]): the telegram plugin fetches the
+	   picture at url and sends it, see telegram/photo. */
+	static JSValue js_notify_photo(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv)
+	{
+		return notify_file(ctx, argc, argv, "telegram/photo", true);
 	}
 
 	static JSValue js_file_remove(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv)
@@ -631,6 +654,8 @@ private:
 			JS_NewCFunction(ctx, js_file_remove, "file_remove", 1));
 		JS_SetPropertyStr(ctx, owobj, "notify",
 			JS_NewCFunction(ctx, js_notify, "notify", 1));
+		JS_SetPropertyStr(ctx, owobj, "notify_photo",
+			JS_NewCFunction(ctx, js_notify_photo, "notify_photo", 2));
 		JS_SetPropertyStr(ctx, global, "ow", owobj);
 		JS_FreeValue(ctx, global);
 	}
