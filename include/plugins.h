@@ -83,6 +83,15 @@ class Plugins : public IPluginFiles {
 		std::vector<string> names();
 		/* config of one loaded plugin, null json if not loaded */
 		json config_of(const string& name);
+		/* what the file system shows below settings/plugins/<name>/,
+		   see Plugin::options_get(); null json if not loaded */
+		json options_of(const string& name);
+		/* A write to a file of that tree. text is what was written: it
+		   stays a string where the setting is one, and is read as JSON
+		   (42, true, [1,2]) otherwise, falling back to a string.
+		   0 or a negative errno, -ENOENT also when not loaded. */
+		int option_set(const string& name, const std::vector<string>& path,
+			const string& text, bool create = false);
 		/* Builds an ActionEvent and hands it to every loaded plugin.
 		   data, when given, must stay alive for the duration of the
 		   call - plugins are not allowed to retain it. */

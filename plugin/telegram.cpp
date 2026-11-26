@@ -167,20 +167,39 @@ private:
 			(image ? "/sendPhoto" : "/sendMessage");
 		std::string body;
 		curl_mime* mime = nullptr;
+		/* the first call curl refuses ends the try */
+		CURLcode rc = CURLE_OK;
+		auto check = [&](CURLcode r) {
+			if (rc == CURLE_OK)
+				rc = r;
+		};
+		auto set = [&](CURLoption opt, auto val) {
+			check(curl_easy_setopt(c, opt, val));
+		};
+		/* one part of the form; the data is copied by curl */
+		auto field = [&](const char* name, const char* data, size_t len, const char* file) {
+			curl_mimepart* part = curl_mime_addpart(mime);
+
+			if (part == nullptr) {
+				check(CURLE_OUT_OF_MEMORY);
+				return;
+			}
+			check(curl_mime_name(part, name));
+			if (file)
+				check(curl_mime_filename(part, file));
+			check(curl_mime_data(part, data, len));
+		};
 		if (image) {
 			mime = curl_mime_init(c);
-			curl_mimepart* part = curl_mime_addpart(mime);
-			curl_mime_name(part, "chat_id");
-			curl_mime_data(part, chat.c_str(), CURL_ZERO_TERMINATED);
-			if (!text.empty()) {
-				part = curl_mime_addpart(mime);
-				curl_mime_name(part, "caption");
-				curl_mime_data(part, text.c_str(), CURL_ZERO_TERMINATED);
+			if (mime == nullptr) {
+				check(CURLE_OUT_OF_MEMORY);
+			} else {
+				field("chat_id", chat.c_str(), CURL_ZERO_TERMINATED, nullptr);
+				if (!text.empty())
+					field("caption", text.c_str(), CURL_ZERO_TERMINATED, nullptr);
+				field("photo", image->data(), image->size(),
+					(uint8_t)(*image)[0] == 0x89 ? "snap.png" : "snap.jpg");
 			}
-			part = curl_mime_addpart(mime);
-			curl_mime_name(part, "photo");
-			curl_mime_filename(part, is_image(*image) && (uint8_t)(*image)[0] == 0x89 ? "snap.png" : "snap.jpg");
-			curl_mime_data(part, image->data(), image->size());
 		} else {
 			char* e_chat = curl_easy_escape(c, chat.c_str(), (int)chat.size());
 			char* e_text = curl_easy_escape(c, text.c_str(), (int)text.size());
@@ -190,13 +209,6 @@ private:
 			curl_free(e_text);
 		}
 
-		/* the first option curl refuses ends the try */
-		CURLcode rc = CURLE_OK;
-		auto set = [&](CURLoption opt, auto val) {
-			CURLcode r = curl_easy_setopt(c, opt, val);
-			if (rc == CURLE_OK)
-				rc = r;
-		};
 		set(CURLOPT_URL, url.c_str());
 		if (image) {
 			set(CURLOPT_MIMEPOST, mime);

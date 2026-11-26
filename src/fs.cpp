@@ -1,3 +1,4 @@
+#include <utility>
 #include <cstring>
 #include <string>
 #include <cerrno>
@@ -76,20 +77,70 @@ static struct filetype settings[] = {
    writing to one controls it (see fs_write). */
 static const char plugin_dir[] = "/settings/plugins";
 
-/* Returns the plugin name for a "/settings/plugins/<name>" path, or an
-   empty string for anything else - including the directory itself and
-   any attempt to nest further below a plugin. */
-static string plugin_name(const char* path)
+/* Splits a "/settings/plugins/<name>[/<a>[/<b>...]]" path into the
+   plugin name and what is below it. False for anything else, including
+   the plugin directory itself. */
+static bool plugin_split(const char* path, string& name, std::vector<string>& rest)
 {
 	size_t len = strlen(plugin_dir);
 
 	if (strncmp(path, plugin_dir, len) != 0 || path[len] != '/')
-		return string();
-	string name(path + len + 1);
-	if (name.empty() || name.find('/') != string::npos)
+		return false;
+	rest.clear();
+	string p(path + len + 1);
+	size_t pos = 0;
+	bool first = true;
+	while (pos <= p.size()) {
+		size_t slash = p.find('/', pos);
+		string part = p.substr(pos, slash == string::npos ? string::npos : slash - pos);
+		if (part.empty())
+			return false;
+		if (first)
+			name = std::move(part);
+		else
+			rest.push_back(std::move(part));
+		first = false;
+		if (slash == string::npos)
+			break;
+		pos = slash + 1;
+	}
+
+	return !name.empty();
+}
+
+/* Returns the plugin name for a "/settings/plugins/<name>" path, or an
+   empty string for anything else - including the directory itself and
+   anything below a plugin. */
+static string plugin_name(const char* path)
+{
+	string name;
+	std::vector<string> rest;
+
+	if (!plugin_split(path, name, rest) || !rest.empty())
 		return string();
 
 	return name;
+}
+
+/* What a file below a plugin reads as: a string as it is, anything else
+   as JSON, and a newline */
+static string option_text(const json& v)
+{
+	return (v.is_string() ? v.get<string>() : v.dump()) + "\n";
+}
+
+/* The node of the plugin's settings at rest, nullptr if there is none.
+   "config" is not one of them, it is the control file. */
+static const json* option_node(const json& opts, const std::vector<string>& rest)
+{
+	const json* n = &opts;
+
+	for (const auto& k : rest) {
+		if (!n->is_object() || !n->contains(k))
+			return nullptr;
+		n = &(*n)[k];
+	}
+	return n;
 }
 
 static void fs_dir_devs(fuse_fill_dir_t filler, void *buf, bool alarm = false);
@@ -310,18 +361,42 @@ static int fs_getattr(const char* path_in, struct stat* st, struct fuse_file_inf
 		if (check_path(spath, s, st))
 			return 0;
 	}
-	// one file per loaded plugin. Checked against the raw path before
-	// the settings block below, which rewrites spath as it matches.
-	string pname = plugin_name(path);
-	if (!pname.empty()) {
-		json cfg = plugins.config_of(pname);
-		if (cfg.is_null())
-			// no such plugin loaded; fs_create() is what adds one
-			return -ENOENT;
-		st->st_mode = S_IFREG | 0666;
-		st->st_nlink = 1;
-		st->st_size = cfg.dump().size() + 1;
-		return 0;
+	// a directory per loaded plugin, with its config and settings below.
+	// Checked against the raw path before the settings block below,
+	// which rewrites spath as it matches.
+	{
+		string pname;
+		std::vector<string> rest;
+		if (plugin_split(path, pname, rest)) {
+			json cfg = plugins.config_of(pname);
+			if (cfg.is_null())
+				// no such plugin loaded; fs_create() is what adds one
+				return -ENOENT;
+			if (rest.empty()) {
+				st->st_mode = S_IFDIR | 0755;
+				st->st_nlink = 2;
+				return 0;
+			}
+			if (rest.size() == 1 && rest[0] == "config") {
+				st->st_mode = S_IFREG | 0666;
+				st->st_nlink = 1;
+				st->st_size = cfg.dump().size() + 1;
+				return 0;
+			}
+			json opts = plugins.options_of(pname);
+			const json* n = option_node(opts, rest);
+			if (n == nullptr)
+				return -ENOENT;
+			if (n->is_object()) {
+				st->st_mode = S_IFDIR | 0755;
+				st->st_nlink = 2;
+			} else {
+				st->st_mode = S_IFREG | 0666;
+				st->st_nlink = 1;
+				st->st_size = option_text(*n).size();
+			}
+			return 0;
+		}
 	}
 	int attr = fsLeaf.attr(spath);
 	if (attr > 0) {
@@ -459,6 +534,29 @@ static int readdir_builtin(const char* path_in, void* buf, fuse_fill_dir_t fille
 			filler(buf, n.c_str(), nullptr, 0, static_cast<fuse_fill_dir_flags>(0));
 		return 0;
 	}
+	{
+		string pname;
+		std::vector<string> rest;
+		if (plugin_split(path, pname, rest)) {
+			json opts = plugins.options_of(pname);
+			if (opts.is_null())
+				return -ENOENT;
+			const json* n = option_node(opts, rest);
+			if (n == nullptr || !n->is_object())
+				return -ENOTDIR;
+			if (rest.empty())
+				filler(buf, "config", nullptr, 0, static_cast<fuse_fill_dir_flags>(0));
+			for (const auto& [key, v] : n->items()) {
+				(void)v;
+				if (rest.empty() && key == "config")
+					continue;
+				filler(buf, key.c_str(), nullptr, 0, static_cast<fuse_fill_dir_flags>(0));
+			}
+			filler(buf, ".", nullptr, 0, static_cast<fuse_fill_dir_flags>(0));
+			filler(buf, "..", nullptr, 0, static_cast<fuse_fill_dir_flags>(0));
+			return 0;
+		}
+	}
 	if (strcmp(path, plugin_dir) == 0) {
 		for (const auto& name : plugins.names())
 			filler(buf, name.c_str(), nullptr, 0,
@@ -576,8 +674,12 @@ static int fs_open(const char* path_in, struct fuse_file_info*)
 	}
 	// a loaded plugin's control file; explicit rather than relying on
 	// the SwitchHandler fallback at the end to wave it through
-	if (!plugin_name(path).empty())
-		return 0;
+	{
+		string pname;
+		std::vector<string> rest;
+		if (plugin_split(path, pname, rest))
+			return 0;
+	}
 
 	int bus;
 	extractBusNumber(spath, bus);
@@ -617,17 +719,31 @@ static int fs_read(const char* path_in, char* buf, size_t size, off_t offset,
 		if (res != fs_table::NOT_FOUND)
 			return res;
 	}
-	// reading a plugin file reports that plugin's config
-	string pname = plugin_name(path);
-	if (!pname.empty()) {
-		json cfg = plugins.config_of(pname);
-		if (cfg.is_null())
-			return -ENOENT;
-		string s = cfg.dump() + "\n";
-		if (s.size() > size)
-			return -EINVAL;
-		memcpy(buf, s.c_str(), s.size());
-		return s.size();
+	// reading below a plugin: its config, or one of its settings
+	{
+		string pname;
+		std::vector<string> rest;
+		if (plugin_split(path, pname, rest)) {
+			json cfg = plugins.config_of(pname);
+			if (cfg.is_null())
+				return -ENOENT;
+			string s;
+			if (rest.size() == 1 && rest[0] == "config") {
+				s = cfg.dump() + "\n";
+			} else {
+				json opts = plugins.options_of(pname);
+				const json* n = option_node(opts, rest);
+				if (n == nullptr)
+					return -ENOENT;
+				if (n->is_object())
+					return -EISDIR;
+				s = option_text(*n);
+			}
+			if (s.size() > size)
+				return -EINVAL;
+			memcpy(buf, s.c_str(), s.size());
+			return s.size();
+		}
 	}
 	if (extract_subpath(spath, "switches"))
 		return swHdl.fs_read(spath, buf, size);
@@ -669,24 +785,31 @@ static int fs_write(const char* path_in, const char* buf, size_t size,
 		if (res != fs_table::NOT_FOUND)
 			return res;
 	}
-	// Commands written to a plugin file. "/settings/plugins" itself is a
-	// directory now, so it cannot be the target of a write any more -
-	// the kernel refuses to open a directory for writing.
-	string pname = plugin_name(path);
-	if (!pname.empty()) {
-		string cmd(buf, size);
-		// trim the newline a shell redirect adds
-		while (!cmd.empty() && (cmd.back() == '\n' || cmd.back() == '\r'))
-			cmd.pop_back();
+	// Writes below a plugin: commands to its config file, a value to
+	// one of its settings. "/settings/plugins" and the plugin directories
+	// are directories, the kernel refuses to open those for writing.
+	{
+		string pname;
+		std::vector<string> rest;
+		if (plugin_split(path, pname, rest) && !rest.empty()) {
+			string cmd(buf, size);
+			if (!(rest.size() == 1 && rest[0] == "config")) {
+				int r = plugins.option_set(pname, rest, cmd);
+				return r == 0 ? (int)size : r;
+			}
+			// trim the newline a shell redirect adds
+			while (!cmd.empty() && (cmd.back() == '\n' || cmd.back() == '\r'))
+				cmd.pop_back();
 
-		if (cmd == "rm")
-			return plugins.remove(std::move(pname)) == 0 ? (int)size : -ENOENT;
-		if (cmd == "reload") {
-			plugins.reload();
-			return size;
+			if (cmd == "rm")
+				return plugins.remove(std::move(pname)) == 0 ? (int)size : -ENOENT;
+			if (cmd == "reload") {
+				plugins.reload();
+				return size;
+			}
+			logger.warn("plugins: unknown command '" + cmd + "', expected rm or reload");
+			return -EINVAL;
 		}
-		logger.warn("plugins: unknown command '" + cmd + "', expected rm or reload");
-		return -EINVAL;
 	}
 	int bus;
 	extractBusNumber(spath, bus);
@@ -705,15 +828,10 @@ static int fs_write(const char* path_in, const char* buf, size_t size,
 	return -ENOENT;
 }
 
-/* Creating a file under the plugins directory loads that plugin, which
-   is what makes "touch /settings/plugins/<name>" the way to add one.
-   Nothing else in this filesystem is creatable. */
-static int fs_create(const char* path, mode_t, struct fuse_file_info*)
+/* Loads a plugin: what "touch /settings/plugins/<name>" and
+   "mkdir /settings/plugins/<name>" do */
+static int plugin_add(const string& pname)
 {
-	string pname = plugin_name(path);
-
-	if (pname.empty())
-		return -EPERM;
 	switch (plugins.add(pname)) {
 		case 0:
 			logger.info("plugins: loaded " + pname);
@@ -727,15 +845,8 @@ static int fs_create(const char* path, mode_t, struct fuse_file_info*)
 	}
 }
 
-/* Deleting a plugin file unloads that plugin, making
-   "rm /settings/plugins/<name>" the counterpart of the touch above.
-   Nothing else in this filesystem is removable. */
-static int fs_unlink(const char* path)
+static int plugin_remove(const string& pname)
 {
-	string pname = plugin_name(path);
-
-	if (pname.empty())
-		return -EPERM;
 	if (plugins.remove(pname) != 0)
 		return -ENOENT;
 	logger.info("plugins: unloaded " + pname);
@@ -743,13 +854,66 @@ static int fs_unlink(const char* path)
 	return 0;
 }
 
+/* Creating a file under the plugins directory loads that plugin, which
+   is what makes "touch /settings/plugins/<name>" the way to add one.
+   Below a plugin it starts a setting the plugin allows to be new (a
+   script's options). Nothing else in this filesystem is creatable. */
+static int fs_create(const char* path, mode_t, struct fuse_file_info*)
+{
+	string pname;
+	std::vector<string> rest;
+
+	if (!plugin_split(path, pname, rest))
+		return -EPERM;
+	if (rest.empty())
+		return plugin_add(pname);
+	if (rest.size() == 1 && rest[0] == "config")
+		return -EEXIST;
+	// the value is written next
+	return plugins.option_set(pname, rest, "", true);
+}
+
+/* "mkdir /settings/plugins/<name>" loads a plugin as well, the entry
+   is a directory once it is */
+static int fs_mkdir(const char* path, mode_t)
+{
+	string pname = plugin_name(path);
+
+	if (pname.empty())
+		return -EPERM;
+	return plugin_add(pname);
+}
+
+/* Unloading: "rmdir /settings/plugins/<name>" (rm -r), or unlink for
+   what was "rm <name>" while the entry was a file. Nothing else in this
+   filesystem is removable. */
+static int fs_rmdir(const char* path)
+{
+	string pname = plugin_name(path);
+
+	if (pname.empty())
+		return -EPERM;
+	return plugin_remove(pname);
+}
+
+static int fs_unlink(const char* path)
+{
+	string pname = plugin_name(path);
+
+	if (pname.empty())
+		return -EPERM;
+	return plugin_remove(pname);
+}
+
 /* touch() sets the timestamps right after opening the file; without
    this it would fail on that step even though the plugin did load.
    Timestamps are not stored, so this only has to succeed.
  *
  * It is also how "touch" on an *existing* plugin reloads it: because
- * the file is already there the kernel resolves it and calls open() +
- * utimens(), never create(), so this is the only hook that sees it. */
+ * the entry is already there the kernel resolves it and calls open() +
+ * utimens(), never create(), so this is the only hook that sees it.
+ * Only the plugin's own entry: touching one of its settings reloads
+ * nothing. */
 static int fs_utimens(const char* path, const struct timespec[2], struct fuse_file_info*)
 {
 	string pname = plugin_name(path);
@@ -772,6 +936,8 @@ void fs_init(fuse_operations* fs_ops) {
 	fs_ops->readdir = fs_readdir;
 	fs_ops->create	= fs_create;
 	fs_ops->unlink	= fs_unlink;
+	fs_ops->mkdir	= fs_mkdir;
+	fs_ops->rmdir	= fs_rmdir;
 	fs_ops->utimens = fs_utimens;
 	fs_ops->open	= fs_open;
 	fs_ops->read	= fs_read;
