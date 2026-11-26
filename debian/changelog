@@ -1,3 +1,10 @@
+in10dfs (0.7.2) trixie; urgency=medium
+
+  * Add config options to plugins and scripts in json and on fs
+  * Add sending photos to telegram (by URL e.g.)
+
+ -- INgo Rah <INgo.Rah@gmx.net>  Wed, 26 Nov 2026 10:16:00 +0000
+
 in10dfs (0.7.1) trixie; urgency=medium
 
   * Startup improvements regarding Arduino (1wire monitor)
