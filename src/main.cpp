@@ -96,6 +96,9 @@ static bool arduino_service(Ard_i2c* arduino)
 		logger.warn("Arduino interrupt line stays low");
 		stuck_warned = true;
 	}
+	// not in host mode (started after us, reset by its watchdog) it
+	// keeps the line low for events nobody fetches
+	arduino->mode_check();
 	return true;
 }
 #endif
@@ -190,6 +193,10 @@ void background_worker()
 		}
 		// a shortened wait (Arduino retry) is not a due device poll
 		if (ret == 0 && !retry) {
+			// a restarted Arduino handles the alarms itself again,
+			// with or without its line telling
+			if (arduino)
+				arduino->mode_check();
 			ds.log_event(STATE_POLL, tm);
 			ow.dev_poll();
 			ow.alarm_poll();
@@ -289,8 +296,23 @@ string setup()
 		printf("loading failed %s\n" , e.what());
 		// create default config
 	}
+	// before the first use of the DS2482: the Arduino off the buses
+	Ard_i2c* arduino = (Ard_i2c*)ow.find(0, 9, 0xAD);
+	if (arduino)
+		arduino->takeover(0x10);
 	ow.begin(cli.soft_start);
 	swHdl.begin(&ds);
+	/* The devices keep their power-on status until it is cleared here:
+	   it tells a power-up of the system from a restart of in10dfs.
+	   Handled right away, not with the first alarm or poll. */
+	int power_on = 0;
+	int resets = ow.resets_handle(&power_on);
+	if (power_on)
+		logger.info(std::format("Start after a power-up: {} devices report a power-on reset", power_on));
+	else
+		logger.info("Start with the devices running (no power-on reset reported)");
+	if (resets > power_on)
+		logger.warn(std::format("{} devices were reset by their watchdog before the start", resets - power_on));
 
 	return f;
 }

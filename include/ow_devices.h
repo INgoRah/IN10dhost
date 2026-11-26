@@ -113,6 +113,7 @@ class OwDevices : public IDevices
 		// walks cache.devices calling each dev->poll() on its own
 		// poll_interval-driven cycle (see poll_time()).
 		int dev_poll();
+		int resets_handle(int* power_on = nullptr);
 		// Global, cache.poll-driven alarm polling: the periodic
 		// counterpart to GPIO-interrupt-driven alarm detection, for
 		// setups without (or in addition to) a wired interrupt line.

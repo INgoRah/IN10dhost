@@ -283,6 +283,38 @@ TEST_F(PluginsTest, JsEngineRunsScript)
 	EXPECT_EQ(plugins.action(ACT_DEV_CHANGE, 0, &data), dev_base + 5);
 }
 
+TEST_F(PluginsTest, JsEngineDeviceWarnAndNotify)
+{
+	if (!jsengine_available())
+		GTEST_SKIP() << "built without quickjs";
+
+	/* ow.notify() writes to telegram/send, a file of another plugin.
+	   Here nobody owns it - the real one is libtelegram - so it says
+	   false; a script's own file would be refused as well (a script
+	   cannot be re-entered from its own callback). */
+	write_js(R"JS(
+		function onAction(code, val, data) {
+			if (code == 3)                /* ACT_READY */
+				return ow.notify("up") === false ? 1 : 0;
+			if (code == 10)               /* ACT_DEV_WARN */
+				return (data.kind == "crc_failed" ? 100 : 10) + val
+					+ (data.rom.length > 0 && ow.notify(data.msg) === false ? 1000 : 0);
+			return 0;
+		}
+	)JS");
+	plugins.load(json{ { "jsengine", { { "script", js_path() } } } });
+
+	/* the event carries the bus as val and the payload as an object;
+	   no other plugin acts on it, so the sum is the script's alone */
+	json crc = { { "bus", 3 }, { "type", "ds1820" }, { "rom", "10.0102030405" },
+		{ "kind", "crc" }, { "msg", "scratchpad CRC wrong" } };
+	json failed = { { "bus", 2 }, { "type", "ds2408" }, { "rom", "29.0A" },
+		{ "kind", "crc_failed" }, { "msg", "read failed" } };
+	EXPECT_EQ(plugins.action(ACT_DEV_WARN, 3, &crc), 1000 + 10 + 3);
+	EXPECT_EQ(plugins.action(ACT_DEV_WARN, 2, &failed), 1000 + 100 + 2);
+	EXPECT_EQ(plugins.file_write("telegram/send", "x", 1), -ENOENT);
+}
+
 TEST_F(PluginsTest, JsEngineFromOtherThread)
 {
 	if (!jsengine_available())

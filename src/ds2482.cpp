@@ -71,7 +71,7 @@ typedef struct {
 	uint8_t state;
 	uint8_t data;
 } log_data;
-#define LOG_ENTRIES 4196
+#define LOG_ENTRIES 8000
 RingBuffer<log_data, LOG_ENTRIES> data_log;
 
 /* VCD header (with a 32 char date) and per entry at most

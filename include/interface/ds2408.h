@@ -32,6 +32,9 @@
 /* status bits: the device was reset by its watchdog and lost its
    outputs, levels, threshold and brightness */
 #define STAT_WATCHDOG 0x88
+/* of these only this one: reset by power-on (brown-out, reset pin), no
+   watchdog. The firmware raises no alarm for it. */
+#define STAT_POWER_ON 0x80
 /* register 6: reserved, but used for press time */
 #define PIO_TIME 6
 
