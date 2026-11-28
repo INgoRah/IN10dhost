@@ -77,6 +77,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <map>
 #include <format>
 #include <fstream>
 #include <iostream>
@@ -119,6 +120,9 @@ private:
 		std::filesystem::file_time_type mtime{};
 		/* the files it added, dropped when it is reloaded */
 		std::set<std::string> files;
+		/* its settings, from the config; read with ow.config(), shown
+		   and edited below settings/plugins/jsengine/<name>/options */
+		json options = json::object();
 	};
 	/* in the order of the config, which is the order events reach them;
 	   by pointer, each context's opaque points at its Script */
@@ -501,22 +505,72 @@ private:
 		return JS_NewBool(ctx, ok);
 	}
 
-	/* ow.notify(text): a message to the telegram plugin, by way of its
-	   telegram/send file. False when it is not loaded or not set up. */
-	static JSValue js_notify(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv)
+	/* A write to a file of the telegram plugin. False when it is not
+	   loaded or not set up. */
+	static JSValue notify_file(JSContext* ctx, int argc, JSValueConst* argv, const char* file, bool second)
 	{
 		JsEngine* self = engine_of(ctx);
-		size_t len;
+		size_t len, len2 = 0;
 
 		if (argc < 1 || self == nullptr || self->files == nullptr)
 			return JS_FALSE;
 		const char* msg = JS_ToCStringLen(ctx, &len, argv[0]);
 		if (msg == nullptr)
 			return JS_EXCEPTION;
-		int rc = self->files->file_write("telegram/send", msg, len);
+		std::string data(msg, len);
 		JS_FreeCString(ctx, msg);
+		/* photo: "url\ncaption" */
+		if (second && argc > 1 && !JS_IsUndefined(argv[1])) {
+			const char* cap = JS_ToCStringLen(ctx, &len2, argv[1]);
+			if (cap == nullptr)
+				return JS_EXCEPTION;
+			data += "\n" + std::string(cap, len2);
+			JS_FreeCString(ctx, cap);
+		}
+		int rc = self->files->file_write(file, data.data(), data.size());
 
 		return JS_NewBool(ctx, rc >= 0);
+	}
+
+	/* ow.config(key[, default]): a setting of this script from the
+	   config ("options" of its entry), any JSON value as a JS one; the
+	   default, or undefined, when there is none. Without arguments all
+	   of them as an object. Read at every call, so an edit of the file
+	   below settings/plugins/jsengine/<script>/options is live. */
+	static JSValue js_config(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv)
+	{
+		Script* sc = script_of(ctx);
+		std::string text;
+
+		if (sc == nullptr)
+			return JS_UNDEFINED;
+		if (argc < 1) {
+			text = sc->options.dump();
+		} else {
+			const char* key = JS_ToCString(ctx, argv[0]);
+			if (key == nullptr)
+				return JS_EXCEPTION;
+			auto it = sc->options.find(key);
+			JS_FreeCString(ctx, key);
+			if (it == sc->options.end())
+				return argc > 1 ? JS_DupValue(ctx, argv[1]) : JS_UNDEFINED;
+			text = it->dump();
+		}
+		return JS_ParseJSON(ctx, text.c_str(), text.size(), "<config>");
+	}
+
+	/* ow.notify(text): a message to the telegram plugin, by way of its
+	   telegram/send file. */
+	static JSValue js_notify(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv)
+	{
+		return notify_file(ctx, argc, argv, "telegram/send", false);
+	}
+
+	/* ow.notify_photo(url[, caption]): the telegram plugin fetches the
+	   picture at url and sends it, see telegram/photo. */
+	static JSValue js_notify_photo(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv)
+	{
+		return notify_file(ctx, argc, argv, "telegram/photo", true);
 	}
 
 	static JSValue js_file_remove(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv)
@@ -629,8 +683,12 @@ private:
 			JS_NewCFunction(ctx, js_file_add, "file_add", 2));
 		JS_SetPropertyStr(ctx, owobj, "file_remove",
 			JS_NewCFunction(ctx, js_file_remove, "file_remove", 1));
+		JS_SetPropertyStr(ctx, owobj, "config",
+			JS_NewCFunction(ctx, js_config, "config", 2));
 		JS_SetPropertyStr(ctx, owobj, "notify",
 			JS_NewCFunction(ctx, js_notify, "notify", 1));
+		JS_SetPropertyStr(ctx, owobj, "notify_photo",
+			JS_NewCFunction(ctx, js_notify_photo, "notify_photo", 2));
 		JS_SetPropertyStr(ctx, global, "ow", owobj);
 		JS_FreeValue(ctx, global);
 	}
@@ -871,19 +929,88 @@ public:
 		devices = nullptr;
 	}
 
-	/* "script" for a single one, as configs before there were several */
+	/* A script with settings is {"path", "options"}, one without just
+	   its path. "script" for a single one, as configs before there
+	   were several */
 	json config_get() const override
 	{
 		json j;
+		auto entry = [](const Script& sc) {
+			if (sc.options.empty())
+				return json(sc.path);
+			return json{ { "path", sc.path }, { "options", sc.options } };
+		};
 
-		if (scripts.size() == 1) {
+		if (scripts.size() == 1 && scripts[0]->options.empty()) {
 			j["script"] = scripts[0]->path;
 		} else {
 			j["scripts"] = json::array();
 			for (const auto& sc : scripts)
-				j["scripts"].push_back(sc->path);
+				j["scripts"].push_back(entry(*sc));
 		}
 		return j;
+	}
+
+	/* The name a script has below settings/plugins/jsengine/: its file
+	   name without the extension. A second one of the same name gets
+	   "_2", "_3", ... */
+	std::string script_name(size_t idx) const
+	{
+		std::string base = std::filesystem::path(scripts[idx]->path).stem().string();
+		int n = 1;
+
+		for (size_t i = 0; i < idx; i++)
+			if (std::filesystem::path(scripts[i]->path).stem().string() == base)
+				n++;
+		return n == 1 ? base : base + "_" + std::to_string(n);
+	}
+
+	/* {"door_bell": {"path": ..., "options": {...}}, ...} */
+	json options_get() const override
+	{
+		json j = json::object();
+
+		for (size_t i = 0; i < scripts.size(); i++)
+			j[script_name(i)] = json{ { "path", scripts[i]->path },
+				{ "options", scripts[i]->options } };
+		return j;
+	}
+
+	/* [script, "options", key, ...]: takes effect at once, ow.config()
+	   reads it from here. The path is the file the config names. */
+	int option_set(const std::vector<std::string>& path, const json& value, bool create) override
+	{
+		std::lock_guard<std::recursive_mutex> lock(mtx);
+		Script* sc = nullptr;
+
+		if (path.size() < 2)
+			return -EISDIR;
+		for (size_t i = 0; i < scripts.size(); i++)
+			if (script_name(i) == path[0])
+				sc = scripts[i].get();
+		if (sc == nullptr)
+			return -ENOENT;
+		if (path[1] == "path")
+			return path.size() == 2 ? -EPERM : -ENOENT;
+		if (path[1] != "options")
+			return -ENOENT;
+		if (path.size() == 2)
+			return -EISDIR;
+		json* node = &sc->options;
+		for (size_t i = 2; i < path.size(); i++) {
+			if (!node->is_object())
+				return -ENOENT;
+			if (!node->contains(path[i])) {
+				if (!create)
+					return -ENOENT;
+				(*node)[path[i]] = json(nullptr);
+			}
+			node = &(*node)[path[i]];
+		}
+		if (node->is_object())
+			return -EISDIR;
+		*node = value;
+		return 0;
 	}
 
 	/* "scripts": a list of files, or "script": one. Also the reload
@@ -895,13 +1022,21 @@ public:
 	{
 		std::lock_guard<std::recursive_mutex> lock(mtx);
 		std::vector<std::string> want;
+		/* by path; a script given as a plain path has none */
+		std::map<std::string, json> opts;
 
 		if (rt == nullptr)
 			return;
 		if (j.contains("scripts")) {
-			for (const auto& p : j.at("scripts"))
-				if (p.is_string() && !p.get<std::string>().empty())
+			for (const auto& p : j.at("scripts")) {
+				if (p.is_string() && !p.get<std::string>().empty()) {
 					want.push_back(p.get<std::string>());
+				} else if (p.is_object() && !p.value("path", "").empty()) {
+					want.push_back(p.value("path", ""));
+					if (p.contains("options") && p["options"].is_object())
+						opts[want.back()] = p["options"];
+				}
+			}
 		} else if (!j.value("script", "").empty()) {
 			want.push_back(j.value("script", ""));
 		} else {
@@ -938,6 +1073,11 @@ public:
 					logger->info(std::format("jsengine: stopping {}", sc->path));
 				free_context(*sc);
 			}
+		/* the settings first: a script reads them as it starts */
+		for (auto& sc : next) {
+			auto it = opts.find(sc->path);
+			sc->options = it != opts.end() ? it->second : json::object();
+		}
 		scripts = std::move(next);
 		for (Script* sc : start) {
 			start_script(*sc);

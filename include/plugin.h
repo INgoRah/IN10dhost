@@ -3,6 +3,7 @@
 #include <cerrno>
 #include <filesystem>
 #include <fstream>
+#include <vector>
 #include "nlohmann/json.hpp"
 #include "logger.h"
 #include "interface/devices.h"
@@ -141,6 +142,42 @@ public:
 	// config data set and get...
 	virtual json config_get() const = 0;
 	virtual void config_set(const json& j) = 0;
+
+	/* The settings as the file system shows them below
+	   settings/plugins/<name>/: an object, each member that is an
+	   object is a directory, any other value a file. By default the
+	   config itself; a plugin whose config is not shaped that way (the
+	   scripting plugin: a list of scripts) gives a view of it. */
+	virtual json options_get() const { return config_get(); }
+	/* A write to the file at path (the keys from the top of
+	   options_get()) with value; create when the file is new. 0, or a
+	   negative errno: -ENOENT for a setting the plugin does not have,
+	   -EISDIR for an object, -EINVAL for a value it cannot take. By
+	   default the value replaces the one in config_get() and the result
+	   goes through config_set(). */
+	virtual int option_set(const std::vector<string>& path, const json& value, bool create)
+	{
+		json cfg = config_get();
+		json* node = &cfg;
+
+		if (path.empty())
+			return -EISDIR;
+		for (size_t i = 0; i < path.size(); i++) {
+			if (!node->is_object())
+				return -ENOENT;
+			if (!node->contains(path[i])) {
+				if (!create || i + 1 != path.size())
+					return -ENOENT;
+				return -EPERM;
+			}
+			node = &(*node)[path[i]];
+		}
+		if (node->is_object())
+			return -EISDIR;
+		*node = value;
+		config_set(cfg);
+		return 0;
+	}
 
 	/* A read or write of one of the files added through files, path as
 	   it was added. Return the bytes read (at most size) or taken, or a

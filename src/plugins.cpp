@@ -252,6 +252,77 @@ int Plugins::cleanup()
 /* Loads a plugin that is not loaded yet. Returns 0 on success, -1 when
    the library is missing or failed to load, 1 when it was already
    there (nothing to do). */
+json Plugins::options_of(const string& name)
+{
+	std::lock_guard<std::recursive_mutex> lock(mtx);
+
+	for (auto plugin_ptr : plugins)
+		if (plugin_ptr->name == name) {
+			try {
+				return plugin_ptr->options_get();
+			}
+			catch (const std::exception& e) {
+				logger.error(std::format("plugin {} options failed: {}", name, e.what()));
+			}
+			catch (...) {
+				logger.error(std::format("plugin {} options failed", name));
+			}
+			return json::object();
+		}
+
+	return json();
+}
+
+int Plugins::option_set(const string& name, const std::vector<string>& path,
+	const string& text, bool create)
+{
+	std::lock_guard<std::recursive_mutex> lock(mtx);
+	Plugin* plugin_ptr = nullptr;
+
+	for (auto p : plugins)
+		if (p->name == name)
+			plugin_ptr = p;
+	if (plugin_ptr == nullptr)
+		return -ENOENT;
+	/* the newline a shell redirect adds */
+	string t = text;
+	while (!t.empty() && (t.back() == '\n' || t.back() == '\r'))
+		t.pop_back();
+	try {
+		/* a string stays one, "21941470" must not become a number */
+		const json* cur = nullptr;
+		json opts = plugin_ptr->options_get();
+		cur = &opts;
+		for (const auto& k : path) {
+			if (!cur->is_object() || !cur->contains(k)) {
+				cur = nullptr;
+				break;
+			}
+			cur = &(*cur)[k];
+		}
+		json value;
+		if (create) {
+			/* empty until the value is written next, which then
+			   decides its type */
+			value = json(nullptr);
+		} else if (cur != nullptr && cur->is_string()) {
+			value = t;
+		} else {
+			value = json::parse(t, nullptr, false);
+			if (value.is_discarded())
+				value = t;
+		}
+		return plugin_ptr->option_set(path, value, create);
+	}
+	catch (const std::exception& e) {
+		logger.warn(std::format("plugin {} setting refused: {}", name, e.what()));
+	}
+	catch (...) {
+		logger.warn(std::format("plugin {} setting refused", name));
+	}
+	return -EINVAL;
+}
+
 int Plugins::add(const string& name)
 {
 	std::lock_guard<std::recursive_mutex> lock(mtx);

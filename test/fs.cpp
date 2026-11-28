@@ -1072,24 +1072,37 @@ TEST_F(FsTest, PluginFileAttrAndRead) {
 
 	plugins.add("example");
 
-	// a loaded plugin shows up as a regular file ...
+	// a loaded plugin shows up as a directory ...
 	int res = fs_ops.getattr("/settings/plugins/example", &st, nullptr);
+	EXPECT_EQ(res, 0);
+	EXPECT_TRUE(S_ISDIR(st.st_mode));
+	EXPECT_EQ(fs_ops.open("/settings/plugins/example", nullptr), 0);
+
+	// ... with its config as a file ...
+	res = fs_ops.getattr("/settings/plugins/example/config", &st, nullptr);
 	EXPECT_EQ(res, 0);
 	EXPECT_TRUE(S_ISREG(st.st_mode));
 	EXPECT_GT(st.st_size, 0);
-	EXPECT_EQ(fs_ops.open("/settings/plugins/example", nullptr), 0);
-
-	// ... whose contents are its config
-	res = fs_ops.read("/settings/plugins/example", buf, sizeof(buf), 0, nullptr);
+	res = fs_ops.read("/settings/plugins/example/config", buf, sizeof(buf), 0, nullptr);
 	ASSERT_GT(res, 0);
 	EXPECT_NE(std::string(buf, res).find("enabled"), std::string::npos);
+
+	// ... and a file per setting, a boolean reads as JSON
+	res = fs_ops.getattr("/settings/plugins/example/enabled", &st, nullptr);
+	EXPECT_EQ(res, 0);
+	EXPECT_TRUE(S_ISREG(st.st_mode));
+	res = fs_ops.read("/settings/plugins/example/enabled", buf, sizeof(buf), 0, nullptr);
+	ASSERT_GT(res, 0);
+	EXPECT_EQ(std::string(buf, res), "true\n");
+	// a file is no directory, and there is no setting that is not there
+	EXPECT_EQ(fs_ops.getattr("/settings/plugins/example/enabled/deeper", &st, nullptr), -ENOENT);
+	EXPECT_EQ(fs_ops.getattr("/settings/plugins/example/deeper", &st, nullptr), -ENOENT);
+	EXPECT_EQ(fs_ops.read("/settings/plugins/example/deeper", buf, sizeof(buf), 0, nullptr), -ENOENT);
 
 	// one that is not loaded does not exist
 	res = fs_ops.getattr("/settings/plugins/no_such_plugin", &st, nullptr);
 	EXPECT_EQ(res, -ENOENT);
-	// and neither does anything nested below a plugin
-	res = fs_ops.getattr("/settings/plugins/example/deeper", &st, nullptr);
-	EXPECT_EQ(res, -ENOENT);
+	EXPECT_EQ(fs_ops.getattr("/settings/plugins/no_such_plugin/config", &st, nullptr), -ENOENT);
 }
 
 TEST_F(FsTest, PluginCreateLoadsAndRmUnloads) {
@@ -1106,13 +1119,26 @@ TEST_F(FsTest, PluginCreateLoadsAndRmUnloads) {
 	// touching it again is harmless
 	EXPECT_EQ(fs_ops.create("/settings/plugins/example", 0666, nullptr), 0);
 
-	// writing rm unloads it again, newline from a shell redirect included
-	int res = fs_ops.write("/settings/plugins/example", (char*)"rm\n", 3, 0, nullptr);
+	// writing rm to its config unloads it again, newline from a shell
+	// redirect included
+	int res = fs_ops.write("/settings/plugins/example/config", (char*)"rm\n", 3, 0, nullptr);
 	EXPECT_GT(res, 0);
 	EXPECT_EQ(fs_ops.getattr("/settings/plugins/example", &st, nullptr), -ENOENT);
 
 	// removing it twice reports the second as missing
-	EXPECT_EQ(fs_ops.write("/settings/plugins/example", (char*)"rm", 2, 0, nullptr), -ENOENT);
+	EXPECT_EQ(fs_ops.write("/settings/plugins/example/config", (char*)"rm", 2, 0, nullptr), -ENOENT);
+
+	// mkdir loads it as well, rmdir (rm -r) unloads it
+	EXPECT_EQ(fs_ops.mkdir("/settings/plugins/example", 0755), 0);
+	EXPECT_EQ(fs_ops.getattr("/settings/plugins/example", &st, nullptr), 0);
+	EXPECT_EQ(fs_ops.rmdir("/settings/plugins/example"), 0);
+	EXPECT_EQ(fs_ops.getattr("/settings/plugins/example", &st, nullptr), -ENOENT);
+	EXPECT_EQ(fs_ops.rmdir("/settings/plugins/example"), -ENOENT);
+	// nothing else can be made or removed
+	EXPECT_EQ(fs_ops.mkdir("/settings/other", 0755), -EPERM);
+	EXPECT_EQ(fs_ops.mkdir("/settings/plugins", 0755), -EPERM);
+	EXPECT_EQ(fs_ops.rmdir("/settings/plugins/example/config"), -EPERM);
+	EXPECT_EQ(fs_ops.rmdir("/settings/poll"), -EPERM);
 
 	plugins.add("example"); // restore for the other tests
 }
@@ -1181,11 +1207,17 @@ TEST_F(FsTest, PluginWriteErrors) {
 	LogLevel lvl = logger.get_level();
 	logger.set_level(LogLevel::NONE);
 	// only rm and reload are understood
-	EXPECT_EQ(fs_ops.write("/settings/plugins/example", (char*)"wat", 3, 0, nullptr), -EINVAL);
+	EXPECT_EQ(fs_ops.write("/settings/plugins/example/config", (char*)"wat", 3, 0, nullptr), -EINVAL);
 	logger.set_level(lvl);
 
 	// reload is accepted
-	EXPECT_GT(fs_ops.write("/settings/plugins/example", (char*)"reload\n", 7, 0, nullptr), 0);
+	EXPECT_GT(fs_ops.write("/settings/plugins/example/config", (char*)"reload\n", 7, 0, nullptr), 0);
+	// a setting is written as a value; the example takes any
+	EXPECT_EQ(fs_ops.write("/settings/plugins/example/enabled", (char*)"false\n", 6, 0, nullptr), 6);
+	// one the plugin does not have, and a directory, are refused
+	EXPECT_EQ(fs_ops.write("/settings/plugins/example/nothing", (char*)"1", 1, 0, nullptr), -ENOENT);
+	EXPECT_EQ(fs_ops.create("/settings/plugins/example/nothing", 0666, nullptr), -EPERM);
+	EXPECT_EQ(fs_ops.create("/settings/plugins/example/config", 0666, nullptr), -EEXIST);
 
 	// creating is only allowed under the plugins directory
 	EXPECT_EQ(fs_ops.create("/settings/poll", 0666, nullptr), -EPERM);
@@ -1194,6 +1226,79 @@ TEST_F(FsTest, PluginWriteErrors) {
 	logger.set_level(LogLevel::NONE);
 	EXPECT_EQ(fs_ops.create("/settings/plugins/no_such_plugin", 0666, nullptr), -ENOENT);
 	logger.set_level(lvl);
+}
+
+// The scripts of the scripting plugin are directories of their own
+// below it, with the options of the config as files.
+TEST_F(FsTest, PluginScriptOptions) {
+	if (!std::filesystem::exists(exec_path() / "libjsengine.so"))
+		GTEST_SKIP() << "built without quickjs";
+	struct stat st;
+	char buf[256];
+	std::vector<std::string> seen;
+	auto record = [](void* b, const char* name, const struct stat*,
+					 off_t, enum fuse_fill_dir_flags) {
+		static_cast<std::vector<std::string>*>(b)->push_back(name);
+		return 0;
+	};
+	auto rd = [&](const char* path) {
+		int n = fs_ops.read(path, buf, sizeof(buf), 0, nullptr);
+		return n < 0 ? std::string("E") + std::to_string(-n) : std::string(buf, n);
+	};
+	std::string js = (std::filesystem::current_path() / "opts_test.js").string();
+	std::ofstream(js) << "function onAction(c, v, d) { return c == 3 ? ow.config('quiet', 1) : 0; }\n";
+
+	plugins.remove("jsengine");
+	plugins.load(json{ { "jsengine", { { "scripts", json::array({
+		json{ { "path", js }, { "options", { { "quiet", 5 }, { "caption", "Bell" } } } } }) } } } });
+
+	// a directory per script, its path and options in it
+	ASSERT_EQ(fs_ops.getattr("/settings/plugins/jsengine/opts_test", &st, nullptr), 0);
+	EXPECT_TRUE(S_ISDIR(st.st_mode));
+	ASSERT_EQ(fs_ops.readdir("/settings/plugins/jsengine/opts_test/options", &seen, record,
+		0, nullptr, (enum fuse_readdir_flags)0), 0);
+	EXPECT_NE(std::find(seen.begin(), seen.end(), "quiet"), seen.end());
+	EXPECT_NE(std::find(seen.begin(), seen.end(), "caption"), seen.end());
+	EXPECT_EQ(rd("/settings/plugins/jsengine/opts_test/path"), js + "\n");
+	EXPECT_EQ(rd("/settings/plugins/jsengine/opts_test/options/quiet"), "5\n");
+	EXPECT_EQ(rd("/settings/plugins/jsengine/opts_test/options/caption"), "Bell\n");
+	// the scripts the config knows are all it lists
+	EXPECT_EQ(fs_ops.getattr("/settings/plugins/jsengine/other", &st, nullptr), -ENOENT);
+
+	// the script reads it with ow.config(), 5 and not the default 1
+	int base = plugins.action(ACT_READY);
+	EXPECT_EQ(base % 100, 5 % 100);
+
+	// a write takes effect at once; a number stays one, text a string
+	EXPECT_EQ(fs_ops.write("/settings/plugins/jsengine/opts_test/options/quiet", (char*)"9\n", 2, 0, nullptr), 2);
+	EXPECT_EQ(plugins.action(ACT_READY), base + 4);
+	EXPECT_EQ(rd("/settings/plugins/jsengine/opts_test/options/quiet"), "9\n");
+	EXPECT_EQ(fs_ops.write("/settings/plugins/jsengine/opts_test/options/caption", (char*)"123", 3, 0, nullptr), 3);
+	EXPECT_EQ(plugins.config_of("jsengine")["scripts"][0]["options"]["caption"], "123");
+
+	// a new one is created, then written
+	EXPECT_EQ(fs_ops.create("/settings/plugins/jsengine/opts_test/options/more", 0666, nullptr), 0);
+	EXPECT_EQ(fs_ops.write("/settings/plugins/jsengine/opts_test/options/more", (char*)"[1,2]", 5, 0, nullptr), 5);
+	EXPECT_EQ(plugins.config_of("jsengine")["scripts"][0]["options"]["more"], json::array({1, 2}));
+
+	// not the path, not a directory, not a setting of another script
+	EXPECT_EQ(fs_ops.write("/settings/plugins/jsengine/opts_test/path", (char*)"x", 1, 0, nullptr), -EPERM);
+	EXPECT_EQ(fs_ops.write("/settings/plugins/jsengine/opts_test/options", (char*)"x", 1, 0, nullptr), -EISDIR);
+	EXPECT_EQ(fs_ops.write("/settings/plugins/jsengine/nothing/options/x", (char*)"x", 1, 0, nullptr), -ENOENT);
+	EXPECT_EQ(fs_ops.create("/settings/plugins/jsengine/opts_test/other/x", 0666, nullptr), -ENOENT);
+
+	// and what is saved: the options go with the script
+	json saved = plugins.save();
+	EXPECT_EQ(saved["jsengine"]["scripts"][0]["options"]["quiet"], 9);
+	EXPECT_EQ(saved["jsengine"]["scripts"][0]["path"], js);
+
+	// a plain path without options is kept as it was written
+	plugins.remove("jsengine");
+	plugins.load(json{ { "jsengine", { { "script", js } } } });
+	EXPECT_EQ(plugins.config_of("jsengine"), (json{ { "script", js } }));
+	EXPECT_EQ(plugins.action(ACT_READY) % 100, 1);
+	plugins.remove("jsengine");
+	std::filesystem::remove(js);
 }
 
 TEST_F(FsTest, SettingsWriteOutOfRange) {

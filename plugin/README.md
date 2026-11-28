@@ -7,16 +7,32 @@ bundled `jsengine` plugin.
 
 ## Managing plugins through the filesystem
 
-Every loaded plugin appears as a file under `settings/plugins` in the
-mounted filesystem, and the usual filesystem verbs manage them:
+Every loaded plugin is a directory under `settings/plugins`. In it, the
+`config` file is the plugin's config as JSON, and each setting of that
+config is a file of its own:
 
 ```sh
-ls  /mnt/1wire/settings/plugins          # what is loaded
-cat /mnt/1wire/settings/plugins/jsengine # that plugin's config
+ls  /mnt/1wire/settings/plugins                 # what is loaded
+ls  /mnt/1wire/settings/plugins/telegram        # config token chat_id ...
+cat /mnt/1wire/settings/plugins/telegram/config # all of it, as JSON
+cat /mnt/1wire/settings/plugins/telegram/min_interval_ms
+echo 2000 > /mnt/1wire/settings/plugins/telegram/min_interval_ms
+```
 
-touch /mnt/1wire/settings/plugins/example    # load libexample.so
-touch /mnt/1wire/settings/plugins/example    # already loaded -> reload
-rm    /mnt/1wire/settings/plugins/example    # unload
+A write goes to the plugin's `config_set()` at once. A setting that is
+text stays text (a chat id `21941470` is not turned into a number), any
+other is read as JSON (`42`, `true`, `[1,2]`). A setting a plugin does
+not have is refused. Like everything else it is only kept on restart
+once the config is saved, see `settings/save`.
+
+Loading and unloading:
+
+```sh
+mkdir /mnt/1wire/settings/plugins/example       # load libexample.so
+touch /mnt/1wire/settings/plugins/example       # same; loaded already -> reload
+rmdir /mnt/1wire/settings/plugins/example       # unload (rm -r)
+echo reload > /mnt/1wire/settings/plugins/example/config   # reload all plugins
+echo rm      > /mnt/1wire/settings/plugins/example/config  # same as rmdir
 ```
 
 `touch` on a name that is not loaded yet loads it; on one that already
@@ -25,17 +41,11 @@ changed: the loader keeps a content hash of each `.so`, so a redeploy
 that produced identical bytes is a no-op, and a plugin whose library is
 unchanged just gets its config handed back, so a plugin can re-read
 external files. A reloaded plugin keeps its config across the swap.
+Touching one of its settings reloads nothing.
 
-`jsengine` does not need this for its script: it notices an edited
-script by itself, see below.
-
-Writing to a plugin file works too, and `reload` there reloads every
-plugin rather than just the one:
-
-```sh
-echo reload > /mnt/1wire/settings/plugins/jsengine
-echo rm     > /mnt/1wire/settings/plugins/example   # same as rm
-```
+`jsengine` does not need this for its scripts: it notices an edited
+script by itself, see below. Its scripts are directories of their own,
+see [script options](#script-options).
 
 Plugins listed in the config file (`data.json`) are loaded at startup:
 
@@ -50,6 +60,11 @@ The key is the plugin name; the daemon loads `lib<name>.so`, looking
 first next to the executable and then in `/opt/lib/in10dfs`. The value
 is handed to the plugin's `config_set()` and comes back out of
 `config_get()` when the config is saved.
+
+A C++ plugin whose config is not a flat object can give the file system
+a view of it with `options_get()` and take writes in `option_set()`
+(see plugin.h); the defaults show `config_get()` and write through
+`config_set()`.
 
 ## Writing a JavaScript plugin
 
@@ -84,6 +99,7 @@ Available to scripts:
 
 | call | does |
 | --- | --- |
+| `ow.config(key[, default])` | a setting of this script, see [script options](#script-options); without arguments all of them as an object |
 | `ow.log(msg)` | write to the daemon log |
 | `ow.pio_set(rom, byte)` | write all ds2408 PIOs at once (raw output latch byte) |
 | `ow.pin_switch(rom, pin, state[, level])` | switch one ds2408 pin; `state` is `ow.ON`, `ow.OFF` or `ow.TOGGLE`, `level` is used by a PWM pin |
@@ -92,6 +108,7 @@ Available to scripts:
 | `ow.threshold_set(rom, value)` | brightness 0..255 above which a ds2408's timed lights switch |
 | `ow.extport_set(rom, ddr, port)` | set a ds2408's extended port (experimental, owSlave PORTC/DDRC; PC0..PC5) |
 | `ow.notify(text)` | queue a message for the [telegram](#telegram) plugin, `false` if it is not loaded or not set up; returns at once, the sending happens in a thread of its own |
+| `ow.notify_photo(url[, caption])` | the telegram plugin downloads the picture at `url` (e.g. a camera snapshot) and sends it with the optional caption; if the download fails the caption goes out as text. `false` if telegram is not loaded or set up |
 | `ow.sleep(ms)` | wait 0..100 ms, e.g. for a pulse between two calls; counts towards the 200 ms limit |
 | `ow.temp(rom)` | read a ds1820 temperature, `null` if that rom is not one |
 | `ow.volt(rom, channel)` | read a cached ds2450 voltage |
@@ -336,9 +353,50 @@ echo "front door opened" > /mnt/1wire/telegram/send
 cat /mnt/1wire/telegram/send     # sent / failed / dropped / queued
 ```
 
-From a script: `ow.notify("front door opened")`. A failed send is
+From a script: `ow.notify("front door opened")`.
+
+A picture goes through `telegram/photo`: the first line is the URL, an
+optional second line the caption; from a script `ow.notify_photo(url,
+caption)`. The plugin downloads it (http or https, redirects are not
+followed, at most 10 MB) and uploads it. `"photo_insecure": true` in
+the config skips the certificate check of that download only, for a
+camera with a self-signed certificate.
+
+```sh
+printf 'http://cam/snap.jpg\nDoorbell' > /mnt/1wire/telegram/photo
+```
+
+ A failed send is
 retried a few times and then dropped with a warning in the log.
 
 To get device problems in Telegram, load [warnings.js](warnings.js) with
 the jsengine: `crc_failed` goes out at once, the noisier `crc` at most
 once per device and ten minutes, with a count of the repeats.
+
+## Script options
+
+A script entry in the jsengine config can carry options of its own:
+
+```json
+"jsengine": { "scripts": [
+    "/opt/lib/in10dfs/astro.js",
+    { "path": "/opt/lib/in10dfs/door_bell.js",
+      "options": { "camera_url": "https://cam/snap", "caption": "Doorbell", "quiet": 10 } }
+] }
+```
+
+A plain path and an object may be mixed; a single script without
+options is still saved as `"script": "<path>"`. The script reads them
+with `ow.config("quiet", 10)`: the second argument is the default for an
+option that is not set. Each script is a directory below the plugin
+named like its file without `.js` (`_2`, `_3` for a repeated name):
+
+```sh
+ls   /mnt/1wire/settings/plugins/jsengine/door_bell          # path options
+cat  /mnt/1wire/settings/plugins/jsengine/door_bell/options/quiet
+echo 30 > /mnt/1wire/settings/plugins/jsengine/door_bell/options/quiet
+touch    /mnt/1wire/settings/plugins/jsengine/door_bell/options/new   # then write it
+```
+
+A write is live: the script's next `ow.config()` sees it, without a
+reload. `path` is read only.
