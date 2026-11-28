@@ -266,6 +266,7 @@ void Ard_i2c::takeover(int mode)
 	} else {
 		logger.info(std::format("Arduino was in mode {:#x}, now {:#x}: waiting {} ms for it to leave the buses",
 			cur, mode, ARD_HANDOVER_MS));
+		// coverity[sleep] - bus mutex must be held
 		usleep(ARD_HANDOVER_MS * 1000);
 	}
 #else
